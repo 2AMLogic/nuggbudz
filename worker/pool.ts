@@ -10,17 +10,21 @@ import {
   type ServerMessage,
 } from '../shared/protocol'
 import { type Env, intVar } from './env'
+import { writeSettledMatch } from './ledger'
 
 /**
  * Who is on the other end of a socket.
  *
- * Both fields are set by the Worker from the caller's session at upgrade time
- * and never from a client message, so a connection cannot rename itself.
+ * Every field here is set by the Worker from the caller's session and the
+ * server-derived cell at upgrade time, and never from a client message, so a
+ * connection cannot rename itself or claim a different market.
  */
 interface Principal {
   connId: string
   userId: string
   name: string
+  /** Geohash cell this connection was routed to. */
+  cell: string
 }
 
 interface BuyerIdentity extends Principal {
@@ -83,12 +87,13 @@ export class NuggPool extends DurableObject<Env> {
     this.ctx.acceptWebSocket(server)
 
     const connId = crypto.randomUUID()
-    this.setState(server, { status: 'idle', connId, userId, name })
+    const cell = params.get('cell') ?? ''
+    this.setState(server, { status: 'idle', connId, userId, name, cell })
 
     this.send(server, {
       type: 'welcome',
       protocol: PROTOCOL_VERSION,
-      cell: params.get('cell') ?? '',
+      cell,
       waiting: this.waitingStates().length,
       user: { id: userId, name },
     })
@@ -152,6 +157,7 @@ export class NuggPool extends DurableObject<Env> {
       // The authenticated name, not anything the client sent.
       userId: state.userId,
       name: state.name,
+      cell: state.cell,
       dealId,
       lat,
       lng,
@@ -189,11 +195,12 @@ export class NuggPool extends DurableObject<Env> {
     const ordererIsSelf = decision.orderer.id === identity.connId
     const selfIdentity = identity
     const buddyIdentity = identityOf(buddy.state)
+    const createdAt = Date.now()
 
     await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, {
       matchId,
       dealId,
-      createdAt: Date.now(),
+      createdAt,
       ordererConnId: decision.orderer.id,
       receiverConnId: decision.receiver.id,
       distanceMeters: decision.distanceMeters,
@@ -223,6 +230,24 @@ export class NuggPool extends DurableObject<Env> {
       settlement,
       buddy: { name: selfIdentity.name, distanceMeters: decision.distanceMeters },
     })
+
+    // There is no separate pickup-confirmation step yet (that is #5) — until
+    // then, a match is the closest thing to "confirmed" this system has, so
+    // settlement happens right alongside it. writeSettledMatch swallows its
+    // own failures, so a D1 outage never rolls back or delays the match above.
+    const ordererName = ordererIsSelf ? selfIdentity.name : buddyIdentity.name
+    const receiverName = ordererIsSelf ? buddyIdentity.name : selfIdentity.name
+    await writeSettledMatch(this.env.DB, {
+      matchId,
+      dealId,
+      cell: identity.cell,
+      settlement,
+      distanceMeters: decision.distanceMeters,
+      createdAt,
+      settledAt: createdAt,
+      ordererName,
+      receiverName,
+    })
   }
 
   private handleCancel(ws: WebSocket): void {
@@ -237,6 +262,7 @@ export class NuggPool extends DurableObject<Env> {
       connId: state.connId,
       userId: state.userId,
       name: state.name,
+      cell: state.cell,
     })
   }
 
@@ -319,8 +345,8 @@ export class NuggPool extends DurableObject<Env> {
 
 /** Strip connection status off a state, leaving just who and where the buyer is. */
 function identityOf(state: BuyerIdentity): BuyerIdentity {
-  const { connId, userId, name, dealId, lat, lng, joinedAt } = state
-  return { connId, userId, name, dealId, lat, lng, joinedAt }
+  const { connId, userId, name, cell, dealId, lat, lng, joinedAt } = state
+  return { connId, userId, name, cell, dealId, lat, lng, joinedAt }
 }
 
 function toCandidate(identity: BuyerIdentity): Candidate {

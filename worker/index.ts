@@ -25,6 +25,32 @@ app.get('/api/deals', (c) =>
   }),
 )
 
+/**
+ * Platform-wide totals off the D1 ledger, not the live Durable Objects — the
+ * whole point of settling to D1 is that this can answer without waking a
+ * single cell. Every number is computed in SQL rather than summed in JS, so
+ * the totals cannot drift from what a direct query against `matches` /
+ * `match_buyers` would show.
+ */
+app.get('/api/stats', async (c) => {
+  const row = await c.env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM matches WHERE settled_at IS NOT NULL) AS splits_settled,
+       (SELECT COALESCE(SUM(platform_fee_cents), 0) FROM matches WHERE settled_at IS NOT NULL)
+         AS fees_collected_cents,
+       (SELECT COALESCE(SUM(b.solo_baseline_cents - b.pay_cents), 0)
+          FROM match_buyers b
+          JOIN matches m ON m.match_id = b.match_id
+          WHERE m.settled_at IS NOT NULL) AS total_saved_cents`,
+  ).first<{ splits_settled: number; fees_collected_cents: number; total_saved_cents: number }>()
+
+  return c.json({
+    splitsSettled: row?.splits_settled ?? 0,
+    totalSavedCents: row?.total_saved_cents ?? 0,
+    feesCollectedCents: row?.fees_collected_cents ?? 0,
+  })
+})
+
 app.get('/api/deals/:dealId/quote', (c) => {
   const deal = findDeal(c.req.param('dealId'))
   if (deal === undefined) return c.json({ error: 'unknown deal' }, 404)

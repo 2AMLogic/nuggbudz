@@ -14,7 +14,9 @@
       "!.loom",
       "!.claude",
       "!.codex",
-      "!.loom-local"
+      "!.loom-local",
+      "!.anvil",
+      "!.agents"
     ]
   },
   "formatter": {

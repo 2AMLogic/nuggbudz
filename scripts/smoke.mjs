@@ -116,8 +116,8 @@ check('health ok', health.ok === true, JSON.stringify(health))
 
 const { deals } = await fetch(`${BASE}/api/deals`).then((r) => r.json())
 check(
-  'deals catalogue returned',
-  Array.isArray(deals) && deals.length === 3,
+  'deals catalogue returned (McDonald-only)',
+  Array.isArray(deals) && deals.length === 1,
   `${deals?.length} deals`,
 )
 const mcd = deals.find((d) => d.id === 'mcd-nuggets-20')

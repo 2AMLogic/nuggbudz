@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { DEALS, findDeal } from '../shared/deals'
+import { ACTIVE_DEALS, findDeal } from '../shared/deals'
 import { analyzeSpread, settle } from '../shared/economics'
 import { geohash } from '../shared/geo'
 import { PROTOCOL_VERSION } from '../shared/protocol'
@@ -17,9 +17,11 @@ app.get('/api/health', (c) => c.json({ ok: true, service: 'nuggbudz', protocol: 
 app.route('/api/auth', authRoutes)
 
 /** The deal catalogue, each with its settlement and the spread it arbitrages. */
+// Only the deals the app currently offers — see INACTIVE_DEAL_IDS in
+// shared/deals.ts. The catalogue itself stays whole.
 app.get('/api/deals', (c) =>
   c.json({
-    deals: DEALS.map((deal) => ({
+    deals: ACTIVE_DEALS.map((deal) => ({
       ...deal,
       settlement: settle(deal),
       spread: analyzeSpread(deal),

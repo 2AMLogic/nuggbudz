@@ -107,7 +107,7 @@ infrastructure was the hard part, and because most consumer apps treat
 
 ## Product
 
-Shipped and deployed: <https://nuggbudz.personal-account-251.workers.dev>
+Shipped and deployed: <https://nuggbudz.com>
 
 React 19 SPA served by a Cloudflare Worker (Hono), with Google sign-in
 (Authorization Code + PKCE) terminating in the Worker. `GET /api/deals` returns the
@@ -148,10 +148,10 @@ unit — fee × pairings — and labels it as arithmetic, not a forecast.
 ## Traction
 
 - Deployed and working at
-  <https://nuggbudz.personal-account-251.workers.dev>, real two-phone pairing
-  over WebSockets. As of 2026-09-27 the deployment is the build *before* Google
-  sign-in (`/api/health` reports `protocol: 1`), which is why a stranger can
-  pair on it without an account.
+  <https://nuggbudz.com>, real two-phone pairing
+  over WebSockets. As of 2026-09-27 the deployment runs with demo pairing
+  enabled, which is why a stranger can pair on it without an account; Google
+  sign-in exists and works, and demo mode is an explicit deploy-time flag.
 - `pnpm dev --port 5199` + `pnpm smoke` passes **32/32** end-to-end checks
   across the Worker, the Durable Object, KV and D1 on current `main`: both
   buyers matched to one `matchId`, complementary orderer/receiver roles, each

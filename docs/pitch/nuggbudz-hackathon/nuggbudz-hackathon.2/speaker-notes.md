@@ -151,7 +151,7 @@ passes the principal down; a `name` on the wire is ignored.)
 
 ## 10. Deployed, and verified end to end
 
-**Talk track**: Deployed, and 68/68 end-to-end checks pass across the Worker,
+**Talk track**: Deployed, and every end-to-end check passes across the Worker,
 the Durable Object, KV and D1 — two independent sockets in one cell,
 complementary roles, identical settlement, a buddy name that comes from the
 session rather than the wire, a buyer outside the radius left waiting, a
@@ -162,32 +162,36 @@ ones that matter on a borrowed phone: a socket that sends no coordinates at all
 still gets a cell and still pairs, because the location comes from the edge.
 Then say the fourth bullet: no users, no revenue, no pilot.
 
-**Anticipated questions**: Is that against production? (The 68-check run is
+**Anticipated questions**: Is that against production? (The full run is
 against a full local stack — `pnpm dev` plus the real bindings — because the
 pool socket now requires a session and `pnpm smoke` seeds sessions into the
-local KV namespace. The deployment is behind `main`, on the pre-sign-in build,
+local KV namespace. The deployment is behind `main`,
 and it passed its own 22-check run today. Both are in `refs/smoke-runs.md`.)
-Who built it? (One person, in the hackathon window.)
+Who built it? (An agent-orchestrated pipeline, in the hackathon window — Curator, Builder, Judge, Doctor and Champion, merging as `rjwalters` and `turian`.)
 
-**Backing data**: `refs/smoke-runs.md`; the count is derived from
-`scripts/smoke.mjs` by `countSmokeChecks()`.
+**Backing data**: `refs/smoke-runs.md`. The slide names no count on purpose
+— see "Why the deck does not quote a check count" there.
 
 ## 11. Live demo — two phones, one cell
 
 **Talk track**: Run Plan A — judges open the URL on their own phones and pair
 with us. Strongest version, because it is their device and the deployed build
-predates sign-in, so there is no account to create.
+runs with demo pairing enabled, so there is no account to create.
 
 **Fallback script, in order**:
 
 1. **Plan A** — judges' phones on venue wifi. Both join, both pair, read the
    settlement off the screen.
 2. **Plan B** — our two phones on a personal hotspot. Same flow.
-3. **Plan C** — geolocation denied or unavailable: the app falls back to a fixed
-   demo cell and says so on screen (`src/hooks/useCoords.ts`). The pairing is
-   real; only the coordinate is stipulated. Narrate that out loud — a hackathon
-   venue is exactly where GPS dies, and pretending the fix is real is the one
-   thing that would cost the audience's trust.
+3. **Plan C** — geolocation denied or unavailable: nothing to recover from, and
+   nothing to click. There is no permission prompt in the pairing flow at all;
+   the Worker places each socket from Cloudflare's edge geo, and from a fixed
+   demo cell when there is no usable one (`shared/location.ts`). The screen names
+   which of the three rungs placed you, and only the opt-in one is ever called
+   exact. The pairing is real; on the last rung only the coordinate is
+   stipulated. Narrate that out loud — a hackathon venue is exactly where GPS
+   dies, and pretending the fix is real is the one thing that would cost the
+   audience's trust.
 4. **Plan D** — no network at all: read the recorded runs in
    `refs/smoke-runs.md` off this deck. Dated, reproducible, and they assert the
    same settlement the slides quote.

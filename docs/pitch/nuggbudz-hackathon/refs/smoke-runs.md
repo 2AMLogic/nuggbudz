@@ -1,10 +1,10 @@
 # Source of truth — end-to-end runs
 
-The shipped slide's only quantitative claim is a run recorded here. Run 4 is the
-one the slide quotes; the earlier runs are kept as they were recorded, because the
-deployed build and `main` were not the same commit, and because the check count
-has grown at every step. No run above is edited after the fact — a superseded
-count is history, not a mistake to tidy away.
+The shipped slide claims every end-to-end check passes and names no count (#46);
+these are the runs behind that claim. Run 4 is the most recent, and the earlier
+runs are kept exactly as they were recorded — the deployed build and `main` were
+not the same commit, and the count has grown at every step. No run is edited
+after the fact: a superseded count is history, not a mistake to tidy away.
 
 ## Run 1 — current `main` (the pickup handshake landed), full local stack
 
@@ -88,9 +88,9 @@ ALL CHECKS PASSED
 BASE=https://nuggbudz.personal-account-251.workers.dev pnpm smoke
 ```
 
-Run 2026-09-27 against the deployment at commit `32dad69`, which is the build
-currently serving the URL (`/api/health` reports `protocol: 1`; the auth routes
-404 because that build predates them). **22/22 checks passed**, including: the
+Run 2026-09-27 against the deployment at commit `32dad69`, which was the build
+serving the URL at the time of this run (`/api/health` reported `protocol: 1`;
+the auth routes 404'd because that build predated them). **22/22 checks passed**, including: the
 catalogue served with settlement and spread computed by `shared/economics.ts`;
 two independent WebSocket clients in cell `9q8znb` paired into one `matchId`
 with complementary roles; the longest waiter made orderer; each side charged
@@ -194,7 +194,7 @@ than the demo origin's `9q8znb`). Deleting those two fields from that file and
 restarting was run again and reported `demo` with cell `9q8znb`, all 64 checks
 still passing — which is the local-dev rung, and the reason it exists.
 
-## Run 4 — the merge with the cell map (the run the slide quotes), full local stack
+## Run 4 — the merge with the cell map, full local stack
 
 ```bash
 pnpm dev --port 5225                          # in one shell
@@ -205,16 +205,19 @@ Port 5225 rather than 5199 because other dev servers were up on this machine;
 `BASE` is the knob. This is the first run against both branches at once: the
 promptless-location work of run 3 (64 checks) merged with the cell map's
 roster-broadcast checks that landed on `main` (61 checks). Neither number
-survives the merge — the union is 68, which is what the slide now says and what
-`countSmokeChecks()` derives from the merged `scripts/smoke.mjs`. The four new
-assertions over run 3 are the last four below: a cell-wide buddy roster, a fresh
-broadcast to buyers already queued when someone new joins, and that the positions
-in that broadcast are quantized rather than exact.
+survives the merge — the union is 68, which is the whole reason the slide stopped
+naming one. The four new assertions over run 3 are the last four below: a
+cell-wide buddy roster, a fresh broadcast to buyers already queued when someone
+new joins, and that the positions in that broadcast are quantized rather than
+exact.
 
 `locationSource: edge` again, from miniflare's cached `cf` — cell `9q8yyk`, the
 same rung run 3 recorded.
 
-Output, 2026-09-27, at the merge of `076de8d` into `5050eaf`:
+Output, 2026-09-27, on `feature/issue-34` merged with `main` at `83adc72`. The
+later `main` commits pulled in after this run touched only the deck and the
+ledger, not `scripts/smoke.mjs`, and the run was repeated on the final tree with
+the same result:
 
 ```
 PASS  health ok — {"ok":true,"service":"nuggbudz","protocol":4,"demoPairing":false}
@@ -306,18 +309,24 @@ dispute deadline instead of booking a row.
 are no users. Two scripted clients are not two hungry strangers, and the deck
 must not present this as traction beyond "the system works".
 
-## Why the deck quotes a check count
+## Why the deck does not quote a check count
 
-`68/68` is the count of `check()` assertions in `scripts/smoke.mjs`, counted
-from the source by `countSmokeChecks()` in `scripts/deck-ledger.ts`. Adding an
-assertion changes the count, which fails `test/deck.test.ts` until the slide is
-updated — the same drift guard the money figures get. The count grew 22 -> 32
-when Google sign-in landed, 32 -> 57 when the two-sided pickup handshake landed,
-57 -> 61 when the cell map's roster-broadcast checks landed, and 61 -> 68 when
-pairing stopped asking for location permission; every time the deck was corrected
-by that failure rather than by anyone noticing. The 57 figure is the one caught by
-2am-nuggbudz#26: #18 added the guard and #22 added the assertions, neither branch
-was red on its own, and `main` went red on the merge. The 68 figure is the same
-shape one merge later — the roster branch read 61 and the promptless-location
-branch read 64, each correct against its own tree and neither correct against
-both, so the number only settled once they were merged and re-counted.
+The slide used to print `N/N`, where N was the count of `check()` assertions in
+`scripts/smoke.mjs`, counted from the source by `countSmokeChecks()` in
+`scripts/deck-ledger.ts`, and `test/deck.test.ts` failed until the slide matched.
+The count grew 22 -> 32 when Google sign-in landed, 32 -> 57 when the two-sided
+pickup handshake landed, and 57 -> 61 when the cell map's roster-broadcast
+checks landed. That one line had to be hand-edited by every PR touching
+`scripts/smoke.mjs`, so concurrent branches conflicted on it or, worse, bumped
+it to the same wrong number and merged clean: 2am-nuggbudz#26 is the case where
+#18 added the guard and #22 added the assertions, neither branch was red on its
+own, and `main` went red on the merge.
+
+The slide now says every end-to-end check passes, and the test asserts only
+that the claim is there and that no count is pinned beside it (#46). The live
+count is whatever `pnpm smoke` prints.
+
+This merge is the last data point for why: `main` read 61 and the
+promptless-location branch read 64, each correct against its own tree, and the
+union turned out to be 68 — a number neither branch could have typed. The count
+is measured, never chosen, which is exactly why it does not belong on a slide.

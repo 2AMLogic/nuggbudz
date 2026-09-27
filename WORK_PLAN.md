@@ -8,6 +8,9 @@ Prioritized roadmap of upcoming work, maintained by the Guide role.
 
 Issues requiring immediate attention (`loom:urgent`).
 
+Both urgent issues are actively in build (see In Progress). Their rationale
+stays here until they land:
+
 - **#2**: Google OAuth sign-in — pairing is between anonymous sockets until this
   lands, which blocks reputation, refunds and any real accountability.
 - **#3**: Charge both halves through Stripe and take the pairing fee — the
@@ -17,6 +20,17 @@ Issues requiring immediate attention (`loom:urgent`).
 
 Human-approved issues ready for implementation (`loom:issue`).
 
+*All seeded backlog is now claimed; nothing unclaimed in `loom:issue`.*
+
+## In Progress
+
+Issues actively being worked (`loom:building`).
+
+Backlog fan-out in flight 2026-09-27 — all nine seeded issues claimed by loom
+sweeps across three hosts (lease records on each issue).
+
+- **#2**: Google OAuth sign-in (urgent)
+- **#3**: Charge both halves through Stripe and take the pairing fee (urgent)
 - **#4**: Write settled splits to the D1 ledger
 - **#5**: Two-sided pickup confirmation handshake
 - **#6**: Map view of your cell
@@ -24,12 +38,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#9**: Playwright two-browser pairing test
 - **#10**: Rate-limit the pool socket
 - **#11**: Pitch deck built with Anvil
-
-## In Progress
-
-Issues actively being worked (`loom:building`).
-
-*No issues currently being built.*
 
 ## Proposed
 

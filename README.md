@@ -24,7 +24,7 @@ $8.98 collected. The gross retail spread is $5.99 per pairing.
 
 ## How it works
 
-1. Pick a deal and share your location once.
+1. Sign in with Google, pick a deal and share your location once.
 2. You join the pool for your **cell** — a geohash precision-6 box, roughly
    1.2km × 0.6km.
 3. The moment another buyer within walking distance wants the same box, you are
@@ -35,16 +35,27 @@ $8.98 collected. The gross retail spread is $5.99 per pairing.
 
 ```
 Browser (React 19, Tailwind 4)
+   │  GET /api/auth/google/*    sign-in, PKCE, terminating in the Worker
    │  GET /api/deals            catalogue + settlement + spread
-   │  WS  /api/pool/ws          live pairing
+   │  WS  /api/pool/ws          live pairing — requires a session
    ▼
-Cloudflare Worker (Hono)  ── derives the geohash cell server-side
+Cloudflare Worker (Hono)  ── derives the geohash cell server-side,
+   │                          and the buyer's identity from their session
+   ├─▶ KV: SESSIONS      ── opaque session ids, pending PKCE state, Google JWKS
+   ├─▶ D1: users         ── one row per Google account
    ▼
 Durable Object: NuggPool  ── ONE PER CELL = one matching market
    │                          single-threaded, so double-pairing is impossible
    ▼
 D1  ── ledger of settled splits
 ```
+
+Sign-in is Authorization Code + PKCE and never leaves a token in the browser:
+the Worker verifies the ID token's signature against Google's JWKS, checks `aud`
+and `iss`, upserts the user on `google_sub` and hands back an opaque session id
+in an `HttpOnly; Secure; SameSite=Lax` cookie. The pool socket derives the
+display name a buddy sees from that session, so a client cannot present itself
+as somebody else.
 
 The matching rule, settlement math and geo helpers live in `shared/` and are
 runtime-free, so they are unit-testable without a Workers runtime. See
@@ -54,15 +65,22 @@ runtime-free, so they are unit-testable without a Workers runtime. See
 
 ```bash
 pnpm install
-pnpm dev              # Vite + Worker together on :5173
+cp .dev.vars.example .dev.vars    # then fill in your Google OAuth client
+pnpm dev                          # Vite + Worker together on :5173
 ```
+
+Google sign-in needs a "Web application" OAuth client (Google Cloud Console →
+APIs & Services → Credentials) with `http://localhost:5173/api/auth/google/callback`
+as an authorized redirect URI. Without one the app still boots and the auth
+routes answer `503`; `pnpm test` and `pnpm smoke` do not need it. `.dev.vars` is
+gitignored and `GOOGLE_CLIENT_SECRET` never belongs in `wrangler.jsonc`.
 
 Two browser windows (or two phones on the same wifi) joining with nearby
 coordinates will pair with each other live. If the browser refuses geolocation,
 the app falls back to a fixed demo cell and says so.
 
 ```bash
-pnpm test             # pure logic: settlement, geo, matchmaking, protocol
+pnpm test             # pure logic: settlement, geo, matchmaking, auth, protocol
 pnpm dev --port 5199  # in one shell…
 pnpm smoke            # …then end-to-end pairing in another
 pnpm typecheck
@@ -74,6 +92,8 @@ pnpm lint
 Live: **https://nuggbudz.personal-account-251.workers.dev**
 
 ```bash
+wrangler secret put GOOGLE_CLIENT_ID              # once per environment
+wrangler secret put GOOGLE_CLIENT_SECRET
 pnpm run deploy                                   # `pnpm deploy` is a pnpm builtin
 wrangler d1 migrations apply nuggbudz --remote
 ```
@@ -82,20 +102,20 @@ D1 and KV bindings are already provisioned in `wrangler.jsonc`. `/api/*` is
 pinned to `run_worker_first`, because otherwise the SPA fallback answers the API
 with `index.html` in production while `vite dev` works fine.
 
-Verify a deployment end to end:
-
-```bash
-BASE=https://nuggbudz.personal-account-251.workers.dev pnpm smoke
-```
+`pnpm smoke` seeds its own sessions into the **local** KV namespace, because the
+pool socket now requires one and an OAuth round trip cannot be driven
+unattended. It therefore runs against `pnpm dev`, not against a deployment; the
+REST surface of a deployment can still be checked with
+`curl https://nuggbudz.personal-account-251.workers.dev/api/health`.
 
 ## Roadmap
 
 Current milestone: **M0 — live pairing.** Done: the matching engine, settlement
-math, cell routing, and a working two-phone pairing flow.
+math, cell routing, a working two-phone pairing flow, and Google sign-in.
 
-Next up, tracked as issues: Google OAuth, Stripe settlement with the pairing fee
-taken as an application fee, the D1 ledger write on pickup, a map view of your
-cell, the pickup confirmation handshake, and buddy reputation.
+Next up, tracked as issues: Stripe settlement with the pairing fee taken as an
+application fee, the D1 ledger write on pickup, a map view of your cell, the
+pickup confirmation handshake, and buddy reputation.
 
 ## Development
 

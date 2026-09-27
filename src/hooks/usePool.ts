@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 export type PoolStage = 'idle' | 'connecting' | 'waiting' | 'matched'
 
 export interface JoinRequest {
-  name: string
   dealId: string
   lat: number
   lng: number
@@ -41,9 +40,9 @@ function socketUrl({ lat, lng }: JoinRequest): string {
 /**
  * Hold a live seat in a neighbourhood's matching pool.
  *
- * One socket per session. The server decides which cell you belong to, so the
- * only thing this hook sends up is who you are, what you want, and where you
- * are standing.
+ * One socket per session. The server decides which cell you belong to and, from
+ * your session cookie, who you are — so the only thing this hook sends up is
+ * what you want and where you are standing.
  */
 export function usePool() {
   const [state, setState] = useState<PoolState>(INITIAL)
@@ -78,7 +77,6 @@ export function usePool() {
         socket.send(
           JSON.stringify({
             type: 'join',
-            name: request.name,
             dealId: request.dealId,
             lat: request.lat,
             lng: request.lng,

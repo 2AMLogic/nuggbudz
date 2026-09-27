@@ -1,0 +1,15 @@
+# Local Worker secrets. Copy to `.dev.vars` (gitignored) and fill in.
+#
+# In a deployed environment these are set with `wrangler secret put <NAME>`.
+# GOOGLE_CLIENT_SECRET must never appear in wrangler.jsonc and must never be
+# committed — it is the one credential that lets anyone mint sign-ins as us.
+
+# The "Web application" OAuth client from Google Cloud Console → Credentials.
+# Add an authorized redirect URI for every origin you sign in from, e.g.
+#   http://localhost:5173/api/auth/google/callback
+GOOGLE_CLIENT_ID=""
+GOOGLE_CLIENT_SECRET=""
+
+# Optional. Pins the OAuth callback origin when the Worker sits behind a proxy
+# that rewrites the Host header. Defaults to the request's own origin.
+# PUBLIC_ORIGIN="https://nuggbudz.example.com"

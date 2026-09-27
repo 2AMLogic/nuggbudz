@@ -3,6 +3,7 @@ import { DEALS, findDeal } from '../shared/deals'
 import { analyzeSpread, settle } from '../shared/economics'
 import { geohash } from '../shared/geo'
 import { PROTOCOL_VERSION } from '../shared/protocol'
+import { authRoutes, sessionFromRequest } from './auth'
 import { type Env, intVar } from './env'
 
 export { NuggPool } from './pool'
@@ -10,6 +11,8 @@ export { NuggPool } from './pool'
 const app = new Hono<{ Bindings: Env }>()
 
 app.get('/api/health', (c) => c.json({ ok: true, service: 'nuggbudz', protocol: PROTOCOL_VERSION }))
+
+app.route('/api/auth', authRoutes)
 
 /** The deal catalogue, each with its settlement and the spread it arbitrages. */
 app.get('/api/deals', (c) =>
@@ -42,11 +45,15 @@ app.get('/api/deals/:dealId/quote', (c) => {
 /**
  * Upgrade to the matching socket for the caller's neighbourhood.
  *
- * The cell is derived from the supplied coordinates server-side rather than
- * accepted from the client, so a caller cannot park themselves in someone
- * else's market by naming an arbitrary cell.
+ * Two things are decided here and never by the client: who you are, from your
+ * session cookie, and which cell you are in, from your coordinates. A caller
+ * who could name their own cell would park themselves in someone else's market;
+ * a caller who could name themselves would show a stranger any name they liked.
  */
 app.get('/api/pool/ws', async (c) => {
+  const active = await sessionFromRequest(c.env, c.req.raw)
+  if (active === null) return c.json({ error: 'sign in required' }, 401)
+
   if (c.req.header('Upgrade') !== 'websocket') {
     return c.text('expected a websocket upgrade', 426)
   }
@@ -63,8 +70,12 @@ app.get('/api/pool/ws', async (c) => {
   const cell = geohash(lat, lng, intVar(c.env.POOL_CELL_PRECISION, 6))
   const stub = c.env.NUGG_POOL.get(c.env.NUGG_POOL.idFromName(cell))
 
+  // `set` replaces any same-named parameter the caller supplied, so these three
+  // reach the Durable Object with server-derived values only.
   const url = new URL(c.req.url)
   url.searchParams.set('cell', cell)
+  url.searchParams.set('userId', active.session.userId)
+  url.searchParams.set('displayName', active.session.displayName)
   return stub.fetch(new Request(url, c.req.raw))
 })
 

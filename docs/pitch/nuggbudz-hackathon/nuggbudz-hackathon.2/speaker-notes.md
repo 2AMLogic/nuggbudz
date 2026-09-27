@@ -151,7 +151,7 @@ passes the principal down; a `name` on the wire is ignored.)
 
 ## 10. Deployed, and verified end to end
 
-**Talk track**: Deployed, and 57/57 end-to-end checks pass across the Worker,
+**Talk track**: Deployed, and 61/61 end-to-end checks pass across the Worker,
 the Durable Object, KV and D1 — two independent sockets in one cell,
 complementary roles, identical settlement, a buddy name that comes from the
 session rather than the wire, a buyer outside the radius left waiting, a

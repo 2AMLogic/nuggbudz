@@ -94,6 +94,33 @@ app.get('/api/pool/ws', async (c) => {
   return stub.fetch(new Request(url, c.req.raw))
 })
 
+/**
+ * Aggregate platform stats, computed in SQL rather than fetched-and-reduced —
+ * these numbers only ever get more rows, and D1 is much better at summing
+ * millions of them than the Worker is.
+ */
+app.get('/api/stats', async (c) => {
+  const row = await c.env.DB.prepare(
+    `SELECT
+       COUNT(*) AS splits_settled,
+       COALESCE(SUM(platform_fee_cents), 0) AS fees_collected_cents,
+       COALESCE((
+         SELECT SUM(mb.solo_baseline_cents - mb.pay_cents)
+         FROM match_buyers mb
+         JOIN matches m ON m.match_id = mb.match_id
+         WHERE m.settled_at IS NOT NULL
+       ), 0) AS total_saved_cents
+     FROM matches
+     WHERE settled_at IS NOT NULL`,
+  ).first<{ splits_settled: number; fees_collected_cents: number; total_saved_cents: number }>()
+
+  return c.json({
+    splitsSettled: row?.splits_settled ?? 0,
+    totalSavedCents: row?.total_saved_cents ?? 0,
+    feesCollectedCents: row?.fees_collected_cents ?? 0,
+  })
+})
+
 app.all('/api/*', (c) => c.json({ error: 'not found' }, 404))
 
 export default app

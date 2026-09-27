@@ -15,6 +15,7 @@
     "test:watch": "vitest",
     "cf-typegen": "wrangler types",
     "smoke": "node scripts/smoke.mjs",
+    "demo-check": "node scripts/demo-pairing-check.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {

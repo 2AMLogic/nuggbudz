@@ -1,6 +1,6 @@
 import type { BuyerRole } from '@shared/economics'
 import type { LocationSource } from '@shared/location'
-import type { MatchedMessage, ServerMessage } from '@shared/protocol'
+import type { CellBuddy, MatchedMessage, ServerMessage } from '@shared/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 export type PoolStage = 'idle' | 'connecting' | 'waiting' | 'matched' | 'settled' | 'disputed'
@@ -33,6 +33,16 @@ export interface PoolState {
   cell: string | null
   /** Which rung of the location fallback placed this socket; null until welcomed. */
   locationSource: LocationSource | null
+  /**
+   * Where you told the server you are standing, when you told it at all. Kept
+   * around (not just handed off to `join` and discarded) so the cell map has a
+   * "you are here" marker to draw at full precision — the server only ever
+   * coarsens *other* buyers' positions, since this one is already yours. Null on
+   * the no-prompt path, where only the server knows where you are.
+   */
+  own: { lat: number; lng: number } | null
+  /** Everyone else waiting in your cell, snapped to a coarse grid server-side. */
+  buddies: CellBuddy[]
   match: MatchedMessage | null
   error: string | null
   /** Set when a buddy walked away and you were put back in the queue. */
@@ -49,6 +59,8 @@ const INITIAL: PoolState = {
   queuedAhead: 0,
   cell: null,
   locationSource: null,
+  own: null,
+  buddies: [],
   match: null,
   error: null,
   notice: null,
@@ -105,7 +117,11 @@ export function usePool() {
   const join = useCallback(
     (request: JoinRequest) => {
       close()
-      setState({ ...INITIAL, stage: 'connecting' })
+      const own =
+        request.lat !== undefined && request.lng !== undefined
+          ? { lat: request.lat, lng: request.lng }
+          : null
+      setState({ ...INITIAL, stage: 'connecting', own })
 
       const socket = new WebSocket(socketUrl(request))
       socketRef.current = socket
@@ -145,6 +161,7 @@ export function usePool() {
                 stage: 'waiting',
                 waiting: message.waiting,
                 queuedAhead: message.queuedAhead,
+                buddies: message.buddies,
               }
             case 'matched':
               return {

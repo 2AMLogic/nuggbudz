@@ -8,16 +8,46 @@
  *
  *   demoPairing false ⇒ an unauthenticated upgrade must be refused (401).
  *   demoPairing true  ⇒ two unauthenticated clients must pair with each other,
- *                       under the names they proposed, with `demo:` identities.
+ *                       under the names they proposed, with `demo:` identities,
+ *                       run the whole pickup handshake to `pickup_complete`,
+ *                       and leave the D1 ledger completely untouched.
  *
  * Both directions matter: the flag existing is not evidence that turning it off
  * still closes the door.
  *
+ * The ledger assertion is the one that would have caught the real defect: the
+ * demo pair reaches `completeMatch()` exactly as a real pair does, so only
+ * reading D1 afterwards proves the split was not booked as revenue.
+ *
  * Usage:  BASE=http://localhost:5199 node scripts/demo-pairing-check.mjs
  */
+import { execFileSync } from 'node:child_process'
 
 const BASE = process.env.BASE ?? 'http://localhost:5199'
 const WS = BASE.replace('http', 'ws')
+const WRANGLER_ENV = { ...process.env, CI: 'true', WRANGLER_SEND_METRICS: 'false' }
+
+/**
+ * Read the ledger the dev server writes to — the same local D1 wrangler sees.
+ *
+ * Migrations are applied first so a missing `matches` table cannot make the
+ * "nothing was booked" assertion pass for the wrong reason.
+ */
+function applyMigrations() {
+  execFileSync('npx', ['wrangler', 'd1', 'migrations', 'apply', 'nuggbudz', '--local'], {
+    stdio: 'pipe',
+    env: WRANGLER_ENV,
+  })
+}
+
+function ledgerQuery(sql) {
+  const out = execFileSync(
+    'npx',
+    ['wrangler', 'd1', 'execute', 'nuggbudz', '--local', '--json', '--command', sql],
+    { stdio: ['ignore', 'pipe', 'pipe'], env: WRANGLER_ENV },
+  )
+  return JSON.parse(out.toString())[0]?.results ?? []
+}
 
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -68,6 +98,12 @@ function open(name) {
     },
     join(dealId = 'mcd-nuggets-20') {
       ws.send(JSON.stringify({ type: 'join', dealId }))
+    },
+    /** A receiver sends the code off their bud's receipt; an orderer just taps. */
+    confirm(code) {
+      const payload = { type: 'confirm_pickup' }
+      if (code !== undefined) payload.code = code
+      ws.send(JSON.stringify(payload))
     },
   }
 }
@@ -124,6 +160,47 @@ if (!demo) {
   )
   check('settlement still splits to $4.49', ma.share.payCents === 449 && mb.share.payCents === 449)
   check('each saves $2.50', ma.share.savingsCents === 250)
+
+  // --- a demo handoff completes on screen, and books nothing ---
+  // The demo is still worth running on a stage: the pair must get all the way to
+  // `pickup_complete` and see a receipt. What it must not do is leave a row.
+  applyMigrations()
+  const before = ledgerQuery('SELECT COUNT(*) AS n FROM matches')[0]?.n ?? 0
+
+  b.confirm(ma.pickupCode)
+  await Promise.all([a.expect('pickup_confirmed'), b.expect('pickup_confirmed')])
+  a.confirm()
+  const [doneA, doneB] = await Promise.all([
+    a.expect('pickup_complete'),
+    b.expect('pickup_complete'),
+  ])
+  check(
+    'a demo pair completes the whole pickup handshake',
+    doneA.matchId === ma.matchId && doneB.matchId === ma.matchId,
+    `${doneA.matchId} / ${doneB.matchId}`,
+  )
+  check(
+    'the completion is stamped, so the receipt is real to the user',
+    typeof doneA.settledAt === 'number' && doneA.settledAt > 0,
+    `${doneA.settledAt}`,
+  )
+
+  // Give the write that must not happen time to happen.
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  const bookedMatch = ledgerQuery(`SELECT * FROM matches WHERE match_id = '${ma.matchId}'`)
+  check(
+    'a completed demo handoff writes no match row',
+    bookedMatch.length === 0,
+    JSON.stringify(bookedMatch),
+  )
+  const bookedBuyers = ledgerQuery(`SELECT * FROM match_buyers WHERE match_id = '${ma.matchId}'`)
+  check(
+    'a completed demo handoff books no money rows',
+    bookedBuyers.length === 0,
+    JSON.stringify(bookedBuyers),
+  )
+  const after = ledgerQuery('SELECT COUNT(*) AS n FROM matches')[0]?.n ?? 0
+  check('the ledger row count is unchanged by the demo', after === before, `${before} -> ${after}`)
 
   for (const s of [a, b]) s.ws.close()
 }

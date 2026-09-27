@@ -39,3 +39,20 @@ jobs:
       - run: pnpm dev --port 5199 &
       - run: npx wait-on http://localhost:5199/api/health --timeout 90000
       - run: pnpm smoke
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: npx playwright install --with-deps chromium
+      # Drives the real UI in two browser contexts; playwright.config.ts's
+      # webServer boots `pnpm dev` itself, so there is no separate wait-on step.
+      - run: pnpm test:e2e

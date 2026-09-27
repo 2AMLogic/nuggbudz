@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers'
 import { findDeal } from '../shared/deals'
 import type { BuyerRole, Settlement } from '../shared/economics'
 import { settle } from '../shared/economics'
-import type { LatLng } from '../shared/geo'
+import { type LatLng, snapToGrid } from '../shared/geo'
 import { type LocationSource, parseCoords, parseLocationSource } from '../shared/location'
 import { type Candidate, findMatch } from '../shared/matchmaker'
 import {
@@ -269,7 +269,7 @@ export class NuggPool extends DurableObject<Env> {
     if (decision === null) {
       const waiting: WaitingState = { ...identity, status: 'waiting' }
       this.setState(ws, waiting)
-      this.sendWaiting(ws, waiting)
+      this.broadcastWaiting()
       return
     }
 
@@ -281,7 +281,7 @@ export class NuggPool extends DurableObject<Env> {
       // Buddy vanished between the scan and here. Queue instead of pairing with a ghost.
       const waiting: WaitingState = { ...identity, status: 'waiting' }
       this.setState(ws, waiting)
-      this.sendWaiting(ws, waiting)
+      this.broadcastWaiting()
       return
     }
 
@@ -340,6 +340,11 @@ export class NuggPool extends DurableObject<Env> {
       buddy: { name: selfIdentity.name, distanceMeters: decision.distanceMeters },
       pickupCode: codeFor(buddyRole),
     })
+
+    // Two buyers just left the waiting pool: everyone still queued in this
+    // cell needs the roster refreshed, or their map would keep showing dots
+    // for buddies who are no longer waiting.
+    this.broadcastWaiting()
   }
 
   /**
@@ -426,6 +431,9 @@ export class NuggPool extends DurableObject<Env> {
         settledAt: at,
         settlement: record.settlement,
         names: { orderer: record.orderer.name, receiver: record.receiver.name },
+        // The ledger decides for itself whether this is a real split; a demo
+        // pairing settles on screen and books nothing. See `isDemoMatch`.
+        userIds: { orderer: record.orderer.userId, receiver: record.receiver.userId },
       })
     } catch (error) {
       // A ledger outage must not strand two people who already swapped nuggets.
@@ -479,6 +487,8 @@ export class NuggPool extends DurableObject<Env> {
       return
     }
     this.setState(ws, principalOf(state))
+    // One fewer dot on everyone else's map.
+    this.broadcastWaiting()
   }
 
   /**
@@ -491,7 +501,13 @@ export class NuggPool extends DurableObject<Env> {
    */
   private async handleDisconnect(ws: WebSocket): Promise<void> {
     const state = this.getState(ws)
-    if (state === null || state.status !== 'matched') return
+    if (state === null) return
+    if (state.status !== 'matched') {
+      // A waiting buyer who simply closed the tab still needs to fall out of
+      // everyone else's roster.
+      if (state.status === 'waiting') this.broadcastWaiting()
+      return
+    }
 
     const record = await this.ctx.storage.get<MatchRecord>(`match:${state.matchId}`)
     if (
@@ -516,12 +532,14 @@ export class NuggPool extends DurableObject<Env> {
       }
       this.setState(other.ws, requeued)
       this.send(other.ws, { type: 'buddy_left', matchId: state.matchId })
-      // Without this the survivor's UI would keep showing the pool count from
-      // before they were matched, which for an instant match is zero.
-      this.sendWaiting(other.ws, requeued)
     }
 
     await this.ctx.storage.delete(`match:${state.matchId}`)
+    // Without this the survivor's UI would keep showing the pool count (and
+    // buddy dots) from before they were matched, which for an instant match
+    // is zero — and it also tells everyone else in the cell about the
+    // buyer who just got requeued.
+    this.broadcastWaiting()
   }
 
   /**
@@ -530,12 +548,22 @@ export class NuggPool extends DurableObject<Env> {
    */
   private sendWaiting(ws: WebSocket, state: WaitingState): void {
     const eligible = this.waitingStates().filter((o) => o.state.dealId === state.dealId)
+    // The map roster is the whole cell, not just this buyer's deal: a cell can
+    // host more than one deal's queue at once, and the point of the map is to
+    // explain the cell as a market, not to leak who could actually pair.
+    const buddies = this.waitingStates()
+      .filter((o) => o.state.connId !== state.connId)
+      // Quantized here, at the one chokepoint every waiting broadcast passes
+      // through, so a buyer's exact position never reaches the wire.
+      .map((o) => snapToGrid(o.state))
+
     this.send(ws, {
       type: 'waiting',
       waiting: eligible.length,
       queuedAhead: eligible.filter(
         (o) => o.state.connId !== state.connId && o.state.joinedAt < state.joinedAt,
       ).length,
+      buddies,
     })
   }
 
@@ -578,6 +606,13 @@ export class NuggPool extends DurableObject<Env> {
       out.push({ ws, state })
     }
     return out
+  }
+
+  /** Refresh every waiting socket's roster after a join, cancel or disconnect. */
+  private broadcastWaiting(): void {
+    for (const { ws, state } of this.waitingStates()) {
+      this.sendWaiting(ws, state)
+    }
   }
 
   private states(): { ws: WebSocket; state: ConnState }[] {

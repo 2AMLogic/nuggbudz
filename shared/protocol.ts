@@ -70,12 +70,32 @@ export interface WelcomeMessage {
   }
 }
 
+/**
+ * Another buyer waiting in your cell, reduced to a dot on a map.
+ *
+ * Deliberately just coordinates: no `connId`, no `name`. The position itself
+ * is already coarse by the time it reaches here — see `snapToGrid` in
+ * `shared/geo.ts` — so an unmatched buyer is anonymous and only approximately
+ * located, never identifiable and never exact.
+ */
+export interface CellBuddy {
+  lat: number
+  lng: number
+}
+
 export interface WaitingMessage {
   type: 'waiting'
-  /** How many buyers are queued in this cell, including you. */
+  /** How many buyers are queued on your deal in this cell, including you. */
   waiting: number
   /** How many eligible buyers joined before you. */
   queuedAhead: number
+  /**
+   * Everyone else waiting in this cell, on any deal, snapped to a coarse
+   * grid — never you. This is the cell's whole roster, not just your deal:
+   * the map is explaining the cell as a market, and `waiting`/`queuedAhead`
+   * above stay scoped to the deal that actually decides who you pair with.
+   */
+  buddies: CellBuddy[]
 }
 
 export interface MatchedMessage {

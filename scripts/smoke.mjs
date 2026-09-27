@@ -43,6 +43,10 @@ const BUYERS = {
   dana: { sid: sessionId('smoke-dana'), userId: 'smoke-user-dana', name: 'Dana' },
   far: { sid: sessionId('smoke-faraway'), userId: 'smoke-user-faraway', name: 'Faraway' },
   bad: { sid: sessionId('smoke-bad'), userId: 'smoke-user-bad', name: 'Bad' },
+  // Different deals, same block, purely to prove the cell-wide roster
+  // broadcast without any of these three ever actually pairing up.
+  kim: { sid: sessionId('smoke-kim'), userId: 'smoke-user-kim', name: 'Kim' },
+  lee: { sid: sessionId('smoke-lee'), userId: 'smoke-user-lee', name: 'Lee' },
   // Signed in only to be signed out again.
   doomed: { sid: sessionId('smoke-doomed'), userId: 'smoke-user-doomed', name: 'Doomed' },
   // The pickup handshake pair, and the pair that never finishes one.
@@ -619,7 +623,62 @@ check(
   JSON.stringify(c.inbox.filter((m) => m.type === 'error')),
 )
 
-for (const s of [b, far, c, g, h, j, k, l]) s.ws.close()
+// --- cell map roster broadcast ---
+// The cell map needs everyone's client to hear about a roster change, not
+// just the socket that caused it — so a third buyer joining the cell must
+// push a fresh 'waiting' message to every buyer already queued there, on any
+// deal, with the newcomer's position quantized rather than exact.
+//
+// Everyone still connected from the handshake checks above (`g`, `h`, `j`) has
+// settled or disputed their match and is back to idle, not waiting, so the only
+// buddy left in the cell at this point is the requeued `b`.
+const kim = open(BUYERS.kim, 37.7955, -122.3937, 'wendys-nuggets-20')
+await kim.opened
+kim.join()
+const kimWaiting = await kim.expect('waiting')
+check(
+  // `far` is a deliberately different cell (see the "distant buyer" check
+  // above), so the only buddy kim should see here is the requeued `b` —
+  // proving the roster is cell-wide (any deal) rather than global.
+  'buddy roster is cell-wide, not scoped to one deal',
+  kimWaiting.waiting === 1 && kimWaiting.buddies.length === 1,
+  JSON.stringify(kimWaiting),
+)
+
+const bWaitingBefore = b.inbox.filter((m) => m.type === 'waiting').length
+const lee = open(BUYERS.lee, 37.7955, -122.3937, 'bk-nuggets-20')
+await lee.opened
+lee.join()
+await lee.expect('waiting')
+
+const broadcastSeen = await (async () => {
+  for (let i = 0; i < 40; i++) {
+    if (b.inbox.filter((m) => m.type === 'waiting').length > bWaitingBefore) return true
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return false
+})()
+check(
+  'a buyer already queued gets a fresh roster broadcast when someone new joins the cell',
+  broadcastSeen,
+  `${bWaitingBefore} -> ${b.inbox.filter((m) => m.type === 'waiting').length}`,
+)
+
+const latestForB = b.inbox.filter((m) => m.type === 'waiting').at(-1)
+check(
+  'the broadcast roster carries a position for the newcomer',
+  latestForB.buddies.some(
+    (pos) => Math.abs(pos.lat - 37.7955) < 0.01 && Math.abs(pos.lng - -122.3937) < 0.01,
+  ),
+  JSON.stringify(latestForB.buddies),
+)
+check(
+  'the broadcast never carries an exact coordinate for anyone else',
+  latestForB.buddies.every((pos) => pos.lat !== 37.7955 || pos.lng !== -122.3937),
+  JSON.stringify(latestForB.buddies),
+)
+
+for (const s of [b, far, c, g, h, j, k, l, kim, lee]) s.ws.close()
 
 log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

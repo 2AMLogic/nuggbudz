@@ -5,6 +5,11 @@ node_modules/
 dist/
 .wrangler/
 
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+
 # Environment
 .env
 .env.local

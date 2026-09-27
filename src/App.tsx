@@ -2,6 +2,7 @@ import type { DealSpec, Settlement, SpreadAnalysis } from '@shared/economics'
 import { formatCents } from '@shared/economics'
 import { describeLocationSource, type LocationSource } from '@shared/location'
 import { useEffect, useState } from 'react'
+import { CellMap } from './components/CellMap'
 import { Line, Perf, Roll } from './components/Roll'
 import { SettlementReceipt } from './components/SettlementReceipt'
 import { useCoords } from './hooks/useCoords'
@@ -128,6 +129,15 @@ export function App() {
             {pool.stage === 'connecting' ? 'Standing in line' : `${pool.waiting} in your cell`}
           </h2>
 
+          {/* The map needs a "you are here" at full precision, and on the
+              promptless path nobody has one: the server knows where it placed
+              this socket but `welcome` carries only the cell. So the map appears
+              once the buyer opts into exact location, rather than drawing the
+              cell centre and calling it them. */}
+          {pool.stage === 'waiting' && pool.cell !== null && pool.own !== null && (
+            <CellMap cell={pool.cell} you={pool.own} buddies={pool.buddies} />
+          )}
+
           <Perf label={selected?.merchant ?? 'Deal'} />
 
           <Line label="Your order" value={selected?.label ?? '—'} />
@@ -232,8 +242,8 @@ export function App() {
             />
           </label>
           <p className="mt-3 font-body text-sm leading-snug text-faded">
-            Demo mode: pairing without accounts, so nothing is settled afterwards and your bud only
-            sees this name.
+            Demo mode: pairing without accounts. You will run the whole handoff and get a receipt,
+            but the split is never booked to the ledger, and your bud only sees this name.
           </p>
         </>
       ) : session.user === null ? (

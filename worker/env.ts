@@ -10,6 +10,8 @@ export interface Env {
   POOL_MAX_SOCKETS_PER_CELL: string
   POOL_UPGRADE_LIMIT: string
   POOL_UPGRADE_WINDOW_SECONDS: string
+  /** How long a one-sided pickup confirmation waits before it is a dispute. */
+  PICKUP_CONFIRM_TIMEOUT_MS?: string
   /**
    * Google OAuth client credentials. Optional so a checkout without them still
    * boots — the auth routes answer 503 instead of the Worker failing to start.

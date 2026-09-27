@@ -54,10 +54,21 @@ export function App() {
   const selected = deals.find((deal) => deal.id === dealId) ?? null
   const canStart = session.user !== null && dealId !== null && !coords.pending
 
-  if (pool.stage === 'matched' && pool.match !== null) {
+  if (
+    pool.match !== null &&
+    (pool.stage === 'matched' || pool.stage === 'settled' || pool.stage === 'disputed')
+  ) {
     return (
       <Shell cell={pool.cell}>
-        <SettlementReceipt match={pool.match} onDone={pool.leave} />
+        <SettlementReceipt
+          match={pool.match}
+          confirmed={pool.confirmed}
+          waitingOn={pool.waitingOn}
+          stage={pool.stage}
+          notice={pool.notice}
+          onConfirm={pool.confirmPickup}
+          onDone={pool.leave}
+        />
       </Shell>
     )
   }

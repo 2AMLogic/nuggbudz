@@ -1,123 +1,88 @@
+/**
+ * The D1 ledger of settled splits.
+ *
+ * A match becomes a ledger row at exactly one moment: when both buddies have
+ * confirmed the handoff. Anything earlier is live state, which the Durable
+ * Object owns; anything unconfirmed is not a split that happened.
+ */
 import type { BuyerRole, Settlement } from '../shared/economics'
 
-/** One buyer's identity at settlement time — just enough to write a ledger row. */
-export interface SettledBuyer {
-  role: BuyerRole
-  displayName: string
-}
-
+/** Everything the ledger needs to know about one settled split. */
 export interface SettledMatch {
   matchId: string
   dealId: string
-  /** Geohash cell this match happened in — the shard key every geographic report groups by. */
+  /** The geohash cell that matched the pair — the market this split happened in. */
   cell: string
+  distanceMeters: number
   createdAt: number
   settledAt: number
-  distanceMeters: number
   settlement: Settlement
-  buyers: SettledBuyer[]
+  /** Display names by role, as each buddy saw the other at match time. */
+  names: Record<BuyerRole, string>
 }
 
-export interface RecordSettledMatchOptions {
-  maxAttempts?: number
-  retryDelayMs?: number
+export interface LedgerStatement {
+  sql: string
+  params: (string | number)[]
 }
 
-const DEFAULT_MAX_ATTEMPTS = 3
-const DEFAULT_RETRY_DELAY_MS = 200
+const INSERT_MATCH = `INSERT OR IGNORE INTO matches (
+  match_id, deal_id, cell, party_size, total_collected_cents, cogs_cents,
+  platform_fee_cents, distance_meters, created_at, settled_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+const INSERT_BUYER = `INSERT OR IGNORE INTO match_buyers (
+  match_id, role, display_name, pay_cents, solo_baseline_cents, pieces_owed
+) VALUES (?, ?, ?, ?, ?, ?)`
 
 /**
- * Write one settled split to the D1 ledger: one `matches` row and one
- * `match_buyers` row per buyer.
+ * The rows one settled split becomes.
  *
- * Both statements run in a single `DB.batch` so a partial write can never
- * leave a match without its buyers. `INSERT OR IGNORE` makes the write
- * idempotent on `match_id` / `(match_id, role)` — replaying the same match,
- * whether from our own retry below or a future caller resending after a
- * crash, never duplicates rows.
- *
- * A D1 failure is retried a bounded number of times and, if it still fails,
- * logged and swallowed rather than thrown: the pairing already happened over
- * the socket, and the ledger catching up late is better than the live match
- * breaking because reporting did.
+ * Split out from the database call so the shape of the write is testable without
+ * a D1 binding — every money column here is integer cents taken straight off
+ * the settlement, never recomputed.
  */
-export async function recordSettledMatch(
-  db: D1Database,
-  match: SettledMatch,
-  options: RecordSettledMatchOptions = {},
-): Promise<void> {
-  const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
-  const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS
-  const statements = buildStatements(db, match)
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      await db.batch(statements)
-      return
-    } catch (err) {
-      if (attempt === maxAttempts) {
-        console.error(
-          `ledger: failed to record match ${match.matchId} after ${maxAttempts} attempt(s)`,
-          err,
-        )
-        return
-      }
-      await sleep(retryDelayMs * attempt)
-    }
-  }
-}
-
-function buildStatements(db: D1Database, match: SettledMatch): D1PreparedStatement[] {
+export function ledgerStatements(match: SettledMatch): LedgerStatement[] {
   const { settlement } = match
-
-  const matchStatement = db
-    .prepare(
-      `INSERT OR IGNORE INTO matches
-         (match_id, deal_id, cell, party_size, total_collected_cents, cogs_cents,
-          platform_fee_cents, distance_meters, created_at, settled_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      match.matchId,
-      match.dealId,
-      match.cell,
-      settlement.partySize,
-      settlement.totalCollectedCents,
-      settlement.cogsCents,
-      settlement.platformFeeCents,
-      match.distanceMeters,
-      match.createdAt,
-      match.settledAt,
-    )
-
-  const buyerStatements = match.buyers.map((buyer) => {
-    // Matched by role rather than array position: settlement.shares happens to
-    // put the orderer first, but nothing here should depend on that holding.
-    const share = settlement.shares.find((s) => s.role === buyer.role)
-    if (share === undefined) {
-      throw new Error(
-        `ledger: no settlement share for role ${buyer.role} in match ${match.matchId}`,
-      )
-    }
-    return db
-      .prepare(
-        `INSERT OR IGNORE INTO match_buyers
-           (match_id, role, display_name, pay_cents, solo_baseline_cents, pieces_owed)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
+  const statements: LedgerStatement[] = [
+    {
+      // OR IGNORE rather than REPLACE: a settled split is written once, and a
+      // retry after a partial failure must not rewrite what was already booked.
+      sql: INSERT_MATCH,
+      params: [
         match.matchId,
-        buyer.role,
-        buyer.displayName,
+        settlement.dealId,
+        match.cell,
+        settlement.partySize,
+        settlement.totalCollectedCents,
+        settlement.cogsCents,
+        settlement.platformFeeCents,
+        match.distanceMeters,
+        match.createdAt,
+        match.settledAt,
+      ],
+    },
+  ]
+
+  for (const share of settlement.shares) {
+    statements.push({
+      sql: INSERT_BUYER,
+      params: [
+        match.matchId,
+        share.role,
+        match.names[share.role],
         share.payCents,
         share.soloBaselineCents,
         share.piecesOwed,
-      )
-  })
+      ],
+    })
+  }
 
-  return [matchStatement, ...buyerStatements]
+  return statements
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+/** Book a settled split. Batched, so a match never lands without its buyers. */
+export async function writeSettledMatch(db: D1Database, match: SettledMatch): Promise<void> {
+  const statements = ledgerStatements(match)
+  await db.batch(statements.map((statement) => db.prepare(statement.sql).bind(...statement.params)))
 }

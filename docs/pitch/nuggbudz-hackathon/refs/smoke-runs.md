@@ -85,9 +85,9 @@ ALL CHECKS PASSED
 BASE=https://nuggbudz.personal-account-251.workers.dev pnpm smoke
 ```
 
-Run 2026-09-27 against the deployment at commit `32dad69`, which is the build
-currently serving the URL (`/api/health` reports `protocol: 1`; the auth routes
-404 because that build predates them). **22/22 checks passed**, including: the
+Run 2026-09-27 against the deployment at commit `32dad69`, which was the build
+serving the URL at the time of this run (`/api/health` reported `protocol: 1`;
+the auth routes 404'd because that build predated them). **22/22 checks passed**, including: the
 catalogue served with settlement and spread computed by `shared/economics.ts`;
 two independent WebSocket clients in cell `9q8znb` paired into one `matchId`
 with complementary roles; the longest waiter made orderer; each side charged

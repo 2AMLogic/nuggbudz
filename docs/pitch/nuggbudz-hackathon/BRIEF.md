@@ -149,9 +149,9 @@ unit — fee × pairings — and labels it as arithmetic, not a forecast.
 
 - Deployed and working at
   <https://nuggbudz.com>, real two-phone pairing
-  over WebSockets. As of 2026-09-27 the deployment is the build *before* Google
-  sign-in (`/api/health` reports `protocol: 1`), which is why a stranger can
-  pair on it without an account.
+  over WebSockets. As of 2026-09-27 the deployment runs with demo pairing
+  enabled, which is why a stranger can pair on it without an account; Google
+  sign-in exists and works, and demo mode is an explicit deploy-time flag.
 - `pnpm dev --port 5199` + `pnpm smoke` passes **32/32** end-to-end checks
   across the Worker, the Durable Object, KV and D1 on current `main`: both
   buyers matched to one `matchId`, complementary orderer/receiver roles, each

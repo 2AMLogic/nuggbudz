@@ -46,7 +46,7 @@
     // each reconnecting a few times, must never trip it. Each allowed attempt
     // costs one KV write (the free tier allows 1,000 per day).
     "POOL_UPGRADE_LIMIT": "30",
-    "POOL_UPGRADE_WINDOW_SECONDS": "60"
+    "POOL_UPGRADE_WINDOW_SECONDS": "60",
     // A handoff is two taps seconds apart once the buddies are standing
     // together, so five minutes of silence from the second side means the
     // meeting did not happen — the match is disputed rather than settled.

@@ -13,7 +13,7 @@ html: true
 
 ## Split a 20-piece box with the stranger next to you
 
-_Hackathon pitch · live at `nuggbudz.personal-account-251.workers.dev` · Robb Walters, 2AM Logic_
+_Hackathon pitch · live at `nuggbudz.com` · 2AM Logic_
 
 <!-- speaker: Open with a phone already on the app. One line: fast food prices bulk cheaper than solo, we pair two strangers in the same block to split a box, and it is running right now. Then move — the arithmetic is the pitch. -->
 
@@ -118,13 +118,14 @@ _The cell **is** the matching market. One event at a time, so double-pairing can
 
 ## Deployed, and verified end to end
 
-- `nuggbudz.personal-account-251.workers.dev` — real two-phone pairing over WebSockets
+- `nuggbudz.com` — real two-phone pairing over WebSockets
 - **61/61** end-to-end checks pass across Worker, Durable Object, KV and D1
 - Settlement, geo, matchmaking and the wire protocol are pure logic, tested without a runtime
 - **Not yet proven**: no users, no revenue, no pilot — that is what the ask is for
-- Built solo, in the hackathon window, by Robb Walters (2AM Logic)
+- Shipped in the hackathon window by an agent-orchestrated pipeline — every feature
+  arrived as a reviewed, CI-green pull request, authored by `rjwalters` and `turian`
 
-<!-- speaker: The checks are scripts/smoke.mjs against a real running stack, not a mock: two independent sockets in one cell, complementary roles, identical settlement, a buddy name that comes from the session rather than the wire, a buyer outside the radius left waiting, and a survivor requeued when their buddy disconnects. The largest block is the pickup handshake — only the orderer is told the code, a wrong code settles nothing, one side confirming alone arms a dispute deadline instead of booking, and a row reaches the D1 ledger only when both sides confirm. The deployed URL is one commit behind — it is the build before Google sign-in, which is why a judge can pair on it without an account. Say the fourth bullet out loud rather than waiting to be asked. -->
+<!-- speaker: The checks are scripts/smoke.mjs against a real running stack, not a mock: two independent sockets in one cell, complementary roles, identical settlement, a buddy name that comes from the session rather than the wire, a buyer outside the radius left waiting, and a survivor requeued when their buddy disconnects. The largest block is the pickup handshake — only the orderer is told the code, a wrong code settles nothing, one side confirming alone arms a dispute deadline instead of booking, and a row reaches the D1 ledger only when both sides confirm. A judge can pair without creating an account because the deployment sets ALLOW_DEMO_PAIRING at deploy time — sign-in exists and works, demo mode is an explicit deploy-time flag that hands an unauthenticated socket a throwaway demo: identity, and the screen says so rather than implying someone signed in. Say the fourth bullet out loud rather than waiting to be asked, and if asked who built it, the answer is the pipeline — Curator, Builder, Judge, Doctor and Champion, merging as rjwalters and turian. -->
 
 ---
 
@@ -137,7 +138,7 @@ _The cell **is** the matching market. One event at a time, so double-pairing can
 | **C** | Geolocation denied → the app falls back to the fixed demo cell and says so on screen |
 | **D** | No network at all → the recorded end-to-end runs in `refs/smoke-runs.md` |
 
-<!-- speaker: Run Plan A if the room has wifi; it is the strongest version because it is their device, not ours — and the deployed build predates sign-in, so there is no account to create. Plan C is not a workaround: useCoords.ts falls back to a fixed demo origin and the UI states plainly that the fix is not real, because a hackathon venue is exactly where geolocation dies. Never fake a fix. -->
+<!-- speaker: Run Plan A if the room has wifi; it is the strongest version because it is their device, not ours — and demo pairing is on, so there is no account to create. Plan C is not a workaround: useCoords.ts falls back to a fixed demo origin and the UI states plainly that the fix is not real, because a hackathon venue is exactly where geolocation dies. Never fake a fix. -->
 
 ---
 
@@ -161,7 +162,7 @@ _Gross of processing, support and fraud. $5.00 saved per pairing: the spread spl
 
 Then one pilot cell — one store cluster, 30 days — to measure the number we cannot derive: how long a buyer will wait for a buddy.
 
-_Robb Walters · 2AM Logic · nuggbudz.personal-account-251.workers.dev_
+_2AM Logic · `rjwalters` · `turian` · nuggbudz.com_
 
 <!-- speaker: Lead with the ask a judge can act on in this room. The pilot is the second ask, and it buys exactly one thing: the first settled paid split, with Stripe Connect taking the pairing fee as an application fee — the next commit, not a roadmap item. End on the ask, then take questions. -->
 

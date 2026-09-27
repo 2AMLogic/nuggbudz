@@ -108,6 +108,17 @@ unattended. It therefore runs against `pnpm dev`, not against a deployment; the
 REST surface of a deployment can still be checked with
 `curl https://nuggbudz.personal-account-251.workers.dev/api/health`.
 
+## Pitch deck
+
+`docs/pitch/` holds the hackathon deck, built with [Anvil](https://github.com/rjwalters/anvil).
+The slides are `docs/pitch/nuggbudz-hackathon/nuggbudz-hackathon.2/deck.pdf`; the
+talk track and the demo fallback script are in `speaker-notes.md` beside it.
+
+Every money figure on a slide is derived from `shared/deals.ts` and
+`shared/economics.ts` by `scripts/deck-ledger.ts`, and `pnpm test` fails if a
+slide and the code disagree in either direction. See
+[docs/pitch/README.md](./docs/pitch/README.md).
+
 ## Roadmap
 
 Current milestone: **M0 — live pairing.** Done: the matching engine, settlement

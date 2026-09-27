@@ -32,6 +32,10 @@ state.
   the pairing rule has to be testable without a Workers runtime.
 - **Anything off a WebSocket is hostile.** Validate through
   `parseClientMessage` rather than casting.
+- **Deck figures are derived, never typed.** Every money amount on a slide in
+  `docs/pitch/` comes from `scripts/deck-ledger.ts`, which reads the catalogue
+  and the settlement functions. Reprice a deal and `pnpm test` goes red until
+  the slides are corrected — fix the slides, never the ledger.
 - **The server derives the cell, never the client.** Otherwise a caller parks
   themselves in someone else's market.
 - **Identity comes from the session, never from a message.** The pool socket is

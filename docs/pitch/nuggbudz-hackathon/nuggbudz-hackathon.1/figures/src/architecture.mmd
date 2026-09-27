@@ -1,0 +1,23 @@
+%% Cell names and the distance between phones A and B are computed with the
+%% repo's own geohash()/distanceMeters() from shared/geo.ts, not invented:
+%%   37.7955,-122.3937 -> 9q8znb   37.7969,-122.3921 -> 9q8znb (210 m apart)
+%%   37.7749,-122.4194 -> 9q8yyk   (3.2 km away, a different market)
+%% Rendered by mmdc with -c .anvil/anvil/lib/figures/mermaid-theme.json, which
+%% is where the anvil-accent / anvil-muted node classes come from.
+flowchart LR
+    A["Phone A<br/>37.7955, -122.3937"] -->|"wss /api/pool/ws"| W
+    B["Phone B<br/>210 m from A"] -->|"wss"| W
+    C["Phone C<br/>3.2 km away"] -->|"wss"| W
+
+    W["Cloudflare Worker (Hono)<br/>derives the cell server-side"]:::anvil-muted
+
+    W -->|"idFromName('9q8znb')"| P1
+    W -->|"idFromName('9q8yyk')"| P2
+
+    subgraph cells["One Durable Object per geohash cell = one matching market"]
+        P1["NuggPool 9q8znb<br/>A + B pair here<br/>one event at a time"]:::anvil-accent
+        P2["NuggPool 9q8yyk<br/>C waits in its own market"]:::anvil-accent
+    end
+
+    P1 -->|"settled split"| D[("D1 ledger")]
+    P2 --> D

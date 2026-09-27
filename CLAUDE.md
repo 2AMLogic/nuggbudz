@@ -43,7 +43,7 @@ pnpm test         # vitest — pure logic (settlement, geo, matchmaking, protoco
 pnpm smoke        # end-to-end pairing against a running `pnpm dev`
 pnpm typecheck    # wrangler types && tsc --noEmit
 pnpm lint         # biome
-pnpm deploy       # vite build && wrangler deploy
+pnpm run deploy    # vite build && wrangler deploy (pnpm deploy is a pnpm builtin)
 ```
 
 `pnpm test` does not cover the Durable Object. `pnpm smoke` does, and needs a

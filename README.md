@@ -71,12 +71,22 @@ pnpm lint
 
 ## Deploy
 
+Live: **https://nuggbudz.personal-account-251.workers.dev**
+
 ```bash
-pnpm deploy
+pnpm run deploy                                   # `pnpm deploy` is a pnpm builtin
 wrangler d1 migrations apply nuggbudz --remote
 ```
 
-D1 and KV bindings are already provisioned in `wrangler.jsonc`.
+D1 and KV bindings are already provisioned in `wrangler.jsonc`. `/api/*` is
+pinned to `run_worker_first`, because otherwise the SPA fallback answers the API
+with `index.html` in production while `vite dev` works fine.
+
+Verify a deployment end to end:
+
+```bash
+BASE=https://nuggbudz.personal-account-251.workers.dev pnpm smoke
+```
 
 ## Roadmap
 

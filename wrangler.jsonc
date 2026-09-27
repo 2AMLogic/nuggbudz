@@ -7,7 +7,11 @@
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    // Without this the SPA fallback answers /api/* with index.html before the
+    // Worker is ever invoked. `vite dev` routes differently, so the API only
+    // breaks once deployed.
+    "run_worker_first": ["/api/*"]
   },
   "observability": { "enabled": true },
   // One Durable Object per geohash cell. The cell IS the matching market:

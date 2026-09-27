@@ -32,11 +32,20 @@ state.
   the pairing rule has to be testable without a Workers runtime.
 - **Anything off a WebSocket is hostile.** Validate through
   `parseClientMessage` rather than casting.
+- **Deck figures are derived, never typed.** Every money amount on a slide in
+  `docs/pitch/` comes from `scripts/deck-ledger.ts`, which reads the catalogue
+  and the settlement functions. Reprice a deal and `pnpm test` goes red until
+  the slides are corrected — fix the slides, never the ledger.
 - **The server derives the cell, never the client.** Otherwise a caller parks
   themselves in someone else's market.
 - **Identity comes from the session, never from a message.** The pool socket is
   authenticated at upgrade time and the display name a buddy sees is read off
   the session in KV. A `name` on the wire is ignored, not trusted.
+- **A split settles only when both sides confirm the handoff.** The orderer
+  holds a random pickup code (never derived from the match id, and never sent
+  to the receiver); the receiver reads it off them. One side confirming alone
+  times out into a dispute, and completing the handshake is the only thing that
+  writes a row to the D1 ledger.
 
 ## Commands
 
@@ -44,13 +53,16 @@ state.
 pnpm dev          # Vite + Worker together, full stack
 pnpm test         # vitest — pure logic (settlement, geo, matchmaking, protocol)
 pnpm smoke        # end-to-end pairing against a running `pnpm dev`
+pnpm test:e2e     # Playwright — two browsers driving the real UI end to end
 pnpm typecheck    # wrangler types && tsc --noEmit
 pnpm lint         # biome
 pnpm run deploy    # vite build && wrangler deploy (pnpm deploy is a pnpm builtin)
 ```
 
 `pnpm test` does not cover the Durable Object. `pnpm smoke` does, and needs a
-dev server on port 5199. Run both before calling a change done.
+dev server on port 5199. `pnpm test:e2e` boots one itself (or reuses one
+already running there) and additionally exercises the screen a person actually
+looks at. Run all three before calling a change done.
 
 ## Style
 

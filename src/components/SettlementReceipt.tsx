@@ -1,7 +1,10 @@
 import { findDeal } from '@shared/deals'
+import type { BuyerRole } from '@shared/economics'
 import { formatCents } from '@shared/economics'
 import { formatDistance } from '@shared/geo'
+import { PICKUP_CODE_LENGTH } from '@shared/pickup'
 import type { MatchedMessage } from '@shared/protocol'
+import { useState } from 'react'
 import { Barcode } from './Barcode'
 import { Line, Perf } from './Roll'
 
@@ -13,14 +16,26 @@ import { Line, Perf } from './Roll'
  */
 export function SettlementReceipt({
   match,
+  confirmed,
+  waitingOn,
+  stage,
+  notice,
+  onConfirm,
   onDone,
 }: {
   match: MatchedMessage
+  /** Sides of the handoff confirmed so far. */
+  confirmed: BuyerRole[]
+  waitingOn: BuyerRole | null
+  stage: 'matched' | 'settled' | 'disputed'
+  notice: string | null
+  onConfirm: (code?: string) => void
   onDone: () => void
 }) {
   const deal = findDeal(match.settlement.dealId)
   const { settlement, share, buddy, role } = match
-  const pickupCode = match.matchId.replace(/-/g, '').slice(0, 6).toUpperCase()
+  const [typedCode, setTypedCode] = useState('')
+  const iConfirmed = confirmed.includes(role)
 
   const instruction =
     role === 'orderer'
@@ -79,27 +94,95 @@ export function SettlementReceipt({
         delay={620}
       />
 
-      <Perf label="Pickup" />
+      <Perf
+        label={stage === 'settled' ? 'Settled' : stage === 'disputed' ? 'Disputed' : 'Pickup'}
+      />
 
-      <p className="printed font-body text-base leading-snug" style={{ animationDelay: '700ms' }}>
-        {instruction}
-      </p>
+      {stage === 'settled' ? (
+        <>
+          <p className="printed font-body text-base leading-snug">
+            Both of you confirmed the handoff. The split is on the books.
+          </p>
+          <button type="button" onClick={onDone} className={PRIMARY}>
+            Done
+          </button>
+        </>
+      ) : stage === 'disputed' ? (
+        <>
+          <p className="printed font-body text-base leading-snug text-ketchup">
+            {notice ?? 'Only one of you confirmed the handoff. This split is flagged for review.'}
+          </p>
+          <button type="button" onClick={onDone} className={PRIMARY}>
+            Done
+          </button>
+        </>
+      ) : (
+        <>
+          <p
+            className="printed font-body text-base leading-snug"
+            style={{ animationDelay: '700ms' }}
+          >
+            {instruction}
+          </p>
 
-      <div className="printed mt-5" style={{ animationDelay: '760ms' }}>
-        <Barcode value={pickupCode} />
-        <p className="mt-2 font-display text-lg font-bold tracking-[0.35em]">{pickupCode}</p>
-        <p className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
-          Show this to your bud
-        </p>
-      </div>
+          {match.pickupCode !== null && (
+            <div className="printed mt-5" style={{ animationDelay: '760ms' }}>
+              <Barcode value={match.pickupCode} />
+              <p className="mt-2 font-display text-lg font-bold tracking-[0.35em]">
+                {match.pickupCode}
+              </p>
+              <p className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
+                Read this out to your bud
+              </p>
+            </div>
+          )}
 
-      <button
-        type="button"
-        onClick={onDone}
-        className="mt-7 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px"
-      >
-        Got the box
-      </button>
+          {role === 'receiver' && !iConfirmed && (
+            <label className="mt-5 block">
+              <span className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
+                The code on {buddy.name}'s receipt
+              </span>
+              <input
+                value={typedCode}
+                onChange={(event) => setTypedCode(event.target.value.toUpperCase())}
+                maxLength={PICKUP_CODE_LENGTH + 2}
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder="------"
+                className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg tracking-[0.35em] focus:outline-none"
+              />
+            </label>
+          )}
+
+          {iConfirmed ? (
+            <p className="mt-7 font-body text-sm leading-snug text-faded" aria-live="polite">
+              You confirmed. Waiting on {waitingOn === null ? 'your bud' : buddy.name} — nothing
+              settles until you both do.
+            </p>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onConfirm(role === 'receiver' ? typedCode : undefined)}
+              disabled={role === 'receiver' && typedCode.trim().length === 0}
+              className={`${PRIMARY} disabled:opacity-35`}
+            >
+              {role === 'orderer' ? 'Handed it over' : 'Got the box'}
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onDone}
+            className="mt-4 w-full font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase underline"
+          >
+            Leave this match
+          </button>
+        </>
+      )}
     </section>
   )
 }
+
+const PRIMARY =
+  'mt-7 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px'

@@ -36,11 +36,27 @@
     // across an unwalkable distance.
     "POOL_CELL_PRECISION": "6",
     "MATCH_RADIUS_METERS": "800",
+    // Pool socket abuse limits (#10).
+    // Concurrent sockets one signed-in account may hold open in one cell. Keyed
+    // on the account, not the IP, so buyers behind one carrier NAT never share
+    // it. An honest buyer needs one socket, or two while a reconnect overlaps.
+    "POOL_MAX_SOCKETS_PER_CELL": "3",
+    // Upgrade attempts one client IP (per /64 on IPv6) may make per sliding
+    // window, across all cells. Sized for a venue NAT: two phones on one Wi-Fi,
+    // each reconnecting a few times, must never trip it. Each allowed attempt
+    // costs one KV write (the free tier allows 1,000 per day).
+    "POOL_UPGRADE_LIMIT": "30",
+    "POOL_UPGRADE_WINDOW_SECONDS": "60",
+    // A handoff is two taps seconds apart once the buddies are standing
+    // together, so five minutes of silence from the second side means the
+    // meeting did not happen — the match is disputed rather than settled.
+    "PICKUP_CONFIRM_TIMEOUT_MS": "300000",
     // Nothing ages out without these. A queued buyer silent for
     // QUEUE_IDLE_SECONDS is dropped, warned QUEUE_WARN_LEAD_SECONDS earlier so
-    // a ping can save them; a match nobody confirms inside
-    // MATCH_CONFIRM_SECONDS is cancelled. Shorten them in `.dev.vars` to watch
-    // the expiry path run in seconds instead of minutes.
+    // a ping can save them; a match neither side has confirmed inside
+    // MATCH_CONFIRM_SECONDS is cancelled. Once one side confirms, the match
+    // leaves this window and PICKUP_CONFIRM_TIMEOUT_MS owns it instead, so the
+    // two timers can never both be running on the same match.
     "QUEUE_IDLE_SECONDS": "900",
     "QUEUE_WARN_LEAD_SECONDS": "120",
     "MATCH_CONFIRM_SECONDS": "600"

@@ -49,14 +49,27 @@ const BUYERS = {
   dana: { sid: sessionId('smoke-dana'), userId: 'smoke-user-dana', name: 'Dana' },
   far: { sid: sessionId('smoke-faraway'), userId: 'smoke-user-faraway', name: 'Faraway' },
   bad: { sid: sessionId('smoke-bad'), userId: 'smoke-user-bad', name: 'Bad' },
+  // Different deals, same block, purely to prove the cell-wide roster
+  // broadcast without any of these three ever actually pairing up.
+  kim: { sid: sessionId('smoke-kim'), userId: 'smoke-user-kim', name: 'Kim' },
+  lee: { sid: sessionId('smoke-lee'), userId: 'smoke-user-lee', name: 'Lee' },
   // Signed in only to be signed out again.
   doomed: { sid: sessionId('smoke-doomed'), userId: 'smoke-user-doomed', name: 'Doomed' },
+  // The pickup handshake pair, and the pair that never finishes one.
+  gus: { sid: sessionId('smoke-gus'), userId: 'smoke-user-gus', name: 'Gus' },
+  hana: { sid: sessionId('smoke-hana'), userId: 'smoke-user-hana', name: 'Hana' },
+  ivy: { sid: sessionId('smoke-ivy'), userId: 'smoke-user-ivy', name: 'Ivy' },
+  jed: { sid: sessionId('smoke-jed'), userId: 'smoke-user-jed', name: 'Jed' },
   // Liveness: one buyer who keeps pinging, one who goes quiet, and a pair who
   // match and then never confirm.
   pinger: { sid: sessionId('smoke-pinger'), userId: 'smoke-user-pinger', name: 'Pinger' },
   stale: { sid: sessionId('smoke-stale'), userId: 'smoke-user-stale', name: 'Stale' },
   slowOne: { sid: sessionId('smoke-slow-one'), userId: 'smoke-user-slow-one', name: 'Slow One' },
   slowTwo: { sid: sessionId('smoke-slow-two'), userId: 'smoke-user-slow-two', name: 'Slow Two' },
+  // A pair where exactly one side confirms: the expiry sweep must leave them to
+  // the dispute path.
+  halfOne: { sid: sessionId('smoke-half-one'), userId: 'smoke-user-half-one', name: 'Half One' },
+  halfTwo: { sid: sessionId('smoke-half-two'), userId: 'smoke-user-half-two', name: 'Half Two' },
 }
 
 /** Write the sessions into the dev server's KV namespace, in one CLI call. */
@@ -89,7 +102,34 @@ function seedSessions() {
   }
 }
 
+const WRANGLER_ENV = { ...process.env, CI: 'true', WRANGLER_SEND_METRICS: 'false' }
+
+/** The ledger tables have to exist before a settled split can be booked. */
+function applyMigrations() {
+  try {
+    execFileSync('npx', ['wrangler', 'd1', 'migrations', 'apply', 'nuggbudz', '--local'], {
+      stdio: 'pipe',
+      env: WRANGLER_ENV,
+    })
+  } catch (error) {
+    log('FAIL  could not apply migrations to the local D1')
+    log(String(error.stderr ?? error))
+    process.exit(1)
+  }
+}
+
+/** Read the ledger the dev server writes to — the same local D1 wrangler sees. */
+function ledgerQuery(sql) {
+  const out = execFileSync(
+    'npx',
+    ['wrangler', 'd1', 'execute', 'nuggbudz', '--local', '--json', '--command', sql],
+    { stdio: ['ignore', 'pipe', 'pipe'], env: WRANGLER_ENV },
+  )
+  return JSON.parse(out.toString())[0]?.results ?? []
+}
+
 seedSessions()
+applyMigrations()
 const cookie = (buyer) => ({ Cookie: `nb_session=${buyer.sid}` })
 
 // --- REST surface ---
@@ -187,9 +227,29 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
   const ws = new WebSocket(`${WS}/api/pool/ws?lat=${lat}&lng=${lng}`, { headers: cookie(buyer) })
   const inbox = []
   const waiters = []
+  // Errors are asserted on in sequence, so each one is consumed rather than
+  // every check re-reading the first error that ever arrived.
+  let errorCursor = 0
+  let keepalive = null
+  const stopKeepalive = () => {
+    if (keepalive !== null) clearInterval(keepalive)
+    keepalive = null
+  }
+  ws.addEventListener('close', stopKeepalive)
   ws.addEventListener('message', (e) => {
     const msg = JSON.parse(e.data)
     inbox.push(msg)
+    // Hold this socket's seat the way the browser client does. A queued buyer
+    // who says nothing is supposed to be dropped, so a harness that never pings
+    // would age its own fixtures out of the market on a short-window server.
+    if (msg.type === 'welcome' && keepalive === null) {
+      const every = Math.max(1_000, Math.floor((msg.expiry?.queueIdleMs ?? 60_000) / 3))
+      keepalive = setInterval(() => {
+        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'ping', at: Date.now() }))
+      }, every)
+      // Never let a keepalive be the reason the process will not exit.
+      keepalive.unref?.()
+    }
     const w = waiters.find((x) => x.type === msg.type)
     if (w) {
       waiters.splice(waiters.indexOf(w), 1)
@@ -205,6 +265,8 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
     name,
     inbox,
     opened,
+    /** Go deliberately quiet, to be aged out of the queue. */
+    stopKeepalive,
     expect(type, ms = 4000) {
       const found = inbox.find((m) => m.type === type)
       if (found) return Promise.resolve(found)
@@ -213,11 +275,40 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
         setTimeout(() => reject(new Error(`${name}: timed out waiting for ${type}`)), ms)
       })
     },
+    /** The next error not yet asserted on. */
+    expectError(ms = 4000) {
+      for (let i = errorCursor; i < inbox.length; i++) {
+        if (inbox[i].type !== 'error') continue
+        errorCursor = i + 1
+        return Promise.resolve(inbox[i])
+      }
+      return new Promise((resolve, reject) => {
+        waiters.push({
+          type: 'error',
+          resolve: (msg) => {
+            errorCursor = inbox.length
+            resolve(msg)
+          },
+        })
+        setTimeout(() => reject(new Error(`${name}: timed out waiting for an error`)), ms)
+      })
+    },
+    /** Has a message of this type turned up by now? Used to assert absence. */
+    async settles(type, ms = 600) {
+      await new Promise((r) => setTimeout(r, ms))
+      return inbox.some((m) => m.type === type)
+    },
     join() {
       // `forgedName` proves the server ignores a client-supplied name: the buddy
       // is shown the name on the session, never this one.
       const payload = { type: 'join', dealId, lat, lng }
       if (forgedName !== null) payload.name = forgedName
+      ws.send(JSON.stringify(payload))
+    },
+    /** A receiver sends the code off their bud's receipt; an orderer just taps. */
+    confirm(code) {
+      const payload = { type: 'confirm_pickup' }
+      if (code !== undefined) payload.code = code
       ws.send(JSON.stringify(payload))
     },
   }
@@ -274,6 +365,21 @@ check(
   matchA.buddy.distanceMeters < 100,
   `${Math.round(matchA.buddy.distanceMeters)}m`,
 )
+check(
+  'only the orderer is given the pickup code',
+  typeof matchA.pickupCode === 'string' && matchA.pickupCode.length === 6,
+  `orderer ${matchA.pickupCode}`,
+)
+check(
+  'the receiver is not given the pickup code',
+  matchB.pickupCode === null,
+  `${matchB.pickupCode}`,
+)
+check(
+  'pickup code is not derived from the match id',
+  matchA.pickupCode !== matchA.matchId.replace(/-/g, '').slice(0, 6).toUpperCase(),
+  `${matchA.pickupCode} vs ${matchA.matchId}`,
+)
 
 // A buyer too far away must not pair, even in the same cell region.
 const far = open(BUYERS.far, 37.84, -122.3937)
@@ -289,13 +395,165 @@ check('survivor told their bud left', left.matchId === matchA.matchId)
 const requeued = await b.expect('waiting')
 check('survivor requeued', requeued.waiting >= 1, JSON.stringify(requeued))
 
+// --- the pickup handshake ---
+// A different deal, so this pair cannot be matched with anyone still queued
+// above: the cell is shared, the market is per deal.
+const g = open(BUYERS.gus, 37.7955, -122.3937, 'wendys-nuggets-20')
+const h = open(BUYERS.hana, 37.7956, -122.3938, 'wendys-nuggets-20')
+await Promise.all([g.opened, h.opened])
+await Promise.all([g.expect('welcome'), h.expect('welcome')])
+g.join()
+await g.expect('waiting')
+h.join()
+const [orderer, receiver] = await Promise.all([g.expect('matched'), h.expect('matched')])
+check(
+  'handshake pair matched on their own deal',
+  orderer.matchId === receiver.matchId && orderer.role === 'orderer',
+  `${orderer.role}/${receiver.role}`,
+)
+
+// A receiver who never met their bud cannot talk their way through.
+h.confirm('ZZZZZZ')
+const wrongCode = await h.expectError()
+check('a wrong code is rejected', wrongCode.code === 'bad_pickup_code', wrongCode.code)
+h.confirm()
+const noCode = await h.expectError()
+check(
+  'a receiver cannot confirm with no code at all',
+  noCode.code === 'bad_pickup_code',
+  noCode.code,
+)
+check('a wrong code completes nothing', (await h.settles('pickup_complete')) === false)
+check('a wrong code confirms nothing', (await h.settles('pickup_confirmed')) === false)
+
+// The real code, typed the way a person types it.
+const typed = `${orderer.pickupCode.slice(0, 3)}-${orderer.pickupCode.slice(3).toLowerCase()}`
+h.confirm(typed)
+const [confirmedForOrderer, confirmedForReceiver] = await Promise.all([
+  g.expect('pickup_confirmed'),
+  h.expect('pickup_confirmed'),
+])
+check(
+  'both sides see the receiver confirm',
+  confirmedForOrderer.by === 'receiver' && confirmedForReceiver.by === 'receiver',
+  `${confirmedForOrderer.by}/${confirmedForReceiver.by}`,
+)
+check(
+  'the orderer is still owed a confirmation',
+  confirmedForOrderer.waitingOn === 'orderer',
+  `${confirmedForOrderer.waitingOn}`,
+)
+check(
+  'a dispute deadline is armed on the half-confirmed match',
+  typeof confirmedForOrderer.disputeAt === 'number' &&
+    confirmedForOrderer.disputeAt > Date.now() + 60_000,
+  `${confirmedForOrderer.disputeAt}`,
+)
+check('one side confirming does not settle', (await h.settles('pickup_complete')) === false)
+
+h.confirm(orderer.pickupCode)
+const twice = await h.expectError()
+check(
+  'a second confirmation from the same side is refused',
+  twice.code === 'already_confirmed',
+  twice.code,
+)
+
+// The orderer taps, and only now does the split settle.
+g.confirm()
+const [doneForOrderer, doneForReceiver] = await Promise.all([
+  g.expect('pickup_complete'),
+  h.expect('pickup_complete'),
+])
+check(
+  'both sides get the same completion',
+  doneForOrderer.matchId === orderer.matchId && doneForReceiver.matchId === orderer.matchId,
+  `${doneForOrderer.matchId}`,
+)
+check(
+  'completion is stamped',
+  typeof doneForOrderer.settledAt === 'number' && doneForOrderer.settledAt > 0,
+  `${doneForOrderer.settledAt}`,
+)
+// Completion, and only completion, is what books a split.
+const booked = ledgerQuery(`SELECT * FROM matches WHERE match_id = '${orderer.matchId}'`)
+check(
+  'the settled split is written to the ledger',
+  booked.length === 1 &&
+    booked[0].settled_at > 0 &&
+    booked[0].total_collected_cents === orderer.settlement.totalCollectedCents,
+  JSON.stringify(booked[0] ?? null),
+)
+const bookedBuyers = ledgerQuery(
+  `SELECT role, pay_cents FROM match_buyers WHERE match_id = '${orderer.matchId}' ORDER BY role`,
+)
+check(
+  'both halves are booked, and they sum to the total',
+  bookedBuyers.length === 2 &&
+    bookedBuyers.reduce((sum, row) => sum + row.pay_cents, 0) ===
+      orderer.settlement.totalCollectedCents,
+  JSON.stringify(bookedBuyers),
+)
+const unsettled = ledgerQuery(`SELECT match_id FROM matches WHERE match_id = '${matchA.matchId}'`)
+check('an abandoned match is never booked', unsettled.length === 0, JSON.stringify(unsettled))
+
+g.confirm()
+const afterSettled = await g.expectError()
+check(
+  'a settled match cannot be confirmed again',
+  afterSettled.code === 'not_matched',
+  afterSettled.code,
+)
+
+// One-sided confirmation plus a vanished bud is a dispute, never a settlement.
+// The other route to the same state — the confirmation timeout — is not run
+// here because it would mean holding this script open for PICKUP_CONFIRM_TIMEOUT_MS.
+// To drive it by hand, put `PICKUP_CONFIRM_TIMEOUT_MS="2000"` in `.dev.vars`,
+// restart the dev server, and half-confirm a match: the alarm disputes it.
+const i = open(BUYERS.ivy, 37.7955, -122.3937, 'bk-nuggets-20')
+const j = open(BUYERS.jed, 37.7956, -122.3938, 'bk-nuggets-20')
+await Promise.all([i.opened, j.opened])
+await Promise.all([i.expect('welcome'), j.expect('welcome')])
+i.join()
+await i.expect('waiting')
+j.join()
+const [ordererI, receiverJ] = await Promise.all([i.expect('matched'), j.expect('matched')])
+j.confirm(ordererI.pickupCode)
+await j.expect('pickup_confirmed')
+i.ws.close()
+const disputed = await j.expect('pickup_disputed')
+check(
+  'a bud who leaves after one confirmation raises a dispute',
+  disputed.matchId === receiverJ.matchId && disputed.confirmedBy === 'receiver',
+  JSON.stringify(disputed),
+)
+check('a disputed match never settles', (await j.settles('pickup_complete')) === false)
+check(
+  'a disputed match does not quietly requeue the survivor',
+  (await j.settles('waiting')) === false,
+)
+const disputedRows = ledgerQuery(
+  `SELECT match_id FROM matches WHERE match_id = '${receiverJ.matchId}'`,
+)
+check('a disputed match is never booked', disputedRows.length === 0, JSON.stringify(disputedRows))
+j.confirm(ordererI.pickupCode)
+const afterDispute = await j.expectError()
+check(
+  'a disputed match cannot be confirmed away',
+  afterDispute.code === 'not_matched',
+  afterDispute.code,
+)
+
 // Protocol hygiene.
 const c = open(BUYERS.bad, 37.7955, -122.3937)
 await c.opened
 await c.expect('welcome')
 c.ws.send('this is not json')
-const err = await c.expect('error')
+const err = await c.expectError()
 check('garbage rejected', err.code === 'bad_message', err.code)
+c.confirm('A2B3C4')
+const unmatched = await c.expectError()
+check('confirming without a match is refused', unmatched.code === 'not_matched', unmatched.code)
 c.ws.send(
   JSON.stringify({
     type: 'join',
@@ -317,6 +575,63 @@ check(
   JSON.stringify(c.inbox.filter((m) => m.type === 'error')),
 )
 
+// --- cell map roster broadcast ---
+// The cell map needs everyone's client to hear about a roster change, not
+// just the socket that caused it — so a third buyer joining the cell must
+// push a fresh 'waiting' message to every buyer already queued there, on any
+// deal, with the newcomer's position quantized rather than exact.
+//
+// Everyone still connected from the handshake checks above (`g`, `h`, `j`) has
+// settled or disputed their match and is back to idle, not waiting, so the only
+// buddy left in the cell at this point is the requeued `b`.
+const kim = open(BUYERS.kim, 37.7955, -122.3937, 'wendys-nuggets-20')
+await kim.opened
+kim.join()
+const kimWaiting = await kim.expect('waiting')
+check(
+  // `far` is a deliberately different cell (see the "distant buyer" check
+  // above), so the only buddy kim should see here is the requeued `b` —
+  // proving the roster is cell-wide (any deal) rather than global.
+  'buddy roster is cell-wide, not scoped to one deal',
+  kimWaiting.waiting === 1 && kimWaiting.buddies.length === 1,
+  JSON.stringify(kimWaiting),
+)
+
+const bWaitingBefore = b.inbox.filter((m) => m.type === 'waiting').length
+const lee = open(BUYERS.lee, 37.7955, -122.3937, 'bk-nuggets-20')
+await lee.opened
+lee.join()
+await lee.expect('waiting')
+
+const broadcastSeen = await (async () => {
+  for (let i = 0; i < 40; i++) {
+    if (b.inbox.filter((m) => m.type === 'waiting').length > bWaitingBefore) return true
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return false
+})()
+check(
+  'a buyer already queued gets a fresh roster broadcast when someone new joins the cell',
+  broadcastSeen,
+  `${bWaitingBefore} -> ${b.inbox.filter((m) => m.type === 'waiting').length}`,
+)
+
+const latestForB = b.inbox.filter((m) => m.type === 'waiting').at(-1)
+check(
+  'the broadcast roster carries a position for the newcomer',
+  latestForB.buddies.some(
+    (pos) => Math.abs(pos.lat - 37.7955) < 0.01 && Math.abs(pos.lng - -122.3937) < 0.01,
+  ),
+  JSON.stringify(latestForB.buddies),
+)
+check(
+  'the broadcast never carries an exact coordinate for anyone else',
+  latestForB.buddies.every((pos) => pos.lat !== 37.7955 || pos.lng !== -122.3937),
+  JSON.stringify(latestForB.buddies),
+)
+
+for (const s of [b, far, c, g, h, j, kim, lee]) s.ws.close()
+
 // --- liveness: stale queue entries and unconfirmed matches ---
 const windows = welcomeA.expiry ?? {}
 check(
@@ -333,8 +648,16 @@ await pinger.expect('welcome')
 pinger.join()
 await pinger.expect('waiting')
 pinger.ws.send(JSON.stringify({ type: 'ping', at: 4242 }))
-const pong = await pinger.expect('pong')
-check('a ping is answered while queued', pong.at === 4242, JSON.stringify(pong))
+// Matched on `at` rather than taking the first pong: the harness keepalive is
+// also pinging, so several pongs are legitimately in flight.
+const sawPong = await (async () => {
+  for (let i = 0; i < 40; i++) {
+    if (pinger.inbox.some((msg) => msg.type === 'pong' && msg.at === 4242)) return true
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return false
+})()
+check('a ping is answered while queued', sawPong)
 
 const shortWindows = windows.queueIdleMs <= 20_000 && windows.matchTimeoutMs <= 20_000
 if (!shortWindows) {
@@ -349,6 +672,8 @@ if (!shortWindows) {
   const stale = open(BUYERS.stale, 41.8781, -87.6298)
   await stale.opened
   await stale.expect('welcome')
+  // The one socket that must not hold its own seat.
+  stale.stopKeepalive()
   stale.join()
   await stale.expect('waiting')
   const expiring = await stale.expect('queue_expiring', patience(windows.queueIdleMs))
@@ -387,10 +712,40 @@ if (!shortWindows) {
     cancelOne.refundedCents === 0 && cancelTwo.refundedCents === 0,
   )
 
-  for (const s of [stale, slowOne, slowTwo]) s.ws.close()
+  // The boundary between the two timers, which is the thing most easily broken
+  // by wiring expiry in next to the handshake: once one side has confirmed, the
+  // match belongs to the dispute path and the expiry sweep must not touch it.
+  // Cancelling it here would erase a buddy's claim that the nuggets changed
+  // hands — exactly what the two-sided handshake exists to prevent.
+  const halfOne = open(BUYERS.halfOne, 39.9526, -75.1652)
+  const halfTwo = open(BUYERS.halfTwo, 39.9527, -75.1653)
+  await Promise.all([halfOne.opened, halfTwo.opened])
+  await Promise.all([halfOne.expect('welcome'), halfTwo.expect('welcome')])
+  halfOne.join()
+  await halfOne.expect('waiting')
+  halfTwo.join()
+  const [halfMatchOne] = await Promise.all([halfOne.expect('matched'), halfTwo.expect('matched')])
+  // The orderer confirms by tapping; only they need no code to do it.
+  const orderer = halfMatchOne.role === 'orderer' ? halfOne : halfTwo
+  orderer.confirm()
+  const halfConfirmed = await halfOne.expect('pickup_confirmed')
+  check(
+    'one side confirming is recorded and still waiting on the other',
+    halfConfirmed.waitingOn !== null && halfConfirmed.disputeAt !== null,
+    JSON.stringify(halfConfirmed),
+  )
+  // Waited out the whole window that *would* have cancelled it unconfirmed.
+  const hijacked = await halfOne.settles('match_expired', patience(windows.matchTimeoutMs))
+  check(
+    'a half-confirmed match is left to the dispute path, not expiry-cancelled',
+    hijacked === false,
+    JSON.stringify(halfOne.inbox.map((m) => m.type)),
+  )
+
+  for (const s of [stale, slowOne, slowTwo, halfOne, halfTwo]) s.ws.close()
 }
 
-for (const s of [b, far, c, pinger]) s.ws.close()
+pinger.ws.close()
 
 log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

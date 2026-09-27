@@ -3,8 +3,10 @@ import { DEALS, findDeal } from '../shared/deals'
 import { analyzeSpread, settle } from '../shared/economics'
 import { geohash } from '../shared/geo'
 import { PROTOCOL_VERSION } from '../shared/protocol'
+import { clientKey as deriveClientKey } from '../shared/ratelimit'
 import { authRoutes, sessionFromRequest } from './auth'
 import { type Env, intVar } from './env'
+import { checkUpgradeRate } from './ratelimit'
 
 export { NuggPool } from './pool'
 
@@ -67,6 +69,19 @@ app.get('/api/pool/ws', async (c) => {
     return c.json({ error: 'lng must be a number in -180..180' }, 400)
   }
 
+  // Cloudflare sets CF-Connecting-IP at the edge and a caller cannot override
+  // it, unlike X-Forwarded-For. Local dev may omit it; those share one bucket.
+  const clientKey = deriveClientKey(c.req.header('CF-Connecting-IP')) ?? 'unknown'
+
+  // Checked here, before the pool is addressed, so a flood costs a KV read and
+  // no Durable Object time. It runs after the session check so an
+  // unauthenticated flood is turned away without touching the limiter's keys.
+  const rate = await checkUpgradeRate(c.env, clientKey)
+  if (!rate.allowed) {
+    c.header('Retry-After', String(rate.retryAfterSeconds))
+    return c.json({ error: 'too many connection attempts, slow down' }, 429)
+  }
+
   const cell = geohash(lat, lng, intVar(c.env.POOL_CELL_PRECISION, 6))
   const stub = c.env.NUGG_POOL.get(c.env.NUGG_POOL.idFromName(cell))
 
@@ -77,6 +92,33 @@ app.get('/api/pool/ws', async (c) => {
   url.searchParams.set('userId', active.session.userId)
   url.searchParams.set('displayName', active.session.displayName)
   return stub.fetch(new Request(url, c.req.raw))
+})
+
+/**
+ * Aggregate platform stats, computed in SQL rather than fetched-and-reduced —
+ * these numbers only ever get more rows, and D1 is much better at summing
+ * millions of them than the Worker is.
+ */
+app.get('/api/stats', async (c) => {
+  const row = await c.env.DB.prepare(
+    `SELECT
+       COUNT(*) AS splits_settled,
+       COALESCE(SUM(platform_fee_cents), 0) AS fees_collected_cents,
+       COALESCE((
+         SELECT SUM(mb.solo_baseline_cents - mb.pay_cents)
+         FROM match_buyers mb
+         JOIN matches m ON m.match_id = mb.match_id
+         WHERE m.settled_at IS NOT NULL
+       ), 0) AS total_saved_cents
+     FROM matches
+     WHERE settled_at IS NOT NULL`,
+  ).first<{ splits_settled: number; fees_collected_cents: number; total_saved_cents: number }>()
+
+  return c.json({
+    splitsSettled: row?.splits_settled ?? 0,
+    totalSavedCents: row?.total_saved_cents ?? 0,
+    feesCollectedCents: row?.fees_collected_cents ?? 0,
+  })
 })
 
 app.all('/api/*', (c) => c.json({ error: 'not found' }, 404))

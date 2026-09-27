@@ -1,7 +1,11 @@
-import type { MatchedMessage, ServerMessage } from '@shared/protocol'
+import type { BuyerRole } from '@shared/economics'
+import type { CellBuddy, MatchedMessage, ServerMessage } from '@shared/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-export type PoolStage = 'idle' | 'connecting' | 'waiting' | 'matched'
+export type PoolStage = 'idle' | 'connecting' | 'waiting' | 'matched' | 'settled' | 'disputed'
+
+/** Stages where the socket has done its job and a close is not an error. */
+const TERMINAL: readonly PoolStage[] = ['matched', 'settled', 'disputed']
 
 export interface JoinRequest {
   dealId: string
@@ -15,6 +19,15 @@ export interface PoolState {
   waiting: number
   queuedAhead: number
   cell: string | null
+  /**
+   * Where you told the server you are standing. Kept around (not just handed
+   * off to `join` and discarded) so the cell map has a "you are here" marker
+   * to draw at full precision — the server only ever coarsens *other*
+   * buyers' positions, since this one is already yours.
+   */
+  own: { lat: number; lng: number } | null
+  /** Everyone else waiting in your cell, snapped to a coarse grid server-side. */
+  buddies: CellBuddy[]
   match: MatchedMessage | null
   error: string | null
   /**
@@ -22,6 +35,10 @@ export interface PoolState {
    * walked away, your entry went stale, or a match was never confirmed.
    */
   notice: string | null
+  /** Sides of the handoff confirmed so far. */
+  confirmed: BuyerRole[]
+  /** The side still owing a confirmation, while the handshake is half done. */
+  waitingOn: BuyerRole | null
 }
 
 const INITIAL: PoolState = {
@@ -29,9 +46,13 @@ const INITIAL: PoolState = {
   waiting: 0,
   queuedAhead: 0,
   cell: null,
+  own: null,
+  buddies: [],
   match: null,
   error: null,
   notice: null,
+  confirmed: [],
+  waitingOn: null,
 }
 
 /**
@@ -110,7 +131,7 @@ export function usePool() {
   const join = useCallback(
     (request: JoinRequest) => {
       close()
-      setState({ ...INITIAL, stage: 'connecting' })
+      setState({ ...INITIAL, stage: 'connecting', own: { lat: request.lat, lng: request.lng } })
 
       const socket = new WebSocket(socketUrl(request))
       socketRef.current = socket
@@ -146,15 +167,44 @@ export function usePool() {
                 stage: 'waiting',
                 waiting: message.waiting,
                 queuedAhead: message.queuedAhead,
+                buddies: message.buddies,
               }
             case 'matched':
-              return { ...prev, stage: 'matched', match: message, notice: null }
+              return {
+                ...prev,
+                stage: 'matched',
+                match: message,
+                notice: null,
+                confirmed: [],
+                waitingOn: null,
+              }
             case 'buddy_left':
               return {
                 ...prev,
                 stage: 'waiting',
                 match: null,
                 notice: 'Your bud dropped out. Back in the queue.',
+              }
+            case 'pickup_confirmed':
+              return {
+                ...prev,
+                error: null,
+                confirmed: prev.confirmed.includes(message.by)
+                  ? prev.confirmed
+                  : [...prev.confirmed, message.by],
+                waitingOn: message.waitingOn,
+              }
+            case 'pickup_complete':
+              return { ...prev, stage: 'settled', waitingOn: null, error: null }
+            case 'pickup_disputed':
+              return {
+                ...prev,
+                stage: 'disputed',
+                waitingOn: null,
+                notice:
+                  message.reason === 'buddy_left'
+                    ? 'Your bud left before confirming. This split is flagged for review.'
+                    : 'Only one of you confirmed in time. This split is flagged for review.',
               }
             case 'queue_expiring':
               return {
@@ -167,6 +217,8 @@ export function usePool() {
                 stage: 'idle',
                 waiting: 0,
                 queuedAhead: 0,
+                // No longer in the market, so the cell's dots are not yours to show.
+                buddies: [],
                 notice: `Dropped from the queue after ${humanWindow(message.idleMs)} of quiet. Join again when you are ready.`,
               }
             case 'match_expired':
@@ -174,6 +226,10 @@ export function usePool() {
                 ...prev,
                 stage: 'idle',
                 match: null,
+                // Never confirmed by either side, so there is no half-done
+                // handshake to keep on screen — that is the disputed stage.
+                confirmed: [],
+                waitingOn: null,
                 notice: 'That match went unconfirmed and was called off. Nothing was charged.',
               }
             case 'error':
@@ -189,7 +245,7 @@ export function usePool() {
         socketRef.current = null
         stopKeepalive()
         setState((prev) =>
-          prev.stage === 'matched'
+          TERMINAL.includes(prev.stage)
             ? prev
             : { ...prev, stage: 'idle', error: 'Lost the connection. Try again.' },
         )
@@ -198,5 +254,15 @@ export function usePool() {
     [close, startKeepalive, stopKeepalive],
   )
 
-  return { ...state, join, leave }
+  /**
+   * Say the handoff happened. The receiver sends the code off their bud's
+   * receipt; the orderer sends nothing, because they are the receipt.
+   */
+  const confirmPickup = useCallback((code?: string) => {
+    const socket = socketRef.current
+    if (socket === null || socket.readyState !== WebSocket.OPEN) return
+    socket.send(JSON.stringify({ type: 'confirm_pickup', code: code ?? null }))
+  }, [])
+
+  return { ...state, join, leave, confirmPickup }
 }

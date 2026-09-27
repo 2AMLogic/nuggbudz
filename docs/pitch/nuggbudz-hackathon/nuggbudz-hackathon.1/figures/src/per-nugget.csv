@@ -1,0 +1,7 @@
+deal_id,merchant,basket,label,pieces,price_cents,cents_per_piece
+mcd-nuggets-20,"McDonald's",bulk,"20pc Chicken McNuggets",20,799,39.95
+mcd-nuggets-20,"McDonald's",solo,"10pc Chicken McNuggets",10,699,69.90
+wendys-nuggets-20,"Wendy's",bulk,"20pc Crispy Chicken Nuggets",20,849,42.45
+wendys-nuggets-20,"Wendy's",solo,"10pc Crispy Chicken Nuggets",10,729,72.90
+bk-nuggets-20,"Burger King",bulk,"20pc Chicken Nuggets",20,599,29.95
+bk-nuggets-20,"Burger King",solo,"8pc Chicken Nuggets",8,449,56.13

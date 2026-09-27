@@ -7,11 +7,16 @@ export interface Env {
   SESSIONS: KVNamespace
   POOL_CELL_PRECISION: string
   MATCH_RADIUS_METERS: string
+  POOL_MAX_SOCKETS_PER_CELL: string
+  POOL_UPGRADE_LIMIT: string
+  POOL_UPGRADE_WINDOW_SECONDS: string
+  /** How long a one-sided pickup confirmation waits before it is a dispute. */
+  PICKUP_CONFIRM_TIMEOUT_MS?: string
   /** Silence from a queued buyer before their entry is dropped. */
   QUEUE_IDLE_SECONDS?: string
   /** How far ahead of that drop the buyer is warned. */
   QUEUE_WARN_LEAD_SECONDS?: string
-  /** How long a match may sit unconfirmed before it is cancelled. */
+  /** How long a match nobody has confirmed at all waits before it is cancelled. */
   MATCH_CONFIRM_SECONDS?: string
   /**
    * Google OAuth client credentials. Optional so a checkout without them still

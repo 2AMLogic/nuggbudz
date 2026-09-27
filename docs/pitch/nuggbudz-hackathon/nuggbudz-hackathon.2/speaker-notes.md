@@ -151,16 +151,18 @@ passes the principal down; a `name` on the wire is ignored.)
 
 ## 10. Deployed, and verified end to end
 
-**Talk track**: Deployed, and 57/57 end-to-end checks pass across the Worker,
+**Talk track**: Deployed, and 61/61 end-to-end checks pass across the Worker,
 the Durable Object, KV and D1 — two independent sockets in one cell,
 complementary roles, identical settlement, a buddy name that comes from the
 session rather than the wire, a buyer outside the radius left waiting, a
-survivor requeued when their buddy disconnects, and the two-sided pickup
-handshake: only the orderer holds the code, a wrong code settles nothing, and a
-row reaches the ledger only when both sides confirm. Then say the fourth
+survivor requeued when their buddy disconnects, the two-sided pickup handshake
+— only the orderer holds the code, a wrong code settles nothing, and a row
+reaches the ledger only when both sides confirm — and a hand-rolled join frame
+naming a chain we do not offer refused on the socket itself, not just hidden
+from the storefront. Then say the fourth
 bullet: no users, no revenue, no pilot.
 
-**Anticipated questions**: Is that against production? (The 57-check run is
+**Anticipated questions**: Is that against production? (The 61-check run is
 against a full local stack — `pnpm dev` plus the real bindings — because the
 pool socket now requires a session and `pnpm smoke` seeds sessions into the
 local KV namespace. The deployment is behind `main`, on the pre-sign-in build,

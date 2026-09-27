@@ -17,6 +17,23 @@ describe('parseClientMessage', () => {
     })
   })
 
+  it('accepts a join with no coordinates — the server places the socket', () => {
+    // The promptless default: the buyer never turned on precise location, so the
+    // client has nothing to send and the Worker's resolved fix stands.
+    const raw = JSON.stringify({ type: 'join', dealId: 'mcd-nuggets-20' })
+    expect(parseClientMessage(raw)).toEqual({ type: 'join', dealId: 'mcd-nuggets-20' })
+  })
+
+  it('rejects a join carrying half a coordinate', () => {
+    // Optional means both or neither. One of the pair is a malformed message,
+    // not a location.
+    expect(parseClientMessage(JSON.stringify({ type: 'join', dealId: 'd', lat: 37 }))).toBeNull()
+    expect(parseClientMessage(JSON.stringify({ type: 'join', dealId: 'd', lng: -122 }))).toBeNull()
+    expect(
+      parseClientMessage(JSON.stringify({ type: 'join', dealId: 'd', lat: null, lng: null })),
+    ).toBeNull()
+  })
+
   it('ignores a client-supplied name — identity comes from the session', () => {
     const raw = JSON.stringify({
       type: 'join',

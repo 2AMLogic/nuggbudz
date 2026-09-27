@@ -1,8 +1,9 @@
 import type { BuyerRole, BuyerShare, Settlement } from './economics'
+import type { LocationSource } from './location'
 import { normalizePickupCode } from './pickup'
 
 /** Wire protocol version. Bump on any breaking message change. */
-export const PROTOCOL_VERSION = 3
+export const PROTOCOL_VERSION = 4
 
 /**
  * Take a seat in the pool.
@@ -10,12 +11,19 @@ export const PROTOCOL_VERSION = 3
  * There is deliberately no `name` here: the display name comes from the session
  * the socket was upgraded with, so a buyer cannot present themselves to a buddy
  * as somebody else.
+ *
+ * Coordinates are optional, and normally absent. The server resolves a location
+ * for the socket at upgrade time — from the edge when the buyer has not turned on
+ * precise location — so the common case sends nothing but a deal. A client that
+ * does send them has an exact fix the buyer opted into, which sharpens the
+ * walking distance inside the cell; it can never change the cell, which was
+ * fixed when the socket was upgraded.
  */
 export interface JoinMessage {
   type: 'join'
   dealId: string
-  lat: number
-  lng: number
+  lat?: number
+  lng?: number
 }
 
 export interface CancelMessage {
@@ -48,6 +56,12 @@ export interface WelcomeMessage {
   protocol: number
   /** Geohash cell this connection was routed to. */
   cell: string
+  /**
+   * Which rung of the location fallback produced that cell. The client shows
+   * this: a buyer on the demo cell should never be told they were placed
+   * precisely.
+   */
+  locationSource: LocationSource
   waiting: number
   /** Who the server thinks you are, straight off your session. */
   user: {
@@ -176,6 +190,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       // is the only one the server will ever show a buddy.
       const { dealId, lat, lng } = msg
       if (typeof dealId !== 'string' || dealId.length === 0 || dealId.length > 64) return null
+      // No coordinates is the normal case: the server already resolved a location
+      // for this socket. Half a pair is neither a location nor a valid message.
+      if (lat === undefined && lng === undefined) return { type: 'join', dealId }
       if (typeof lat !== 'number' || typeof lng !== 'number') return null
       if (!Number.isFinite(lat) || lat < -90 || lat > 90) return null
       if (!Number.isFinite(lng) || lng < -180 || lng > 180) return null

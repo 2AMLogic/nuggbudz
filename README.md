@@ -24,7 +24,10 @@ $8.98 collected. The gross retail spread is $5.99 per pairing.
 
 ## How it works
 
-1. Sign in with Google, pick a deal and share your location once.
+1. Sign in with Google and pick a deal. There is no location prompt: the Worker
+   places you from Cloudflare's edge geo (`request.cf`), which is accurate to
+   about a neighbourhood — exactly what a cell needs. "Use my exact location" is
+   a separate control, and the only thing that ever asks permission.
 2. You join the pool for your **cell** — a geohash precision-6 box, roughly
    1.2km × 0.6km.
 3. The moment another buyer within walking distance wants the same box, you are
@@ -39,8 +42,8 @@ Browser (React 19, Tailwind 4)
    │  GET /api/deals            catalogue + settlement + spread
    │  WS  /api/pool/ws          live pairing — requires a session
    ▼
-Cloudflare Worker (Hono)  ── derives the geohash cell server-side,
-   │                          and the buyer's identity from their session
+Cloudflare Worker (Hono)  ── derives the geohash cell server-side (edge geo,
+   │                          no prompt) and the buyer's identity from their session
    ├─▶ KV: SESSIONS      ── opaque session ids, pending PKCE state, Google JWKS
    ├─▶ D1: users         ── one row per Google account
    ▼
@@ -75,9 +78,21 @@ as an authorized redirect URI. Without one the app still boots and the auth
 routes answer `503`; `pnpm test` and `pnpm smoke` do not need it. `.dev.vars` is
 gitignored and `GOOGLE_CLIENT_SECRET` never belongs in `wrangler.jsonc`.
 
-Two browser windows (or two phones on the same wifi) joining with nearby
-coordinates will pair with each other live. If the browser refuses geolocation,
-the app falls back to a fixed demo cell and says so.
+Two browser windows (or two phones on the same wifi) will pair with each other
+live, with location permission denied on both — the cell comes from the server.
+Location resolves in three rungs, most precise first (`shared/location.ts`):
+
+| Rung | Source | Prompts? |
+|------|--------|----------|
+| 1 | coordinates from the client | only if the buyer tapped "use my exact location" |
+| 2 | `request.cf.latitude` / `.longitude` at the edge | no |
+| 3 | a fixed demo origin | no |
+
+Rung 2 works locally too: miniflare fetches a real `cf` and caches it in
+`node_modules/.mf/cf.json`, so `pnpm dev` places you in your own city. Strip the
+coordinates out of that file (or run with no network) and every socket drops to
+rung 3 instead of failing — `pnpm smoke` passes either way. The screen always
+says which rung placed you, and only rung 1 is ever described as exact.
 
 ```bash
 pnpm test             # pure logic: settlement, geo, matchmaking, auth, protocol

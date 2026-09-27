@@ -14,6 +14,8 @@
  *
  * Usage:  pnpm dev --port 5199     (in one shell)
  *         pnpm smoke               (in another)
+ *
+ * `BASE` overrides the target, e.g. BASE=http://localhost:5211 pnpm smoke.
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
@@ -48,6 +50,9 @@ const BUYERS = {
   hana: { sid: sessionId('smoke-hana'), userId: 'smoke-user-hana', name: 'Hana' },
   ivy: { sid: sessionId('smoke-ivy'), userId: 'smoke-user-ivy', name: 'Ivy' },
   jed: { sid: sessionId('smoke-jed'), userId: 'smoke-user-jed', name: 'Jed' },
+  // The pair that never sends a coordinate: the promptless path.
+  kai: { sid: sessionId('smoke-kai'), userId: 'smoke-user-kai', name: 'Kai' },
+  lex: { sid: sessionId('smoke-lex'), userId: 'smoke-user-lex', name: 'Lex' },
 }
 
 /** Write the sessions into the dev server's KV namespace, in one CLI call. */
@@ -199,10 +204,37 @@ check(
 const afterLogout = await fetch(`${BASE}/api/auth/me`, { headers: cookie(BUYERS.doomed) })
 check('logout revokes the session', afterLogout.status === 401, `status ${afterLogout.status}`)
 
+// A coordinate that is present but unusable is a client bug, not a reason to
+// quietly file the buyer under some other cell.
+const badCoordsOpened = await new Promise((resolve) => {
+  const ws = new WebSocket(`${WS}/api/pool/ws?lat=north&lng=west`, { headers: cookie(BUYERS.bad) })
+  ws.addEventListener('open', () => {
+    ws.close()
+    resolve(true)
+  })
+  ws.addEventListener('error', () => resolve(false))
+  setTimeout(() => resolve(false), 4000)
+})
+check('an unusable coordinate is refused rather than relocated', badCoordsOpened === false)
+
 // --- live pairing ---
+/**
+ * Open a pool socket. Pass `null, null` for coordinates to exercise the path a
+ * phone with location denied takes: nothing is sent, and the server resolves the
+ * cell itself (from `request.cf` when deployed, from the demo origin locally).
+ */
 function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
   const name = buyer.name
-  const ws = new WebSocket(`${WS}/api/pool/ws?lat=${lat}&lng=${lng}`, { headers: cookie(buyer) })
+  const placed = lat !== null && lat !== undefined && lng !== null && lng !== undefined
+  const params = new URLSearchParams()
+  if (placed) {
+    params.set('lat', String(lat))
+    params.set('lng', String(lng))
+  }
+  const query = params.toString()
+  const ws = new WebSocket(`${WS}/api/pool/ws${query === '' ? '' : `?${query}`}`, {
+    headers: cookie(buyer),
+  })
   const inbox = []
   const waiters = []
   // Errors are asserted on in sequence, so each one is consumed rather than
@@ -260,7 +292,11 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
     join() {
       // `forgedName` proves the server ignores a client-supplied name: the buddy
       // is shown the name on the session, never this one.
-      const payload = { type: 'join', dealId, lat, lng }
+      const payload = { type: 'join', dealId }
+      if (placed) {
+        payload.lat = lat
+        payload.lng = lng
+      }
       if (forgedName !== null) payload.name = forgedName
       ws.send(JSON.stringify(payload))
     },
@@ -288,6 +324,11 @@ check(
   'welcome carries the authenticated identity',
   welcomeA.user?.id === BUYERS.robb.userId && welcomeA.user?.name === 'Robb',
   JSON.stringify(welcomeA.user),
+)
+check(
+  'welcome names the rung that placed the socket',
+  welcomeA.locationSource === 'client',
+  `${welcomeA.locationSource}`,
 )
 
 a.join()
@@ -503,6 +544,50 @@ check(
   afterDispute.code,
 )
 
+// --- pairing with no location permission at all ---
+// Neither of these sends a coordinate, in the upgrade or in the join, which is
+// what a phone with location denied does. The server places both from
+// `request.cf`, and from the fixed demo origin when there is no `cf` to read —
+// miniflare usually supplies one locally, but an offline or trimmed one has no
+// coordinates, so both answers are acceptable here as long as a cell comes out.
+const k = open(BUYERS.kai, null, null, 'wendys-nuggets-20')
+const l = open(BUYERS.lex, null, null, 'wendys-nuggets-20')
+await Promise.all([k.opened, l.opened])
+const welcomeK = await k.expect('welcome')
+check(
+  'a socket with no coordinates still resolves a cell',
+  typeof welcomeK.cell === 'string' && welcomeK.cell.length === 6,
+  `${welcomeK.cell}`,
+)
+check(
+  'and says which rung placed it, never claiming an exact fix',
+  welcomeK.locationSource === 'edge' || welcomeK.locationSource === 'demo',
+  `${welcomeK.locationSource} — 'edge' when request.cf carries coordinates, 'demo' when it does not`,
+)
+await l.expect('welcome')
+k.join()
+await k.expect('waiting')
+l.join()
+const [matchK, matchL] = await Promise.all([k.expect('matched'), l.expect('matched')])
+check(
+  'two buyers who never shared their location pair anyway',
+  matchK.matchId === matchL.matchId,
+  `${matchK.matchId} / ${matchL.matchId}`,
+)
+// The catalogue is the source of truth for prices, so this reads the half off
+// the deal rather than restating a number.
+const wendysHalf = deals.find((d) => d.id === 'wendys-nuggets-20').settlement.shares[1].payCents
+check(
+  'the split is the same as any other pairing on this deal',
+  matchK.share.payCents === wendysHalf && matchL.share.payCents === wendysHalf,
+  `${matchK.share.payCents}/${matchL.share.payCents} vs ${wendysHalf}`,
+)
+check(
+  'distance is measured from the server-resolved origin',
+  matchK.buddy.distanceMeters < 1,
+  `${matchK.buddy.distanceMeters}m`,
+)
+
 // Protocol hygiene.
 const c = open(BUYERS.bad, 37.7955, -122.3937)
 await c.opened
@@ -534,7 +619,7 @@ check(
   JSON.stringify(c.inbox.filter((m) => m.type === 'error')),
 )
 
-for (const s of [b, far, c, g, h, j]) s.ws.close()
+for (const s of [b, far, c, g, h, j, k, l]) s.ws.close()
 
 log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

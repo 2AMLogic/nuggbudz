@@ -35,6 +35,14 @@
     // MATCH_RADIUS_METERS inside the cell so cell-edge buddies aren't matched
     // across an unwalkable distance.
     "POOL_CELL_PRECISION": "6",
-    "MATCH_RADIUS_METERS": "800"
+    "MATCH_RADIUS_METERS": "800",
+    // Nothing ages out without these. A queued buyer silent for
+    // QUEUE_IDLE_SECONDS is dropped, warned QUEUE_WARN_LEAD_SECONDS earlier so
+    // a ping can save them; a match nobody confirms inside
+    // MATCH_CONFIRM_SECONDS is cancelled. Shorten them in `.dev.vars` to watch
+    // the expiry path run in seconds instead of minutes.
+    "QUEUE_IDLE_SECONDS": "900",
+    "QUEUE_WARN_LEAD_SECONDS": "120",
+    "MATCH_CONFIRM_SECONDS": "600"
   }
 }

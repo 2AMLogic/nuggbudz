@@ -7,6 +7,12 @@ export interface Env {
   SESSIONS: KVNamespace
   POOL_CELL_PRECISION: string
   MATCH_RADIUS_METERS: string
+  /** Silence from a queued buyer before their entry is dropped. */
+  QUEUE_IDLE_SECONDS?: string
+  /** How far ahead of that drop the buyer is warned. */
+  QUEUE_WARN_LEAD_SECONDS?: string
+  /** How long a match may sit unconfirmed before it is cancelled. */
+  MATCH_CONFIRM_SECONDS?: string
   /**
    * Google OAuth client credentials. Optional so a checkout without them still
    * boots — the auth routes answer 503 instead of the Worker failing to start.

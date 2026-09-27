@@ -13,3 +13,12 @@ GOOGLE_CLIENT_SECRET=""
 # Optional. Pins the OAuth callback origin when the Worker sits behind a proxy
 # that rewrites the Host header. Defaults to the request's own origin.
 # PUBLIC_ORIGIN="https://nuggbudz.example.com"
+
+# Liveness windows for the pool, in seconds. Production values live in
+# wrangler.jsonc (15 min of quiet before a queue entry is dropped, 10 min before
+# an unconfirmed match is cancelled). Shrink them here to watch the expiry path
+# run in seconds — `pnpm smoke` runs its expiry checks only when the queue
+# window is 20s or less.
+# QUEUE_IDLE_SECONDS="6"
+# QUEUE_WARN_LEAD_SECONDS="3"
+# MATCH_CONFIRM_SECONDS="8"

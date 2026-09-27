@@ -2,6 +2,16 @@ import { DurableObject } from 'cloudflare:workers'
 import { findDeal } from '../shared/deals'
 import type { BuyerRole } from '../shared/economics'
 import { settle } from '../shared/economics'
+import {
+  DEFAULT_EXPIRY_WINDOWS,
+  type ExpiryWindows,
+  nextAlarmAt,
+  type OpenMatch,
+  planSweep,
+  type QueueEntry,
+  queueDeadline,
+  resolveWindows,
+} from '../shared/expiry'
 import { type Candidate, findMatch } from '../shared/matchmaker'
 import {
   PROTOCOL_VERSION,
@@ -32,7 +42,13 @@ interface BuyerIdentity extends Principal {
 
 type ConnState =
   | ({ status: 'idle' } & Principal)
-  | ({ status: 'waiting' } & BuyerIdentity)
+  | ({
+      status: 'waiting'
+      /** Last sign of life from this buyer: the join, or their latest ping. */
+      lastSeenAt: number
+      /** Whether they have been told they are about to be dropped. */
+      warned: boolean
+    } & BuyerIdentity)
   | ({ status: 'matched'; matchId: string; role: BuyerRole } & BuyerIdentity)
 
 type WaitingState = Extract<ConnState, { status: 'waiting' }>
@@ -64,6 +80,17 @@ export class NuggPool extends DurableObject<Env> {
     return intVar(this.env.MATCH_RADIUS_METERS, 800)
   }
 
+  /** Liveness policy for this cell, read fresh so a var change takes effect. */
+  private get windows(): ExpiryWindows {
+    const ms = (raw: string | undefined, fallbackMs: number) =>
+      intVar(raw, Math.round(fallbackMs / 1_000)) * 1_000
+    return resolveWindows({
+      queueIdleMs: ms(this.env.QUEUE_IDLE_SECONDS, DEFAULT_EXPIRY_WINDOWS.queueIdleMs),
+      queueWarnLeadMs: ms(this.env.QUEUE_WARN_LEAD_SECONDS, DEFAULT_EXPIRY_WINDOWS.queueWarnLeadMs),
+      matchTimeoutMs: ms(this.env.MATCH_CONFIRM_SECONDS, DEFAULT_EXPIRY_WINDOWS.matchTimeoutMs),
+    })
+  }
+
   override async fetch(request: Request): Promise<Response> {
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('expected websocket upgrade', { status: 426 })
@@ -91,6 +118,7 @@ export class NuggPool extends DurableObject<Env> {
       cell: params.get('cell') ?? '',
       waiting: this.waitingStates().length,
       user: { id: userId, name },
+      expiry: this.windows,
     })
 
     return new Response(null, { status: 101, webSocket: client })
@@ -110,10 +138,11 @@ export class NuggPool extends DurableObject<Env> {
 
     switch (msg.type) {
       case 'ping':
+        this.refreshLiveness(ws)
         this.send(ws, { type: 'pong', at: msg.at })
         return
       case 'cancel':
-        this.handleCancel(ws)
+        await this.handleCancel(ws)
         return
       case 'join':
         await this.handleJoin(ws, msg.dealId, msg.lat, msg.lng)
@@ -166,9 +195,7 @@ export class NuggPool extends DurableObject<Env> {
     )
 
     if (decision === null) {
-      const waiting: WaitingState = { ...identity, status: 'waiting' }
-      this.setState(ws, waiting)
-      this.sendWaiting(ws, waiting)
+      await this.enqueue(ws, identity)
       return
     }
 
@@ -178,9 +205,7 @@ export class NuggPool extends DurableObject<Env> {
     const buddy = others.find((o) => o.state.connId === buddyConnId)
     if (buddy === undefined) {
       // Buddy vanished between the scan and here. Queue instead of pairing with a ghost.
-      const waiting: WaitingState = { ...identity, status: 'waiting' }
-      this.setState(ws, waiting)
-      this.sendWaiting(ws, waiting)
+      await this.enqueue(ws, identity)
       return
     }
 
@@ -223,21 +248,47 @@ export class NuggPool extends DurableObject<Env> {
       settlement,
       buddy: { name: selfIdentity.name, distanceMeters: decision.distanceMeters },
     })
+
+    // The match now has a confirmation deadline of its own.
+    await this.scheduleSweep()
   }
 
-  private handleCancel(ws: WebSocket): void {
+  /** Seat a buyer in the queue, alive as of now, and arm the cell's alarm. */
+  private async enqueue(ws: WebSocket, identity: BuyerIdentity): Promise<void> {
+    const waiting: WaitingState = {
+      ...identity,
+      status: 'waiting',
+      lastSeenAt: Date.now(),
+      warned: false,
+    }
+    this.setState(ws, waiting)
+    this.sendWaiting(ws, waiting)
+    await this.scheduleSweep()
+  }
+
+  private async handleCancel(ws: WebSocket): Promise<void> {
     const state = this.getState(ws)
     if (state === null) return
     if (state.status !== 'waiting') {
       this.fail(ws, 'not_waiting', 'nothing to cancel')
       return
     }
-    this.setState(ws, {
-      status: 'idle',
-      connId: state.connId,
-      userId: state.userId,
-      name: state.name,
-    })
+    this.setState(ws, idleState(state))
+    await this.scheduleSweep()
+  }
+
+  /**
+   * Treat a ping as a sign of life, which is what keeps a buyer who is sitting
+   * on the page from being aged out mid-wait. A buyer who speaks up after being
+   * warned is forgiven, so the warning can be sent again later.
+   *
+   * No rescheduling here on purpose: the standing alarm is always at or before
+   * this entry's new deadline, so it fires, finds nothing due, and re-arms.
+   */
+  private refreshLiveness(ws: WebSocket): void {
+    const state = this.getState(ws)
+    if (state === null || state.status !== 'waiting') return
+    this.setState(ws, { ...state, lastSeenAt: Date.now(), warned: false })
   }
 
   /**
@@ -246,26 +297,128 @@ export class NuggPool extends DurableObject<Env> {
    */
   private async handleDisconnect(ws: WebSocket): Promise<void> {
     const state = this.getState(ws)
-    if (state === null || state.status !== 'matched') return
 
-    for (const other of this.states()) {
-      if (other.ws === ws) continue
-      if (other.state.status !== 'matched' || other.state.matchId !== state.matchId) continue
+    if (state !== null && state.status === 'matched') {
+      for (const other of this.states()) {
+        if (other.ws === ws) continue
+        if (other.state.status !== 'matched' || other.state.matchId !== state.matchId) continue
 
-      const requeued: WaitingState = {
-        ...identityOf(other.state),
-        status: 'waiting',
-        // Requeued at the back, so they do not jump buyers who waited honestly.
-        joinedAt: Date.now(),
+        const now = Date.now()
+        const requeued: WaitingState = {
+          ...identityOf(other.state),
+          status: 'waiting',
+          // Requeued at the back, so they do not jump buyers who waited honestly.
+          joinedAt: now,
+          lastSeenAt: now,
+          warned: false,
+        }
+        this.setState(other.ws, requeued)
+        this.send(other.ws, { type: 'buddy_left', matchId: state.matchId })
+        // Without this the survivor's UI would keep showing the pool count from
+        // before they were matched, which for an instant match is zero.
+        this.sendWaiting(other.ws, requeued)
       }
-      this.setState(other.ws, requeued)
-      this.send(other.ws, { type: 'buddy_left', matchId: state.matchId })
-      // Without this the survivor's UI would keep showing the pool count from
-      // before they were matched, which for an instant match is zero.
-      this.sendWaiting(other.ws, requeued)
+
+      await this.ctx.storage.delete(`match:${state.matchId}`)
     }
 
-    await this.ctx.storage.delete(`match:${state.matchId}`)
+    // A departure can also mean nothing is pending any more, which is the case
+    // where the alarm is dropped rather than re-armed.
+    await this.scheduleSweep()
+  }
+
+  /**
+   * Age out whatever has gone stale in this cell, then re-arm only if something
+   * is still pending.
+   *
+   * One alarm per cell rather than a timer per connection: a Durable Object
+   * processes one event at a time, so a single sweep sees the whole market with
+   * no risk of two timers disagreeing about who is still in the queue.
+   */
+  override async alarm(): Promise<void> {
+    const now = Date.now()
+    const windows = this.windows
+    const queue = this.waitingStates()
+    const plan = planSweep(
+      now,
+      queue.map(({ state }) => livenessOf(state)),
+      await this.openMatches(),
+      windows,
+    )
+
+    for (const connId of plan.warn) {
+      const entry = queue.find((q) => q.state.connId === connId)
+      if (entry === undefined) continue
+      this.setState(entry.ws, { ...entry.state, warned: true })
+      this.send(entry.ws, {
+        type: 'queue_expiring',
+        expiresAt: queueDeadline(livenessOf(entry.state), windows),
+      })
+    }
+
+    for (const connId of plan.expire) {
+      const entry = queue.find((q) => q.state.connId === connId)
+      if (entry === undefined) continue
+      this.setState(entry.ws, idleState(entry.state))
+      // Dropped, and told why: a silent removal looks like the pool losing them.
+      this.send(entry.ws, { type: 'queue_expired', reason: 'idle', idleMs: windows.queueIdleMs })
+    }
+
+    for (const matchId of plan.cancel) await this.cancelMatch(matchId)
+
+    await this.scheduleSweep()
+  }
+
+  /**
+   * Point the cell's alarm at the next thing that falls due — and delete it when
+   * nothing does, so a cell nobody is using is never woken to do nothing.
+   */
+  private async scheduleSweep(): Promise<void> {
+    const now = Date.now()
+    const plan = planSweep(
+      now,
+      this.waitingStates().map(({ state }) => livenessOf(state)),
+      await this.openMatches(),
+      this.windows,
+    )
+    const at = nextAlarmAt(now, plan)
+    const current = await this.ctx.storage.getAlarm()
+
+    if (at === null) {
+      if (current !== null) await this.ctx.storage.deleteAlarm()
+      return
+    }
+    // An alarm that is already earlier is harmless — it fires, finds nothing
+    // due, and re-arms from here — so only ever pull the wake-up forward.
+    if (current === null || current > at) await this.ctx.storage.setAlarm(at)
+  }
+
+  /**
+   * Call off a match nobody confirmed in time.
+   *
+   * Both halves are told and returned to idle rather than requeued: at least one
+   * of them has walked away, and requeueing two connected buyers would just pair
+   * them with each other again on the spot.
+   */
+  private async cancelMatch(matchId: string): Promise<void> {
+    for (const { ws, state } of this.states()) {
+      if (state.status !== 'matched' || state.matchId !== matchId) continue
+      this.setState(ws, idleState(state))
+      this.send(ws, {
+        type: 'match_expired',
+        matchId,
+        reason: 'unconfirmed',
+        // Nothing is captured before pickup, so there is nothing to give back.
+        refundedCents: 0,
+      })
+    }
+    await this.ctx.storage.delete(`match:${matchId}`)
+  }
+
+  /** Matches struck but not yet settled, including any whose sockets are gone. */
+  private async openMatches(): Promise<OpenMatch[]> {
+    const records = await this.ctx.storage.list<MatchRecord>({ prefix: 'match:' })
+    return [...records.values()].map(({ matchId, createdAt }) => ({ matchId, createdAt }))
   }
 
   /**
@@ -315,6 +468,16 @@ export class NuggPool extends DurableObject<Env> {
   private fail(ws: WebSocket, code: ProtocolErrorCode, message: string): void {
     this.send(ws, { type: 'error', code, message })
   }
+}
+
+/** Release a connection back to holding its identity and nothing else. */
+function idleState({ connId, userId, name }: Principal): ConnState {
+  return { status: 'idle', connId, userId, name }
+}
+
+/** The liveness view of a queue entry, which is all the expiry rule needs. */
+function livenessOf(state: WaitingState): QueueEntry {
+  return { id: state.connId, lastSeenAt: state.lastSeenAt, warned: state.warned }
 }
 
 /** Strip connection status off a state, leaving just who and where the buyer is. */

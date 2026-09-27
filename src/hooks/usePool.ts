@@ -17,7 +17,10 @@ export interface PoolState {
   cell: string | null
   match: MatchedMessage | null
   error: string | null
-  /** Set when a buddy walked away and you were put back in the queue. */
+  /**
+   * Set when something happened to your seat that you did not ask for: a buddy
+   * walked away, your entry went stale, or a match was never confirmed.
+   */
   notice: string | null
 }
 
@@ -29,6 +32,19 @@ const INITIAL: PoolState = {
   match: null,
   error: null,
   notice: null,
+}
+
+/**
+ * Say a server-supplied window in units a hungry person reads.
+ *
+ * The windows are configurable, so this cannot assume minutes: a dev server runs
+ * them in seconds to make the expiry path observable.
+ */
+function humanWindow(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1_000))
+  if (seconds < 90) return `${seconds} second${seconds === 1 ? '' : 's'}`
+  const mins = Math.round(seconds / 60)
+  return `${mins} minute${mins === 1 ? '' : 's'}`
 }
 
 function socketUrl({ lat, lng }: JoinRequest): string {
@@ -47,15 +63,41 @@ function socketUrl({ lat, lng }: JoinRequest): string {
 export function usePool() {
   const [state, setState] = useState<PoolState>(INITIAL)
   const socketRef = useRef<WebSocket | null>(null)
+  const keepaliveRef = useRef<number | null>(null)
+
+  const stopKeepalive = useCallback(() => {
+    if (keepaliveRef.current !== null) window.clearInterval(keepaliveRef.current)
+    keepaliveRef.current = null
+  }, [])
+
+  /**
+   * Ping well inside the server's idle window.
+   *
+   * The server drops a queue entry that goes quiet, and waiting is the whole
+   * point of the queue — so without this the normal case, a buyer sitting on the
+   * page, would be aged out of their own market.
+   */
+  const startKeepalive = useCallback(
+    (socket: WebSocket, queueIdleMs: number) => {
+      stopKeepalive()
+      const every = Math.max(5_000, Math.floor(queueIdleMs / 3))
+      keepaliveRef.current = window.setInterval(() => {
+        if (socket.readyState !== WebSocket.OPEN) return
+        socket.send(JSON.stringify({ type: 'ping', at: Date.now() }))
+      }, every)
+    },
+    [stopKeepalive],
+  )
 
   const close = useCallback(() => {
+    stopKeepalive()
     const socket = socketRef.current
     socketRef.current = null
     if (socket !== null) {
       socket.onclose = null
       socket.close()
     }
-  }, [])
+  }, [stopKeepalive])
 
   // Never leave a socket open behind an unmounted tree.
   useEffect(() => close, [close])
@@ -92,6 +134,8 @@ export function usePool() {
           return
         }
 
+        if (message.type === 'welcome') startKeepalive(socket, message.expiry.queueIdleMs)
+
         setState((prev) => {
           switch (message.type) {
             case 'welcome':
@@ -112,6 +156,26 @@ export function usePool() {
                 match: null,
                 notice: 'Your bud dropped out. Back in the queue.',
               }
+            case 'queue_expiring':
+              return {
+                ...prev,
+                notice: `Still hungry? Your spot goes away in ${humanWindow(message.expiresAt - Date.now())}.`,
+              }
+            case 'queue_expired':
+              return {
+                ...prev,
+                stage: 'idle',
+                waiting: 0,
+                queuedAhead: 0,
+                notice: `Dropped from the queue after ${humanWindow(message.idleMs)} of quiet. Join again when you are ready.`,
+              }
+            case 'match_expired':
+              return {
+                ...prev,
+                stage: 'idle',
+                match: null,
+                notice: 'That match went unconfirmed and was called off. Nothing was charged.',
+              }
             case 'error':
               return { ...prev, error: message.message }
             default:
@@ -123,6 +187,7 @@ export function usePool() {
       socket.onclose = () => {
         if (socketRef.current !== socket) return
         socketRef.current = null
+        stopKeepalive()
         setState((prev) =>
           prev.stage === 'matched'
             ? prev
@@ -130,7 +195,7 @@ export function usePool() {
         )
       }
     },
-    [close],
+    [close, startKeepalive, stopKeepalive],
   )
 
   return { ...state, join, leave }

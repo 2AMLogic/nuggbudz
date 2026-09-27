@@ -14,6 +14,14 @@
  *
  * Usage:  pnpm dev --port 5199     (in one shell)
  *         pnpm smoke               (in another)
+ *
+ * The expiry checks only run when the dev server is configured with short
+ * liveness windows — nobody waits 15 real minutes for a smoke test. To include
+ * them, put this in `.dev.vars` before starting the dev server:
+ *
+ *   QUEUE_IDLE_SECONDS="6"
+ *   QUEUE_WARN_LEAD_SECONDS="3"
+ *   MATCH_CONFIRM_SECONDS="8"
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
@@ -43,6 +51,12 @@ const BUYERS = {
   bad: { sid: sessionId('smoke-bad'), userId: 'smoke-user-bad', name: 'Bad' },
   // Signed in only to be signed out again.
   doomed: { sid: sessionId('smoke-doomed'), userId: 'smoke-user-doomed', name: 'Doomed' },
+  // Liveness: one buyer who keeps pinging, one who goes quiet, and a pair who
+  // match and then never confirm.
+  pinger: { sid: sessionId('smoke-pinger'), userId: 'smoke-user-pinger', name: 'Pinger' },
+  stale: { sid: sessionId('smoke-stale'), userId: 'smoke-user-stale', name: 'Stale' },
+  slowOne: { sid: sessionId('smoke-slow-one'), userId: 'smoke-user-slow-one', name: 'Slow One' },
+  slowTwo: { sid: sessionId('smoke-slow-two'), userId: 'smoke-user-slow-two', name: 'Slow Two' },
 }
 
 /** Write the sessions into the dev server's KV namespace, in one CLI call. */
@@ -303,7 +317,80 @@ check(
   JSON.stringify(c.inbox.filter((m) => m.type === 'error')),
 )
 
-for (const s of [b, far, c]) s.ws.close()
+// --- liveness: stale queue entries and unconfirmed matches ---
+const windows = welcomeA.expiry ?? {}
+check(
+  'welcome carries the cell liveness windows',
+  Number.isFinite(windows.queueIdleMs) && Number.isFinite(windows.matchTimeoutMs),
+  JSON.stringify(windows),
+)
+
+// Far from the pairing checks above, so these buyers neither disturb them nor
+// get pulled into a match by them.
+const pinger = open(BUYERS.pinger, 40.6782, -73.9442)
+await pinger.opened
+await pinger.expect('welcome')
+pinger.join()
+await pinger.expect('waiting')
+pinger.ws.send(JSON.stringify({ type: 'ping', at: 4242 }))
+const pong = await pinger.expect('pong')
+check('a ping is answered while queued', pong.at === 4242, JSON.stringify(pong))
+
+const shortWindows = windows.queueIdleMs <= 20_000 && windows.matchTimeoutMs <= 20_000
+if (!shortWindows) {
+  log(
+    `SKIP  expiry — this server ages entries out after ${Math.round(windows.queueIdleMs / 1000)}s. ` +
+      'Set QUEUE_IDLE_SECONDS / QUEUE_WARN_LEAD_SECONDS / MATCH_CONFIRM_SECONDS in .dev.vars to run them.',
+  )
+} else {
+  const patience = (ms) => ms + 6_000
+
+  // A buyer who joins and walks away must be warned, then dropped.
+  const stale = open(BUYERS.stale, 41.8781, -87.6298)
+  await stale.opened
+  await stale.expect('welcome')
+  stale.join()
+  await stale.expect('waiting')
+  const expiring = await stale.expect('queue_expiring', patience(windows.queueIdleMs))
+  check(
+    'a quiet buyer is warned before being dropped',
+    Number.isFinite(expiring.expiresAt),
+    JSON.stringify(expiring),
+  )
+  const expired = await stale.expect('queue_expired', patience(windows.queueIdleMs))
+  check(
+    'a quiet buyer is dropped and told why',
+    expired.reason === 'idle' && expired.idleMs === windows.queueIdleMs,
+    JSON.stringify(expired),
+  )
+
+  // A match neither half confirms must be called off for both of them.
+  const slowOne = open(BUYERS.slowOne, 34.0522, -118.2437)
+  const slowTwo = open(BUYERS.slowTwo, 34.0523, -118.2438)
+  await Promise.all([slowOne.opened, slowTwo.opened])
+  await Promise.all([slowOne.expect('welcome'), slowTwo.expect('welcome')])
+  slowOne.join()
+  await slowOne.expect('waiting')
+  slowTwo.join()
+  const [slowMatch] = await Promise.all([slowOne.expect('matched'), slowTwo.expect('matched')])
+  const [cancelOne, cancelTwo] = await Promise.all([
+    slowOne.expect('match_expired', patience(windows.matchTimeoutMs)),
+    slowTwo.expect('match_expired', patience(windows.matchTimeoutMs)),
+  ])
+  check(
+    'an unconfirmed match is cancelled for both halves',
+    cancelOne.matchId === slowMatch.matchId && cancelTwo.matchId === slowMatch.matchId,
+    `${cancelOne.matchId} / ${cancelTwo.matchId}`,
+  )
+  check(
+    'a cancelled match returns nothing, because nothing was taken yet',
+    cancelOne.refundedCents === 0 && cancelTwo.refundedCents === 0,
+  )
+
+  for (const s of [stale, slowOne, slowTwo]) s.ws.close()
+}
+
+for (const s of [b, far, c, pinger]) s.ws.close()
 
 log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

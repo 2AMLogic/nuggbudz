@@ -202,22 +202,6 @@ export function countSmokeChecks(smokeSource: string): number {
   return (smokeSource.match(/^\s*check\(|[^a-z]check\(/gm) ?? []).length
 }
 
-/**
- * The end-to-end check count, as the deck spells it (`22/22`).
- *
- * On the shipped-status slide, so adding a smoke assertion without touching the
- * deck fails the same way a repriced deal does.
- */
-export function smokeFact(smokeSource: string): DeckFact {
-  const count = countSmokeChecks(smokeSource)
-  return {
-    key: 'smoke.checks',
-    literal: `${count}/${count}`,
-    source: `scripts/smoke.mjs — ${count} check() assertions`,
-    onSlide: true,
-  }
-}
-
 /** Money, percentage and ratio shapes that must trace back to the ledger. */
 const SCANNERS: readonly { kind: string; pattern: RegExp }[] = [
   { kind: 'money', pattern: /\$\d[\d,]*(?:\.\d{1,2})?/g },

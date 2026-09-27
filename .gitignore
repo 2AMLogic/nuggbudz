@@ -93,3 +93,10 @@ Thumbs.db
 .loom/stuck-history.json
 .loom/alerts.json
 .loom/progress/
+
+# Repo Skills machine-local install metadata (absolute source path + timestamp)
+.claude/skills/repo/.install-local.json
+*.local.md
+/.voice/
+**/*.vision/pages/
+**/*.vision/slides/

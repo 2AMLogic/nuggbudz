@@ -1,0 +1,368 @@
+"""Skill-local build configuration for `anvil:project-book` (issue #596).
+
+Parses the optional ``build:`` block out of the project ``BRIEF.md``
+frontmatter into a typed :class:`BookConfig`. Per the curator's design
+the parser is **skill-local** — the shared
+``anvil/lib/project_brief.py::ProjectBrief`` model is NOT extended
+(``ProjectBrief`` is ``extra="forbid"`` on the model but its parse path
+explicitly ignores unknown top-level frontmatter keys, so a ``build:``
+block is safe to add to a BRIEF today with zero changes to the shared
+parser — the same precedent ``project-share``'s ``export:`` block relies
+on).
+
+Zero-config contract: a BRIEF with no ``build:`` block at all yields
+:class:`BookConfig` defaults — every ``documents:`` entry in BRIEF order,
+chapters staged into ``book/chapters/`` as ``<slug>.tex``, and (when a
+``master_doc`` is supplied) a compiled ``book/book.pdf``.
+
+Config surface (all fields optional; ``master_doc`` required for compile)::
+
+    build:
+      order:                        # authoritative include-list AND order
+        - 00-introduction
+        - 01-childhood
+        - appendix
+      master_doc: book/book.tex     # consumer-owned master document
+      chapters_dir: book/chapters   # where to stage per-thread chapter files
+      chapter_filename: chapter.tex # per-thread filename to stage
+      out_pdf: book/book.pdf        # output PDF path
+      relocate_title: false         # move \title{...} past \begin{document}
+
+``chapter_filename`` is a **template**: the literal token ``{slug}`` is
+substituted with each thread's own slug when the chapter file is located
+(``collect.py::resolve_chapter_filename``). A value with no token — the
+``chapter.tex`` default — resolves to itself for every thread. This is
+what lets one project-wide setting express a per-thread filename
+convention such as memoir's slug-echo contract (``{slug}.tex``, #295).
+
+Zero-config default, per artifact type: when the BRIEF ``build:`` block
+does **not** set ``chapter_filename`` at all, a document whose
+``artifact_type`` is in :data:`SLUG_ECHO_ARTIFACT_TYPES` (today:
+``memoir``) defaults to :data:`SLUG_ECHO_CHAPTER_FILENAME`
+(``{slug}.tex``); every other document keeps
+:data:`DEFAULT_CHAPTER_FILENAME` (``chapter.tex``). An explicit
+``chapter_filename`` in BRIEF always wins — for memoir threads too — so
+a consumer who already set it is never surprised. See
+:meth:`BookConfig.chapter_filename_for`.
+
+``order`` semantics (locked at curation): when present it is the
+authoritative include-list and ordering — slugs omitted from ``order``
+are excluded (with an informational note); slugs in ``order`` that do
+not appear in BRIEF ``documents:`` are a hard error. The cross-check
+against the BRIEF happens in :mod:`orchestrate` (this module has no
+knowledge of the documents list).
+
+Path fields (``master_doc`` / ``chapters_dir`` / ``out_pdf``) are
+project-root-relative and must stay inside the project tree: absolute
+paths and ``..`` traversal are rejected at parse time. ``chapters_dir``
+MAY contain path separators (it is a nested build dir like
+``book/chapters``, unlike ``project-share``'s bare ``out`` name);
+``chapter_filename`` must be a bare filename (no separators).
+"""
+
+from __future__ import annotations
+
+from pathlib import PurePosixPath
+from typing import Any, List, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from anvil.lib.frontmatter import extract_frontmatter as _extract_frontmatter
+
+# The BRIEF filename mirrors ``anvil/lib/project_brief.py`` (single
+# on-disk convention).
+BRIEF_FILENAME = "BRIEF.md"
+
+# The top-level BRIEF frontmatter key this skill owns.
+BUILD_FRONTMATTER_KEY = "build"
+
+# Framework defaults for the staging + compile contract.
+DEFAULT_CHAPTERS_DIR = "book/chapters"
+DEFAULT_CHAPTER_FILENAME = "chapter.tex"
+
+# Zero-config chapter-filename template for artifact types whose own
+# skill contract mandates a slug-echo body filename. ``anvil:memoir``
+# (#740) requires ``<slug>.tex`` — "never chapter.tex" (#295) — so a
+# memoir project must resolve slug-echo names without any BRIEF config.
+SLUG_ECHO_CHAPTER_FILENAME = "{slug}.tex"
+SLUG_ECHO_ARTIFACT_TYPES = frozenset({"memoir"})
+
+# Marker file written at the start of each apply run into the chapters
+# dir; its presence authorizes the blow-away rebuild. Mirrors
+# ``project-share``'s ``EXPORT.md`` guard.
+MARKER_FILENAME = ".anvil-book-build"
+
+# Report filename written at the project root on every apply-mode run.
+REPORT_FILENAME = "BOOK_REPORT.md"
+
+
+def _validate_rel_path(value: str, field_name: str) -> str:
+    """Reject absolute paths and ``..`` traversal; normalize separators.
+
+    Returns the POSIX-normalized relative path string. Raises
+    ``ValueError`` (surfaced by pydantic as a validation error) on an
+    absolute path, an empty value, or any ``..`` component.
+    """
+    if not value or not value.strip():
+        raise ValueError(
+            f"build.{field_name} must be a non-empty path; got {value!r}."
+        )
+    raw = value.strip()
+    if raw.startswith("/") or raw.startswith("\\"):
+        raise ValueError(
+            f"build.{field_name} must be project-root-relative (no leading "
+            f"slash); got {value!r}."
+        )
+    # Normalize backslashes to forward slashes so a Windows-authored BRIEF
+    # is accepted, then walk the parts for traversal / anchor.
+    pp = PurePosixPath(raw.replace("\\", "/"))
+    if pp.is_absolute():
+        raise ValueError(
+            f"build.{field_name} must be relative; got {value!r}."
+        )
+    parts = pp.parts
+    if any(part == ".." for part in parts):
+        raise ValueError(
+            f"build.{field_name} must not escape the project root with "
+            f"`..`; got {value!r}."
+        )
+    normalized = "/".join(part for part in parts if part not in (".",))
+    if not normalized:
+        raise ValueError(
+            f"build.{field_name} must not resolve to the project root; "
+            f"got {value!r}."
+        )
+    return normalized
+
+
+class BookConfig(BaseModel):
+    """Typed view of the BRIEF ``build:`` frontmatter block.
+
+    Attributes
+    ----------
+    order
+        Optional explicit chapter ordering. When present it is the
+        authoritative include-list AND ordering for the book. When
+        absent (``None``), every BRIEF ``documents:`` entry is a chapter
+        in BRIEF order.
+    master_doc
+        Consumer-owned master LaTeX document (project-root-relative).
+        Required for the compile step; when ``None`` the run is
+        **staging-only** (chapters staged, no compile, report still
+        produced).
+    chapters_dir
+        Directory (project-root-relative) the per-thread chapter files
+        are staged into. Blow-away-rebuilt on each apply run. Defaults
+        to :data:`DEFAULT_CHAPTERS_DIR`.
+    chapter_filename
+        Per-thread filename **template** to look for in each resolved
+        version dir. A bare filename — no path separators — in which the
+        literal token ``{slug}`` (if present) is replaced with the
+        thread's own slug. Defaults to :data:`DEFAULT_CHAPTER_FILENAME`
+        for most artifact types and :data:`SLUG_ECHO_CHAPTER_FILENAME`
+        for the slug-echo types (see :meth:`chapter_filename_for`); read
+        the effective per-thread value through that method rather than
+        this raw field.
+    out_pdf
+        Output PDF path (project-root-relative). When ``None`` it
+        defaults to ``<chapters_dir>/../book.pdf`` (see
+        :meth:`resolved_out_pdf`).
+    relocate_title
+        Opt-in hook (issue #1205) for consumers whose master document
+        ``\\input``s each staged chapter via LaTeX's ``docmute`` package.
+        ``docmute`` discards a chapter's standalone preamble up to
+        ``\\begin{document}`` — including its ``\\title{...}`` — so when
+        this is ``True``, staging moves each chapter's ``\\title{...}``
+        (if present) from the preamble to immediately after
+        ``\\begin{document}`` instead of byte-copying the file verbatim.
+        Defaults to ``False``, which preserves the original byte-copy
+        behavior exactly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    order: Optional[List[str]] = Field(default=None)
+    master_doc: Optional[str] = Field(default=None)
+    chapters_dir: str = Field(default=DEFAULT_CHAPTERS_DIR)
+    chapter_filename: str = Field(default=DEFAULT_CHAPTER_FILENAME)
+    out_pdf: Optional[str] = Field(default=None)
+    relocate_title: bool = Field(default=False)
+
+    @field_validator("order")
+    @classmethod
+    def _order_entries_nonempty_unique(
+        cls, value: Optional[List[str]]
+    ) -> Optional[List[str]]:
+        if value is None:
+            return None
+        seen = set()
+        for i, entry in enumerate(value):
+            if not isinstance(entry, str) or not entry.strip():
+                raise ValueError(
+                    f"build.order[{i}] must be a non-empty string; got "
+                    f"{entry!r}. Suggested fix: list document slugs only."
+                )
+            if entry in seen:
+                raise ValueError(
+                    f"build.order lists slug {entry!r} more than once. "
+                    f"Suggested fix: remove the duplicate entry."
+                )
+            seen.add(entry)
+        return value
+
+    @field_validator("master_doc")
+    @classmethod
+    def _master_doc_rel(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _validate_rel_path(value, "master_doc")
+
+    @field_validator("chapters_dir")
+    @classmethod
+    def _chapters_dir_rel(cls, value: str) -> str:
+        return _validate_rel_path(value, "chapters_dir")
+
+    @field_validator("chapter_filename")
+    @classmethod
+    def _chapter_filename_bare(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError(
+                "build.chapter_filename must be a non-empty filename; got "
+                f"{value!r}."
+            )
+        raw = value.strip()
+        if "/" in raw or "\\" in raw:
+            raise ValueError(
+                f"build.chapter_filename must be a bare filename (no path "
+                f"separators); got {value!r}. Suggested fix: use a single "
+                f"name like `chapter.tex` (or the per-thread template "
+                f"`{{slug}}.tex`)."
+            )
+        if raw in (".", ".."):
+            raise ValueError(
+                f"build.chapter_filename must be a real filename; got "
+                f"{value!r}."
+            )
+        return raw
+
+    @field_validator("out_pdf")
+    @classmethod
+    def _out_pdf_rel(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _validate_rel_path(value, "out_pdf")
+
+    def chapter_filename_for(self, artifact_type: Optional[str] = None) -> str:
+        """Effective chapter-filename **template** for one document.
+
+        Precedence (issue #864):
+
+        1. An explicit ``build.chapter_filename`` in BRIEF wins for every
+           thread in the project — including memoir threads. "Explicit"
+           is detected via pydantic's ``model_fields_set``, so a BRIEF
+           that spells out ``chapter_filename: chapter.tex`` is honored
+           verbatim and is NOT re-interpreted as "unset."
+        2. Otherwise a document whose ``artifact_type`` is in
+           :data:`SLUG_ECHO_ARTIFACT_TYPES` gets
+           :data:`SLUG_ECHO_CHAPTER_FILENAME` (``{slug}.tex``).
+        3. Otherwise the framework default
+           :data:`DEFAULT_CHAPTER_FILENAME` (``chapter.tex``).
+
+        The returned value is still a template — the caller substitutes
+        the ``{slug}`` token via
+        ``collect.py::resolve_chapter_filename``.
+        """
+        if "chapter_filename" in self.model_fields_set:
+            return self.chapter_filename
+        if artifact_type is not None:
+            normalized = str(getattr(artifact_type, "value", artifact_type)).strip()
+            if normalized.lower() in SLUG_ECHO_ARTIFACT_TYPES:
+                return SLUG_ECHO_CHAPTER_FILENAME
+        return self.chapter_filename
+
+    def resolved_out_pdf(self) -> str:
+        """Return the effective output PDF path (project-root-relative).
+
+        When ``out_pdf`` is declared it is used verbatim; otherwise it
+        defaults to ``<chapters_dir>/../book.pdf`` — i.e. ``book.pdf``
+        in the parent of the chapters dir (``book/book.pdf`` for the
+        default ``book/chapters`` chapters dir; a bare ``book.pdf`` when
+        ``chapters_dir`` has no parent).
+        """
+        if self.out_pdf is not None:
+            return self.out_pdf
+        parent = PurePosixPath(self.chapters_dir).parent
+        if str(parent) in (".", ""):
+            return "book.pdf"
+        return str(parent / "book.pdf")
+
+
+# ``_extract_frontmatter`` used to be defined here (a local copy mirroring
+# ``anvil/lib/project_brief.py``'s and ``project-share``'s); it is now the
+# shared ``anvil/lib/frontmatter.py::extract_frontmatter`` primitive
+# (issue #1075), imported above and aliased to the historical private
+# name so every call site in this module is unchanged.
+
+
+def load_book_config(project_dir) -> BookConfig:
+    """Load the ``build:`` block from ``<project_dir>/BRIEF.md``.
+
+    Returns
+    -------
+    BookConfig
+        Parsed config; all-defaults when the BRIEF has no ``build:``
+        block (the zero-config contract).
+
+    Raises
+    ------
+    FileNotFoundError
+        When ``<project_dir>/BRIEF.md`` does not exist.
+    ValueError
+        When the BRIEF has no parseable frontmatter, or the ``build:``
+        block is present but malformed (wrong type, unknown key, bad
+        path field, non-string ``order`` entries).
+    """
+    from pathlib import Path
+
+    project_dir = Path(project_dir)
+    brief_path = project_dir / BRIEF_FILENAME
+    if not brief_path.is_file():
+        raise FileNotFoundError(
+            f"No BRIEF found at {brief_path}. project-book reads its build "
+            f"config (and the documents list) from the project BRIEF."
+        )
+    text = brief_path.read_text(encoding="utf-8")
+    fm = _extract_frontmatter(text)
+    if fm is None:
+        raise ValueError(
+            f"BRIEF at {brief_path} has no parseable YAML frontmatter."
+        )
+
+    raw: Any = fm.get(BUILD_FRONTMATTER_KEY)
+    if raw is None:
+        return BookConfig()
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"BRIEF.build must be a mapping (a `build:` block with keys); "
+            f"got {type(raw).__name__} at {brief_path}."
+        )
+    try:
+        return BookConfig(**raw)
+    except ValidationError as exc:
+        raise ValueError(
+            f"BRIEF.build at {brief_path} failed schema validation: {exc}"
+        ) from exc
+
+
+__all__ = [
+    "BRIEF_FILENAME",
+    "BUILD_FRONTMATTER_KEY",
+    "DEFAULT_CHAPTERS_DIR",
+    "DEFAULT_CHAPTER_FILENAME",
+    "MARKER_FILENAME",
+    "REPORT_FILENAME",
+    "SLUG_ECHO_ARTIFACT_TYPES",
+    "SLUG_ECHO_CHAPTER_FILENAME",
+    "BookConfig",
+    "load_book_config",
+]

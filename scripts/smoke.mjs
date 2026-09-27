@@ -41,6 +41,10 @@ const BUYERS = {
   dana: { sid: sessionId('smoke-dana'), userId: 'smoke-user-dana', name: 'Dana' },
   far: { sid: sessionId('smoke-faraway'), userId: 'smoke-user-faraway', name: 'Faraway' },
   bad: { sid: sessionId('smoke-bad'), userId: 'smoke-user-bad', name: 'Bad' },
+  // Different deals, same block, purely to prove the cell-wide roster
+  // broadcast without any of these three ever actually pairing up.
+  kim: { sid: sessionId('smoke-kim'), userId: 'smoke-user-kim', name: 'Kim' },
+  lee: { sid: sessionId('smoke-lee'), userId: 'smoke-user-lee', name: 'Lee' },
   // Signed in only to be signed out again.
   doomed: { sid: sessionId('smoke-doomed'), userId: 'smoke-user-doomed', name: 'Doomed' },
   // The pickup handshake pair, and the pair that never finishes one.
@@ -557,7 +561,81 @@ check(
 // in the pool waiting for a buddy who can never legitimately arrive.
 check('a refused gated join never queues the buyer', (await c.settles('waiting')) === false)
 
-for (const s of [b, far, c, g, h, j]) s.ws.close()
+// --- cell map roster broadcast ---
+// The cell map needs everyone's client to hear about a roster change, not just
+// the socket that caused it — so a buyer joining the cell must push a fresh
+// 'waiting' message to every buyer already queued there, with the newcomer's
+// position quantized rather than exact.
+//
+// Isolated by cell, like the handshake pairs above: `9q8yx1` is a neighbourhood
+// nobody else in this suite touches, so the roster kim and lee see is only ever
+// each other. Isolating by a second deal id is no longer possible — one chain is
+// offered, and a join naming any other is refused three checks above.
+//
+// They also must not pair with each other, and the axis left for that is
+// distance: both sit inside `9q8yx1` but 1055m apart, beyond the 800m
+// MATCH_RADIUS_METERS. That is the "cell-edge buddies" case wrangler.jsonc
+// documents — same market, too far to walk — and it is what makes the roster
+// assertion below discriminating: a buddy appears on the map who this buyer
+// could not be matched with.
+const KIM_AT = { lat: 37.7108, lng: -122.3873 }
+const LEE_AT = { lat: 37.7158, lng: -122.3771 }
+
+const kim = open(BUYERS.kim, KIM_AT.lat, KIM_AT.lng)
+await kim.opened
+const kimWelcome = await kim.expect('welcome')
+kim.join()
+const kimAlone = await kim.expect('waiting')
+check(
+  'the first buyer in a fresh cell has an empty roster',
+  kimWelcome.cell === '9q8yx1' && kimAlone.buddies.length === 0,
+  `${kimWelcome.cell} ${JSON.stringify(kimAlone.buddies)}`,
+)
+
+const kimWaitingBefore = kim.inbox.filter((m) => m.type === 'waiting').length
+const lee = open(BUYERS.lee, LEE_AT.lat, LEE_AT.lng)
+await lee.opened
+const leeWelcome = await lee.expect('welcome')
+lee.join()
+const leeWaiting = await lee.expect('waiting')
+check(
+  // Same cell and same deal, so both are queued in one market, yet too far
+  // apart to be matched — the roster still carries the other.
+  'the roster carries a cell buddy who is out of pairing range',
+  leeWelcome.cell === kimWelcome.cell &&
+    leeWaiting.waiting === 2 &&
+    leeWaiting.buddies.length === 1,
+  `${leeWelcome.cell} ${JSON.stringify(leeWaiting)}`,
+)
+
+const broadcastSeen = await (async () => {
+  for (let i = 0; i < 40; i++) {
+    if (kim.inbox.filter((m) => m.type === 'waiting').length > kimWaitingBefore) return true
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return false
+})()
+check(
+  'a buyer already queued gets a fresh roster broadcast when someone new joins the cell',
+  broadcastSeen,
+  `${kimWaitingBefore} -> ${kim.inbox.filter((m) => m.type === 'waiting').length}`,
+)
+
+const latestForKim = kim.inbox.filter((m) => m.type === 'waiting').at(-1)
+check(
+  'the broadcast roster carries a position for the newcomer',
+  latestForKim.buddies.some(
+    (pos) => Math.abs(pos.lat - LEE_AT.lat) < 0.01 && Math.abs(pos.lng - LEE_AT.lng) < 0.01,
+  ),
+  JSON.stringify(latestForKim.buddies),
+)
+check(
+  'the broadcast never carries an exact coordinate for anyone else',
+  latestForKim.buddies.every((pos) => pos.lat !== LEE_AT.lat || pos.lng !== LEE_AT.lng),
+  JSON.stringify(latestForKim.buddies),
+)
+
+for (const s of [b, far, c, g, h, j, kim, lee]) s.ws.close()
 
 log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

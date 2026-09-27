@@ -35,6 +35,10 @@
     // MATCH_RADIUS_METERS inside the cell so cell-edge buddies aren't matched
     // across an unwalkable distance.
     "POOL_CELL_PRECISION": "6",
-    "MATCH_RADIUS_METERS": "800"
+    "MATCH_RADIUS_METERS": "800",
+    // A handoff is two taps seconds apart once the buddies are standing
+    // together, so five minutes of silence from the second side means the
+    // meeting did not happen — the match is disputed rather than settled.
+    "PICKUP_CONFIRM_TIMEOUT_MS": "300000"
   }
 }

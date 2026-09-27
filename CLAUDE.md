@@ -37,6 +37,11 @@ state.
 - **Identity comes from the session, never from a message.** The pool socket is
   authenticated at upgrade time and the display name a buddy sees is read off
   the session in KV. A `name` on the wire is ignored, not trusted.
+- **A split settles only when both sides confirm the handoff.** The orderer
+  holds a random pickup code (never derived from the match id, and never sent
+  to the receiver); the receiver reads it off them. One side confirming alone
+  times out into a dispute, and completing the handshake is the only thing that
+  writes a row to the D1 ledger.
 
 ## Commands
 

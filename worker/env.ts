@@ -7,6 +7,8 @@ export interface Env {
   SESSIONS: KVNamespace
   POOL_CELL_PRECISION: string
   MATCH_RADIUS_METERS: string
+  /** How long a one-sided pickup confirmation waits before it is a dispute. */
+  PICKUP_CONFIRM_TIMEOUT_MS?: string
   /**
    * Google OAuth client credentials. Optional so a checkout without them still
    * boots — the auth routes answer 503 instead of the Worker failing to start.

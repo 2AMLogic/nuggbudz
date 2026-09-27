@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { ACTIVE_DEALS, findDeal, isDealOffered } from '../shared/deals'
+import { demoPairingEnabled, demoUserId, sanitizeDemoName } from '../shared/demo'
 import { analyzeSpread, settle } from '../shared/economics'
 import { geohash } from '../shared/geo'
 import { PROTOCOL_VERSION } from '../shared/protocol'
@@ -12,7 +13,16 @@ export { NuggPool } from './pool'
 
 const app = new Hono<{ Bindings: Env }>()
 
-app.get('/api/health', (c) => c.json({ ok: true, service: 'nuggbudz', protocol: PROTOCOL_VERSION }))
+app.get('/api/health', (c) =>
+  c.json({
+    ok: true,
+    service: 'nuggbudz',
+    protocol: PROTOCOL_VERSION,
+    // The client reads this to offer a name field instead of a sign-in button
+    // that cannot work, and to say on screen that it is pairing without accounts.
+    demoPairing: demoPairingEnabled(c.env.ALLOW_DEMO_PAIRING),
+  }),
+)
 
 app.route('/api/auth', authRoutes)
 
@@ -61,7 +71,10 @@ app.get('/api/deals/:dealId/quote', (c) => {
  */
 app.get('/api/pool/ws', async (c) => {
   const active = await sessionFromRequest(c.env, c.req.raw)
-  if (active === null) return c.json({ error: 'sign in required' }, 401)
+  const demoAllowed = demoPairingEnabled(c.env.ALLOW_DEMO_PAIRING)
+  if (active === null && !demoAllowed) {
+    return c.json({ error: 'sign in required' }, 401)
+  }
 
   if (c.req.header('Upgrade') !== 'websocket') {
     return c.text('expected a websocket upgrade', 426)
@@ -95,9 +108,21 @@ app.get('/api/pool/ws', async (c) => {
   // `set` replaces any same-named parameter the caller supplied, so these three
   // reach the Durable Object with server-derived values only.
   const url = new URL(c.req.url)
+  // Identity is the session when there is one, and a throwaway otherwise. A demo
+  // caller may propose a display name but never a user id: minting the id here is
+  // what keeps two tabs from claiming one identity, and therefore what keeps the
+  // self-match guard meaningful.
+  const identity =
+    active !== null
+      ? { userId: active.session.userId, displayName: active.session.displayName }
+      : {
+          userId: demoUserId(crypto.randomUUID()),
+          displayName: sanitizeDemoName(c.req.query('name')),
+        }
+
   url.searchParams.set('cell', cell)
-  url.searchParams.set('userId', active.session.userId)
-  url.searchParams.set('displayName', active.session.displayName)
+  url.searchParams.set('userId', identity.userId)
+  url.searchParams.set('displayName', identity.displayName)
   return stub.fetch(new Request(url, c.req.raw))
 })
 

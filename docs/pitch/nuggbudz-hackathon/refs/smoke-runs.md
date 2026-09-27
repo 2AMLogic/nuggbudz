@@ -102,9 +102,9 @@ ALL CHECKS PASSED
 BASE=https://nuggbudz.personal-account-251.workers.dev pnpm smoke
 ```
 
-Run 2026-09-27 against the deployment at commit `32dad69`, which is the build
-currently serving the URL (`/api/health` reports `protocol: 1`; the auth routes
-404 because that build predates them). **22/22 checks passed**, including: the
+Run 2026-09-27 against the deployment at commit `32dad69`, which was the build
+serving the URL at the time of this run (`/api/health` reported `protocol: 1`;
+the auth routes 404'd because that build predated them). **22/22 checks passed**, including: the
 catalogue served with settlement and spread computed by `shared/economics.ts`;
 two independent WebSocket clients in cell `9q8znb` paired into one `matchId`
 with complementary roles; the longest waiter made orderer; each side charged
@@ -119,9 +119,11 @@ Run 3 is the one the slide quotes.
 
 ## Run 3 — this branch merged with `main`, full local stack
 
-The authoritative run for the slide. Taken after merging `origin/main` `8f365ba`
-(which had picked up the cell map's roster-broadcast checks via #39/#29) into
-`feature/issue-28`, because neither side's own run describes the merged tree:
+The authoritative run for the slide. Taken after merging `origin/main` into
+`feature/issue-28` — first `8f365ba`, which had picked up the cell map's
+roster-broadcast checks via #39/#29, then `bcf6318`, which added demo pairing
+and the `nuggbudz.com` custom domain via #40. Recorded here because no
+single-branch run describes the merged tree:
 
 ```bash
 pnpm dev --port 5219                     # in one shell
@@ -149,10 +151,10 @@ have observed them alone:
   the one it replaces: a buddy appears on the map whom this buyer could not
   legitimately be matched with.
 
-Output, 2026-09-27, on the merge of `feature/issue-28` into `8f365ba`:
+Output, 2026-09-27, on the merge of `feature/issue-28` into `bcf6318`:
 
 ```
-PASS  health ok — {"ok":true,"service":"nuggbudz","protocol":3}
+PASS  health ok — {"ok":true,"service":"nuggbudz","protocol":3,"demoPairing":false}
 PASS  deals catalogue returned (McDonald-only) — 1 deals
 PASS  mcd half is $4.49 — 449
 PASS  mcd spread is $5.99 — 599
@@ -172,7 +174,7 @@ PASS  logout revokes the session — status 401
 PASS  welcome carries a cell — 9q8znb
 PASS  welcome carries the authenticated identity — {"id":"smoke-user-robb","name":"Robb"}
 PASS  first buyer queues — {"type":"waiting","waiting":1,"queuedAhead":0,"buddies":[]}
-PASS  both buyers matched — 7cf18db6-e85f-4119-a4a0-83ccc293d59c / 7cf18db6-e85f-4119-a4a0-83ccc293d59c
+PASS  both buyers matched — 93c13c74-d85e-4150-900a-6d7c2242bf6b / 93c13c74-d85e-4150-900a-6d7c2242bf6b
 PASS  roles are complementary — orderer/receiver
 PASS  longest waiter orders
 PASS  each pays $4.49
@@ -180,9 +182,9 @@ PASS  each owed 10pc
 PASS  each saves $2.50
 PASS  buddy names come from the session, not the join message — Dana/Robb
 PASS  distance is a short walk — 43m
-PASS  only the orderer is given the pickup code — orderer 7VV3TH
+PASS  only the orderer is given the pickup code — orderer XTEVH8
 PASS  the receiver is not given the pickup code — null
-PASS  pickup code is not derived from the match id — 7VV3TH vs 7cf18db6-e85f-4119-a4a0-83ccc293d59c
+PASS  pickup code is not derived from the match id — XTEVH8 vs 93c13c74-d85e-4150-900a-6d7c2242bf6b
 PASS  distant buyer waits alone — {"type":"waiting","waiting":1,"queuedAhead":0,"buddies":[]}
 PASS  survivor told their bud left
 PASS  survivor requeued — {"type":"waiting","waiting":1,"queuedAhead":0,"buddies":[]}
@@ -193,16 +195,16 @@ PASS  a wrong code completes nothing
 PASS  a wrong code confirms nothing
 PASS  both sides see the receiver confirm — receiver/receiver
 PASS  the orderer is still owed a confirmation — orderer
-PASS  a dispute deadline is armed on the half-confirmed match — 1790552545108
+PASS  a dispute deadline is armed on the half-confirmed match — 1790553072000
 PASS  one side confirming does not settle
 PASS  a second confirmation from the same side is refused — already_confirmed
-PASS  both sides get the same completion — 1dfd01a8-d1a2-4e80-84b7-bbbe14885f2b
-PASS  completion is stamped — 1790552245726
-PASS  the settled split is written to the ledger — {"match_id":"1dfd01a8-d1a2-4e80-84b7-bbbe14885f2b","deal_id":"mcd-nuggets-20","cell":"9q9p3w","party_size":2,"total_collected_cents":898,"cogs_cents":799,"platform_fee_cents":99,"distance_meters":14.166510726194598,"created_at":1790552243892,"settled_at":1790552245726}
+PASS  both sides get the same completion — 45fd0088-d763-43ec-9ece-7eace384d9c9
+PASS  completion is stamped — 1790552772627
+PASS  the settled split is written to the ledger — {"match_id":"45fd0088-d763-43ec-9ece-7eace384d9c9","deal_id":"mcd-nuggets-20","cell":"9q9p3w","party_size":2,"total_collected_cents":898,"cogs_cents":799,"platform_fee_cents":99,"distance_meters":14.166510726194598,"created_at":1790552770783,"settled_at":1790552772627}
 PASS  both halves are booked, and they sum to the total — [{"role":"orderer","pay_cents":449},{"role":"receiver","pay_cents":449}]
 PASS  an abandoned match is never booked — []
 PASS  a settled match cannot be confirmed again — not_matched
-PASS  a bud who leaves after one confirmation raises a dispute — {"type":"pickup_disputed","matchId":"00fe4a0a-f29f-40b5-a658-4b6b1165d176","confirmedBy":"receiver","reason":"buddy_left"}
+PASS  a bud who leaves after one confirmation raises a dispute — {"type":"pickup_disputed","matchId":"03c410eb-7ce9-49b8-950d-6ae536f5ab7a","confirmedBy":"receiver","reason":"buddy_left"}
 PASS  a disputed match never settles
 PASS  a disputed match does not quietly requeue the survivor
 PASS  a disputed match is never booked — []

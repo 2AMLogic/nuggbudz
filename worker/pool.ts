@@ -395,6 +395,9 @@ export class NuggPool extends DurableObject<Env> {
         settledAt: at,
         settlement: record.settlement,
         names: { orderer: record.orderer.name, receiver: record.receiver.name },
+        // The ledger decides for itself whether this is a real split; a demo
+        // pairing settles on screen and books nothing. See `isDemoMatch`.
+        userIds: { orderer: record.orderer.userId, receiver: record.receiver.userId },
       })
     } catch (error) {
       // A ledger outage must not strand two people who already swapped nuggets.

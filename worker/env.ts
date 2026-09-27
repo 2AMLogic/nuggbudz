@@ -22,6 +22,13 @@ export interface Env {
   GOOGLE_CLIENT_SECRET?: string
   /** Overrides the OAuth callback origin when the Worker sits behind a proxy. */
   PUBLIC_ORIGIN?: string
+  /**
+   * Demo escape hatch: when truthy, an unauthenticated pool socket is given a
+   * throwaway identity instead of a 401. Never set in `wrangler.jsonc` — it is
+   * passed at deploy time so a checkout, `pnpm test` and CI all keep exercising
+   * the strict authenticated path. See `shared/demo.ts`.
+   */
+  ALLOW_DEMO_PAIRING?: string
 }
 
 /** Parse an integer Worker var, falling back when unset or malformed. */

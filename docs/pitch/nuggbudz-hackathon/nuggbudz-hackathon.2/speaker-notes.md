@@ -165,9 +165,9 @@ bullet: no users, no revenue, no pilot.
 **Anticipated questions**: Is that against production? (The 66-check run is
 against a full local stack — `pnpm dev` plus the real bindings — because the
 pool socket now requires a session and `pnpm smoke` seeds sessions into the
-local KV namespace. The deployment is behind `main`, on the pre-sign-in build,
+local KV namespace. The deployment is behind `main`,
 and it passed its own 22-check run today. Both are in `refs/smoke-runs.md`.)
-Who built it? (One person, in the hackathon window.)
+Who built it? (An agent-orchestrated pipeline, in the hackathon window — Curator, Builder, Judge, Doctor and Champion, merging as `rjwalters` and `turian`.)
 
 **Backing data**: `refs/smoke-runs.md`; the count is derived from
 `scripts/smoke.mjs` by `countSmokeChecks()`.
@@ -176,7 +176,7 @@ Who built it? (One person, in the hackathon window.)
 
 **Talk track**: Run Plan A — judges open the URL on their own phones and pair
 with us. Strongest version, because it is their device and the deployed build
-predates sign-in, so there is no account to create.
+runs with demo pairing enabled, so there is no account to create.
 
 **Fallback script, in order**:
 

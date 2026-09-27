@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { findDeal } from '../shared/deals'
+import { demoUserId } from '../shared/demo'
 import { settle } from '../shared/economics'
-import { ledgerStatements, type SettledMatch } from '../worker/ledger'
+import { isDemoMatch, ledgerStatements, type SettledMatch } from '../worker/ledger'
 
 const deal = findDeal('mcd-nuggets-20')
 if (deal === undefined) throw new Error('benchmark deal missing from the catalogue')
@@ -15,6 +16,7 @@ const settled: SettledMatch = {
   settledAt: 1_700_000_060_000,
   settlement: settle(deal, 2),
   names: { orderer: 'Robb', receiver: 'Dana' },
+  userIds: { orderer: 'user-robb', receiver: 'user-dana' },
 }
 
 describe('ledgerStatements', () => {
@@ -60,5 +62,42 @@ describe('ledgerStatements', () => {
     for (const statement of ledgerStatements(settled)) {
       expect(statement.params).toHaveLength((statement.sql.match(/\?/g) ?? []).length)
     }
+  })
+})
+
+describe('the demo gate', () => {
+  const demo = demoUserId('7f0e1d2c-3b4a-5968-8776-655443322110')
+
+  it('books nothing when both buddies are demo identities', () => {
+    const pairing: SettledMatch = {
+      ...settled,
+      userIds: { orderer: demo, receiver: demoUserId('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee') },
+    }
+    expect(isDemoMatch(pairing)).toBe(true)
+    expect(ledgerStatements(pairing)).toEqual([])
+  })
+
+  it('books nothing when only one side is a demo identity', () => {
+    // A real account paired with a stage phone is still not revenue, and
+    // `match_buyers` has no user-id column to record which half was fake.
+    for (const userIds of [
+      { orderer: demo, receiver: 'user-dana' },
+      { orderer: 'user-robb', receiver: demo },
+    ]) {
+      const mixed: SettledMatch = { ...settled, userIds }
+      expect(isDemoMatch(mixed)).toBe(true)
+      expect(ledgerStatements(mixed)).toEqual([])
+    }
+  })
+
+  it('still books a split between two real accounts', () => {
+    expect(isDemoMatch(settled)).toBe(false)
+    expect(ledgerStatements(settled)).toHaveLength(3)
+  })
+
+  it('is not fooled by a display name that merely looks like a demo id', () => {
+    const spoofed: SettledMatch = { ...settled, names: { orderer: 'demo:Robb', receiver: 'Dana' } }
+    expect(isDemoMatch(spoofed)).toBe(false)
+    expect(ledgerStatements(spoofed)).toHaveLength(3)
   })
 })

@@ -224,8 +224,8 @@ export function App() {
             />
           </label>
           <p className="mt-3 font-body text-sm leading-snug text-faded">
-            Demo mode: pairing without accounts, so nothing is settled afterwards and your bud only
-            sees this name.
+            Demo mode: pairing without accounts. You will run the whole handoff and get a receipt,
+            but the split is never booked to the ledger, and your bud only sees this name.
           </p>
         </>
       ) : session.user === null ? (

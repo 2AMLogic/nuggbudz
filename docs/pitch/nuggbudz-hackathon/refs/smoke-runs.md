@@ -115,12 +115,13 @@ must not present this as traction beyond "the system works".
 
 ## Why the deck quotes a check count
 
-`57/57` is the count of `check()` assertions in `scripts/smoke.mjs`, counted
+`61/61` is the count of `check()` assertions in `scripts/smoke.mjs`, counted
 from the source by `countSmokeChecks()` in `scripts/deck-ledger.ts`. Adding an
 assertion changes the count, which fails `test/deck.test.ts` until the slide is
 updated — the same drift guard the money figures get. The count grew 22 -> 32
-when Google sign-in landed, and 32 -> 57 when the two-sided pickup handshake
-landed; both times the deck was corrected by that failure rather than by anyone
-noticing. The 57 figure is the one caught by 2am-nuggbudz#26: #18 added the
-guard and #22 added the assertions, neither branch was red on its own, and
-`main` went red on the merge.
+when Google sign-in landed, 32 -> 57 when the two-sided pickup handshake
+landed, and 57 -> 61 when the cell map's roster-broadcast checks landed; every
+time the deck was corrected by that failure rather than by anyone noticing. The
+57 figure is the one caught by 2am-nuggbudz#26: #18 added the guard and #22
+added the assertions, neither branch was red on its own, and `main` went red on
+the merge.

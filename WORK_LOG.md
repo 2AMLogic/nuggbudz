@@ -8,6 +8,10 @@ Entries are grouped by date, newest first. Each entry references the merged PR o
 
 ### 2026-09-27
 
+- **Backlog fan-out started** — all nine seeded issues (#2–#7, #9–#11) claimed
+  and under active `loom:building` sweeps across three loom hosts (lease
+  records on each issue); #8 held in `loom:curated` pending #2 + #5.
+  Completion tracked by durable daemon watches from the operator machine.
 - **M0 shipped: live pairing engine** (`e140ba0`)
   - `NuggPool` Durable Object, one instance per geohash precision-6 cell, with
     hibernatable WebSockets and connection state in socket attachments.

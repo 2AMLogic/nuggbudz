@@ -1,7 +1,8 @@
 import type { BuyerRole, BuyerShare, Settlement } from './economics'
+import { normalizePickupCode } from './pickup'
 
 /** Wire protocol version. Bump on any breaking message change. */
-export const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 3
 
 /**
  * Take a seat in the pool.
@@ -27,7 +28,20 @@ export interface PingMessage {
   at: number
 }
 
-export type ClientMessage = JoinMessage | CancelMessage | PingMessage
+/**
+ * Say the handoff happened.
+ *
+ * The receiver has to produce the code off the orderer's receipt; the orderer
+ * only taps. Which of those applies is decided from the connection's role on
+ * the server, so a `code` sent by the orderer is ignored rather than trusted.
+ */
+export interface ConfirmPickupMessage {
+  type: 'confirm_pickup'
+  /** The orderer's pickup code as typed by the receiver, normalized. */
+  code: string | null
+}
+
+export type ClientMessage = JoinMessage | CancelMessage | PingMessage | ConfirmPickupMessage
 
 export interface WelcomeMessage {
   type: 'welcome'
@@ -63,12 +77,48 @@ export interface MatchedMessage {
     name: string
     distanceMeters: number
   }
+  /**
+   * The code your buddy has to read off you at the handoff — sent to the
+   * orderer only, and null for the receiver, who is the one who has to go and
+   * read it.
+   */
+  pickupCode: string | null
 }
 
 /** Your buddy disconnected before pickup; you are returned to the queue. */
 export interface BuddyLeftMessage {
   type: 'buddy_left'
   matchId: string
+}
+
+/** One side of the handoff is in. Sent to both buddies, so both see progress. */
+export interface PickupConfirmedMessage {
+  type: 'pickup_confirmed'
+  matchId: string
+  by: BuyerRole
+  /** The side still owing a confirmation, or null once both are in. */
+  waitingOn: BuyerRole | null
+  /** When a still-half-confirmed handoff becomes a dispute; null once both are in. */
+  disputeAt: number | null
+}
+
+/** Both sides confirmed. The split is settled and written to the ledger. */
+export interface PickupCompleteMessage {
+  type: 'pickup_complete'
+  matchId: string
+  settledAt: number
+}
+
+/**
+ * One side confirmed and the other never did. Nothing settles: a split with a
+ * no-show is a case for a human, not a completed match.
+ */
+export interface PickupDisputedMessage {
+  type: 'pickup_disputed'
+  matchId: string
+  /** The side that did confirm. */
+  confirmedBy: BuyerRole | null
+  reason: 'timeout' | 'buddy_left'
 }
 
 export interface PongMessage {
@@ -82,6 +132,10 @@ export type ProtocolErrorCode =
   | 'already_waiting'
   | 'already_matched'
   | 'not_waiting'
+  | 'not_matched'
+  | 'bad_pickup_code'
+  | 'already_confirmed'
+  | 'match_disputed'
 
 export interface ErrorMessage {
   type: 'error'
@@ -94,6 +148,9 @@ export type ServerMessage =
   | WaitingMessage
   | MatchedMessage
   | BuddyLeftMessage
+  | PickupConfirmedMessage
+  | PickupCompleteMessage
+  | PickupDisputedMessage
   | PongMessage
   | ErrorMessage
 
@@ -126,6 +183,15 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     }
     case 'cancel':
       return { type: 'cancel' }
+    case 'confirm_pickup': {
+      // A missing code is a valid message, not a malformed one: it is what the
+      // orderer sends when they tap. The server rejects it for a receiver.
+      const { code } = msg
+      if (code === undefined || code === null) return { type: 'confirm_pickup', code: null }
+      if (typeof code !== 'string' || code.length > 64) return null
+      const normalized = normalizePickupCode(code)
+      return { type: 'confirm_pickup', code: normalized.length === 0 ? null : normalized }
+    }
     case 'ping':
       return { type: 'ping', at: typeof msg.at === 'number' ? msg.at : Date.now() }
     default:

@@ -38,6 +38,36 @@ describe('parseClientMessage', () => {
     expect(parseClientMessage('{"type":"ping","at":7}')).toEqual({ type: 'ping', at: 7 })
   })
 
+  it('accepts a confirm with a code, normalized', () => {
+    expect(parseClientMessage('{"type":"confirm_pickup","code":" a2-b3 c4 "}')).toEqual({
+      type: 'confirm_pickup',
+      code: 'A2B3C4',
+    })
+  })
+
+  it('accepts a confirm with no code — that is the orderer tapping', () => {
+    expect(parseClientMessage('{"type":"confirm_pickup"}')).toEqual({
+      type: 'confirm_pickup',
+      code: null,
+    })
+    expect(parseClientMessage('{"type":"confirm_pickup","code":null}')).toEqual({
+      type: 'confirm_pickup',
+      code: null,
+    })
+    // Punctuation only is nothing, not a code the server should compare.
+    expect(parseClientMessage('{"type":"confirm_pickup","code":"---"}')).toEqual({
+      type: 'confirm_pickup',
+      code: null,
+    })
+  })
+
+  it('rejects a confirm whose code is not a short string', () => {
+    expect(parseClientMessage('{"type":"confirm_pickup","code":42}')).toBeNull()
+    expect(
+      parseClientMessage(JSON.stringify({ type: 'confirm_pickup', code: 'A'.repeat(65) })),
+    ).toBeNull()
+  })
+
   it('rejects malformed json', () => {
     expect(parseClientMessage('not json')).toBeNull()
     expect(parseClientMessage('null')).toBeNull()

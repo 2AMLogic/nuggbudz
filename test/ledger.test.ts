@@ -1,126 +1,64 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { findDeal } from '../shared/deals'
 import { settle } from '../shared/economics'
-import { recordSettledMatch, type SettledMatch } from '../worker/ledger'
+import { ledgerStatements, type SettledMatch } from '../worker/ledger'
 
-/**
- * A fake D1Database just faithful enough to exercise recordSettledMatch: it
- * records every prepared statement's SQL and bound params, and lets a test
- * script `batch` to fail some number of times before succeeding.
- */
-function fakeDb(batchImpl: (calls: { sql: string; params: unknown[] }[][]) => unknown) {
-  const calls: { sql: string; params: unknown[] }[][] = []
-  const db = {
-    prepare(sql: string) {
-      return {
-        bind(...params: unknown[]) {
-          return { sql, params }
-        },
-      }
-    },
-    batch(statements: { sql: string; params: unknown[] }[]) {
-      calls.push(statements)
-      return batchImpl(calls)
-    },
-    // Unused by recordSettledMatch, present only to satisfy the D1Database type.
-    exec: vi.fn(),
-    withSession: vi.fn(),
-    dump: vi.fn(),
-  }
-  return { db: db as unknown as D1Database, calls }
+const deal = findDeal('mcd-nuggets-20')
+if (deal === undefined) throw new Error('benchmark deal missing from the catalogue')
+
+const settled: SettledMatch = {
+  matchId: 'match-1',
+  dealId: deal.id,
+  cell: '9q8yyk',
+  distanceMeters: 42.5,
+  createdAt: 1_700_000_000_000,
+  settledAt: 1_700_000_060_000,
+  settlement: settle(deal, 2),
+  names: { orderer: 'Robb', receiver: 'Dana' },
 }
 
-const settlement = settle(
-  {
-    id: 'test-deal',
-    merchant: 'Test',
-    label: 'Test deal',
-    bulk: { item: '20pc', pieces: 20, priceCents: 899 },
-    solo: { item: '10pc', pieces: 10, priceCents: 699 },
-    platformFeeCents: 99,
-    partySize: 2,
-  },
-  2,
-)
-
-function testMatch(overrides: Partial<SettledMatch> = {}): SettledMatch {
-  return {
-    matchId: 'match-1',
-    dealId: 'test-deal',
-    cell: '9q8yyk',
-    createdAt: 1000,
-    settledAt: 1500,
-    distanceMeters: 42,
-    settlement,
-    buyers: [
-      { role: 'orderer', displayName: 'Robb' },
-      { role: 'receiver', displayName: 'Dana' },
-    ],
-    ...overrides,
-  }
-}
-
-describe('recordSettledMatch', () => {
-  it('writes one matches row and one match_buyers row per buyer, in one batch', async () => {
-    const { db, calls } = fakeDb(() => [])
-    await recordSettledMatch(db, testMatch())
-
-    expect(calls).toHaveLength(1)
-    const [statements] = calls
-    expect(statements).toHaveLength(3) // 1 match + 2 buyers
-    expect(statements[0].sql).toMatch(/INSERT OR IGNORE INTO matches/)
-    expect(statements[0].params).toEqual([
-      'match-1',
-      'test-deal',
-      '9q8yyk',
-      2,
-      settlement.totalCollectedCents,
-      settlement.cogsCents,
-      settlement.platformFeeCents,
-      42,
-      1000,
-      1500,
-    ])
-    expect(statements[1].sql).toMatch(/INSERT OR IGNORE INTO match_buyers/)
-    expect(statements[1].params[1]).toBe('orderer')
-    expect(statements[2].params[1]).toBe('receiver')
+describe('ledgerStatements', () => {
+  it('writes one match row and one row per buyer', () => {
+    const statements = ledgerStatements(settled)
+    expect(statements).toHaveLength(3)
+    expect(statements[0].sql).toContain('INTO matches')
+    expect(statements[1].sql).toContain('INTO match_buyers')
+    expect(statements[2].sql).toContain('INTO match_buyers')
   })
 
-  it('uses INSERT OR IGNORE so a retry never duplicates rows', async () => {
-    const { db, calls } = fakeDb(() => [])
-    await recordSettledMatch(db, testMatch())
-    await recordSettledMatch(db, testMatch())
+  it('books the settlement the buddies were shown, in integer cents', () => {
+    const [match, orderer, receiver] = ledgerStatements(settled)
+    expect(match.params).toEqual([
+      'match-1',
+      'mcd-nuggets-20',
+      '9q8yyk',
+      2,
+      settled.settlement.totalCollectedCents,
+      settled.settlement.cogsCents,
+      settled.settlement.platformFeeCents,
+      42.5,
+      1_700_000_000_000,
+      1_700_000_060_000,
+    ])
+    expect(orderer.params).toEqual(['match-1', 'orderer', 'Robb', 449, 699, 10])
+    expect(receiver.params).toEqual(['match-1', 'receiver', 'Dana', 449, 699, 10])
+  })
 
-    expect(calls).toHaveLength(2)
-    for (const statements of calls) {
-      for (const s of statements) expect(s.sql).toMatch(/INSERT OR IGNORE/)
+  it('sums the booked halves back to the collected total', () => {
+    const buyerRows = ledgerStatements(settled).slice(1)
+    const paid = buyerRows.reduce((total, row) => total + Number(row.params[3]), 0)
+    expect(paid).toBe(settled.settlement.totalCollectedCents)
+  })
+
+  it('is idempotent, so a retry cannot rewrite a booked split', () => {
+    for (const statement of ledgerStatements(settled)) {
+      expect(statement.sql.startsWith('INSERT OR IGNORE')).toBe(true)
     }
   })
 
-  it('retries on failure and succeeds once D1 recovers', async () => {
-    let attempts = 0
-    const { db, calls } = fakeDb(() => {
-      attempts++
-      if (attempts < 3) throw new Error('D1 is down')
-      return []
-    })
-
-    await recordSettledMatch(db, testMatch(), { retryDelayMs: 1 })
-
-    expect(attempts).toBe(3)
-    expect(calls).toHaveLength(3)
-  })
-
-  it('logs and swallows the error rather than throwing after exhausting retries', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    const { db } = fakeDb(() => {
-      throw new Error('D1 is permanently down')
-    })
-
-    await expect(
-      recordSettledMatch(db, testMatch(), { maxAttempts: 2, retryDelayMs: 1 }),
-    ).resolves.toBeUndefined()
-    expect(errorSpy).toHaveBeenCalledOnce()
-
-    errorSpy.mockRestore()
+  it('binds one parameter per placeholder', () => {
+    for (const statement of ledgerStatements(settled)) {
+      expect(statement.params).toHaveLength((statement.sql.match(/\?/g) ?? []).length)
+    }
   })
 })

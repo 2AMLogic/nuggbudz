@@ -53,13 +53,16 @@ state.
 pnpm dev          # Vite + Worker together, full stack
 pnpm test         # vitest — pure logic (settlement, geo, matchmaking, protocol)
 pnpm smoke        # end-to-end pairing against a running `pnpm dev`
+pnpm test:e2e     # Playwright — two browsers driving the real UI end to end
 pnpm typecheck    # wrangler types && tsc --noEmit
 pnpm lint         # biome
 pnpm run deploy    # vite build && wrangler deploy (pnpm deploy is a pnpm builtin)
 ```
 
 `pnpm test` does not cover the Durable Object. `pnpm smoke` does, and needs a
-dev server on port 5199. Run both before calling a change done.
+dev server on port 5199. `pnpm test:e2e` boots one itself (or reuses one
+already running there) and additionally exercises the screen a person actually
+looks at. Run all three before calling a change done.
 
 ## Style
 

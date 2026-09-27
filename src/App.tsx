@@ -5,38 +5,21 @@ import { Line, Perf, Roll } from './components/Roll'
 import { SettlementReceipt } from './components/SettlementReceipt'
 import { useCoords } from './hooks/useCoords'
 import { usePool } from './hooks/usePool'
+import { useSession } from './hooks/useSession'
 
 interface DealWithMath extends DealSpec {
   settlement: Settlement
   spread: SpreadAnalysis
 }
 
-const NAME_KEY = 'nuggbudz.name'
-
-function readStoredName(): string {
-  try {
-    return localStorage.getItem(NAME_KEY) ?? ''
-  } catch {
-    return ''
-  }
-}
-
-function storeName(name: string): void {
-  try {
-    localStorage.setItem(NAME_KEY, name)
-  } catch {
-    // Private windows and blocked site data are fine; the name is a convenience.
-  }
-}
-
 export function App() {
   const [deals, setDeals] = useState<DealWithMath[]>([])
   const [dealId, setDealId] = useState<string | null>(null)
-  const [name, setName] = useState(readStoredName)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const coords = useCoords()
   const pool = usePool()
+  const session = useSession()
 
   useEffect(() => {
     let cancelled = false
@@ -63,14 +46,13 @@ export function App() {
    * fix: leaving the queue would immediately rejoin on the still-set fix.
    */
   const start = async () => {
-    const trimmed = name.trim()
-    if (trimmed.length === 0 || dealId === null) return
+    if (dealId === null || session.user === null) return
     const fix = await coords.locate()
-    pool.join({ name: trimmed, dealId, lat: fix.lat, lng: fix.lng })
+    pool.join({ dealId, lat: fix.lat, lng: fix.lng })
   }
 
   const selected = deals.find((deal) => deal.id === dealId) ?? null
-  const canStart = name.trim().length > 0 && dealId !== null && !coords.pending
+  const canStart = session.user !== null && dealId !== null && !coords.pending
 
   if (pool.stage === 'matched' && pool.match !== null) {
     return (
@@ -167,21 +149,37 @@ export function App() {
 
       <Perf label="Who are you" />
 
-      <label className="block">
-        <span className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
-          First name your bud will look for
-        </span>
-        <input
-          value={name}
-          onChange={(event) => {
-            setName(event.target.value)
-            storeName(event.target.value)
-          }}
-          maxLength={40}
-          placeholder="Robb"
-          className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg focus:outline-none"
-        />
-      </label>
+      {session.pending ? (
+        <p className="font-body text-sm text-faded">Checking your sign-in…</p>
+      ) : session.user === null ? (
+        <>
+          <p className="font-body text-sm leading-snug text-faded">
+            Sign in so your bud knows who they are meeting, and so a split can be settled
+            afterwards.
+          </p>
+          <button
+            type="button"
+            onClick={session.signIn}
+            className="mt-4 w-full border-2 border-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px"
+          >
+            Sign in with Google
+          </button>
+        </>
+      ) : (
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="font-display text-lg">{session.user.displayName}</span>
+          <button
+            type="button"
+            onClick={() => {
+              pool.leave()
+              void session.signOut()
+            }}
+            className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase underline"
+          >
+            Sign out
+          </button>
+        </div>
+      )}
 
       {coords.notice !== null && (
         <p className="mt-4 font-body text-sm text-faded">{coords.notice}</p>

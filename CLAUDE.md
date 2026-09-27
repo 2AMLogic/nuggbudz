@@ -34,6 +34,9 @@ state.
   `parseClientMessage` rather than casting.
 - **The server derives the cell, never the client.** Otherwise a caller parks
   themselves in someone else's market.
+- **Identity comes from the session, never from a message.** The pool socket is
+  authenticated at upgrade time and the display name a buddy sees is read off
+  the session in KV. A `name` on the wire is ignored, not trusted.
 
 ## Commands
 

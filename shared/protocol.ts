@@ -1,11 +1,17 @@
 import type { BuyerRole, BuyerShare, Settlement } from './economics'
 
 /** Wire protocol version. Bump on any breaking message change. */
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
+/**
+ * Take a seat in the pool.
+ *
+ * There is deliberately no `name` here: the display name comes from the session
+ * the socket was upgraded with, so a buyer cannot present themselves to a buddy
+ * as somebody else.
+ */
 export interface JoinMessage {
   type: 'join'
-  name: string
   dealId: string
   lat: number
   lng: number
@@ -29,6 +35,11 @@ export interface WelcomeMessage {
   /** Geohash cell this connection was routed to. */
   cell: string
   waiting: number
+  /** Who the server thinks you are, straight off your session. */
+  user: {
+    id: string
+    name: string
+  }
 }
 
 export interface WaitingMessage {
@@ -104,14 +115,14 @@ export function parseClientMessage(raw: string): ClientMessage | null {
 
   switch (msg.type) {
     case 'join': {
-      const { name, dealId, lat, lng } = msg
-      if (typeof name !== 'string' || typeof dealId !== 'string') return null
+      // Any `name` on the wire is ignored, not rejected: the authenticated name
+      // is the only one the server will ever show a buddy.
+      const { dealId, lat, lng } = msg
+      if (typeof dealId !== 'string' || dealId.length === 0 || dealId.length > 64) return null
       if (typeof lat !== 'number' || typeof lng !== 'number') return null
       if (!Number.isFinite(lat) || lat < -90 || lat > 90) return null
       if (!Number.isFinite(lng) || lng < -180 || lng > 180) return null
-      const trimmed = name.trim()
-      if (trimmed.length === 0 || trimmed.length > 40) return null
-      return { type: 'join', name: trimmed, dealId, lat, lng }
+      return { type: 'join', dealId, lat, lng }
     }
     case 'cancel':
       return { type: 'cancel' }

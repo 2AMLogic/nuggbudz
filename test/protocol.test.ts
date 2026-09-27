@@ -5,17 +5,31 @@ describe('parseClientMessage', () => {
   it('accepts a well-formed join', () => {
     const raw = JSON.stringify({
       type: 'join',
-      name: '  Robb  ',
       dealId: 'mcd-nuggets-20',
       lat: 37.7749,
       lng: -122.4194,
     })
     expect(parseClientMessage(raw)).toEqual({
       type: 'join',
-      name: 'Robb',
       dealId: 'mcd-nuggets-20',
       lat: 37.7749,
       lng: -122.4194,
+    })
+  })
+
+  it('ignores a client-supplied name — identity comes from the session', () => {
+    const raw = JSON.stringify({
+      type: 'join',
+      name: 'Definitely Somebody Else',
+      dealId: 'mcd-nuggets-20',
+      lat: 0,
+      lng: 0,
+    })
+    expect(parseClientMessage(raw)).toEqual({
+      type: 'join',
+      dealId: 'mcd-nuggets-20',
+      lat: 0,
+      lng: 0,
     })
   })
 
@@ -36,21 +50,19 @@ describe('parseClientMessage', () => {
 
   it('rejects a join with a bad coordinate', () => {
     const bad = (over: Record<string, unknown>) =>
-      parseClientMessage(
-        JSON.stringify({ type: 'join', name: 'R', dealId: 'd', lat: 0, lng: 0, ...over }),
-      )
+      parseClientMessage(JSON.stringify({ type: 'join', dealId: 'd', lat: 0, lng: 0, ...over }))
     expect(bad({ lat: 91 })).toBeNull()
     expect(bad({ lng: -181 })).toBeNull()
     expect(bad({ lat: 'north' })).toBeNull()
     expect(bad({ lat: Number.NaN })).toBeNull()
   })
 
-  it('rejects a join with an unusable name', () => {
-    const bad = (name: unknown) =>
-      parseClientMessage(JSON.stringify({ type: 'join', name, dealId: 'd', lat: 0, lng: 0 }))
+  it('rejects a join with an unusable deal id', () => {
+    const bad = (dealId: unknown) =>
+      parseClientMessage(JSON.stringify({ type: 'join', dealId, lat: 0, lng: 0 }))
     expect(bad('')).toBeNull()
-    expect(bad('   ')).toBeNull()
-    expect(bad('x'.repeat(41))).toBeNull()
+    expect(bad('d'.repeat(65))).toBeNull()
     expect(bad(42)).toBeNull()
+    expect(bad(null)).toBeNull()
   })
 })

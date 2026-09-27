@@ -11,9 +11,19 @@ import {
 } from '../shared/protocol'
 import { type Env, intVar } from './env'
 
-interface BuyerIdentity {
+/**
+ * Who is on the other end of a socket.
+ *
+ * Both fields are set by the Worker from the caller's session at upgrade time
+ * and never from a client message, so a connection cannot rename itself.
+ */
+interface Principal {
   connId: string
+  userId: string
   name: string
+}
+
+interface BuyerIdentity extends Principal {
   dealId: string
   lat: number
   lng: number
@@ -21,7 +31,7 @@ interface BuyerIdentity {
 }
 
 type ConnState =
-  | { status: 'idle'; connId: string }
+  | ({ status: 'idle' } & Principal)
   | ({ status: 'waiting' } & BuyerIdentity)
   | ({ status: 'matched'; matchId: string; role: BuyerRole } & BuyerIdentity)
 
@@ -59,18 +69,28 @@ export class NuggPool extends DurableObject<Env> {
       return new Response('expected websocket upgrade', { status: 426 })
     }
 
+    const params = new URL(request.url).searchParams
+    // The Worker authenticates the upgrade and passes the session's identity
+    // down. Missing identity means the request did not come through that path,
+    // so refuse rather than seat an anonymous buyer.
+    const userId = params.get('userId') ?? ''
+    const name = params.get('displayName') ?? ''
+    if (userId.length === 0 || name.length === 0) {
+      return new Response('unauthenticated', { status: 401 })
+    }
+
     const { 0: client, 1: server } = new WebSocketPair()
     this.ctx.acceptWebSocket(server)
 
     const connId = crypto.randomUUID()
-    this.setState(server, { status: 'idle', connId })
+    this.setState(server, { status: 'idle', connId, userId, name })
 
-    const cell = new URL(request.url).searchParams.get('cell') ?? ''
     this.send(server, {
       type: 'welcome',
       protocol: PROTOCOL_VERSION,
-      cell,
+      cell: params.get('cell') ?? '',
       waiting: this.waitingStates().length,
+      user: { id: userId, name },
     })
 
     return new Response(null, { status: 101, webSocket: client })
@@ -96,7 +116,7 @@ export class NuggPool extends DurableObject<Env> {
         this.handleCancel(ws)
         return
       case 'join':
-        await this.handleJoin(ws, msg.name, msg.dealId, msg.lat, msg.lng)
+        await this.handleJoin(ws, msg.dealId, msg.lat, msg.lng)
         return
     }
   }
@@ -109,13 +129,7 @@ export class NuggPool extends DurableObject<Env> {
     await this.handleDisconnect(ws)
   }
 
-  private async handleJoin(
-    ws: WebSocket,
-    name: string,
-    dealId: string,
-    lat: number,
-    lng: number,
-  ): Promise<void> {
+  private async handleJoin(ws: WebSocket, dealId: string, lat: number, lng: number): Promise<void> {
     const state = this.getState(ws)
     if (state === null) return
     if (state.status === 'waiting') {
@@ -135,13 +149,16 @@ export class NuggPool extends DurableObject<Env> {
 
     const identity: BuyerIdentity = {
       connId: state.connId,
-      name,
+      // The authenticated name, not anything the client sent.
+      userId: state.userId,
+      name: state.name,
       dealId,
       lat,
       lng,
       joinedAt: Date.now(),
     }
-    const others = this.waitingStates()
+    // A second tab is not a second buyer: never pair an account with itself.
+    const others = this.waitingStates().filter((o) => o.state.userId !== identity.userId)
     const decision = findMatch(
       toCandidate(identity),
       others.map((o) => toCandidate(o.state)),
@@ -215,7 +232,12 @@ export class NuggPool extends DurableObject<Env> {
       this.fail(ws, 'not_waiting', 'nothing to cancel')
       return
     }
-    this.setState(ws, { status: 'idle', connId: state.connId })
+    this.setState(ws, {
+      status: 'idle',
+      connId: state.connId,
+      userId: state.userId,
+      name: state.name,
+    })
   }
 
   /**
@@ -297,8 +319,8 @@ export class NuggPool extends DurableObject<Env> {
 
 /** Strip connection status off a state, leaving just who and where the buyer is. */
 function identityOf(state: BuyerIdentity): BuyerIdentity {
-  const { connId, name, dealId, lat, lng, joinedAt } = state
-  return { connId, name, dealId, lat, lng, joinedAt }
+  const { connId, userId, name, dealId, lat, lng, joinedAt } = state
+  return { connId, userId, name, dealId, lat, lng, joinedAt }
 }
 
 function toCandidate(identity: BuyerIdentity): Candidate {

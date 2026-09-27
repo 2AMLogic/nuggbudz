@@ -35,6 +35,17 @@
     // MATCH_RADIUS_METERS inside the cell so cell-edge buddies aren't matched
     // across an unwalkable distance.
     "POOL_CELL_PRECISION": "6",
-    "MATCH_RADIUS_METERS": "800"
+    "MATCH_RADIUS_METERS": "800",
+    // Pool socket abuse limits (#10).
+    // Concurrent sockets one signed-in account may hold open in one cell. Keyed
+    // on the account, not the IP, so buyers behind one carrier NAT never share
+    // it. An honest buyer needs one socket, or two while a reconnect overlaps.
+    "POOL_MAX_SOCKETS_PER_CELL": "3",
+    // Upgrade attempts one client IP (per /64 on IPv6) may make per sliding
+    // window, across all cells. Sized for a venue NAT: two phones on one Wi-Fi,
+    // each reconnecting a few times, must never trip it. Each allowed attempt
+    // costs one KV write (the free tier allows 1,000 per day).
+    "POOL_UPGRADE_LIMIT": "30",
+    "POOL_UPGRADE_WINDOW_SECONDS": "60"
   }
 }

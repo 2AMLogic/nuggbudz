@@ -1,0 +1,13 @@
+{
+  "critic": "design",
+  "role": "deck-design.md",
+  "started": "2026-09-27T22:12:00Z",
+  "finished": "2026-09-27T22:24:00Z",
+  "model": "claude-opus-5",
+  "schema_version": 1,
+  "scorecard_kind": "machine-summary",
+  "rubric_id": "anvil-deck-v3",
+  "rubric_total": 49,
+  "advance_threshold": 43,
+  "rendered_from": "deck.md -> ephemeral deck.pdf (marp), reviewed page by page; per-slide PNGs not committed"
+}

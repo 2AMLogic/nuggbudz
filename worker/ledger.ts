@@ -112,10 +112,60 @@ export function ledgerStatements(match: SettledMatch): LedgerStatement[] {
   return statements
 }
 
-/** Book a settled split. Batched, so a match never lands without its buyers. */
-export async function writeSettledMatch(db: D1Database, match: SettledMatch): Promise<void> {
+/** How many times a failed batch is tried before the write is given up on. */
+const DEFAULT_MAX_ATTEMPTS = 3
+
+/** Linear backoff base: attempt N waits `retryDelayMs * N`. */
+const DEFAULT_RETRY_DELAY_MS = 200
+
+export interface WriteOptions {
+  maxAttempts?: number
+  retryDelayMs?: number
+  /** Injectable so tests exercise the backoff without waiting for it. */
+  sleep?: (ms: number) => Promise<void>
+}
+
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Book a settled split. Batched, so a match never lands without its buyers.
+ *
+ * This is the one place money becomes durable: everything upstream is live
+ * state the Durable Object owns and can lose safely, and a `matches` row is the
+ * only record that a split happened. So a transient D1 failure is retried a
+ * bounded number of times with linear backoff rather than costing the row on
+ * the first blip. `INSERT OR IGNORE` is what makes replaying safe — a partially
+ * applied batch cannot be double-booked by the next attempt.
+ *
+ * Still throws once the attempts are exhausted. The swallow belongs to exactly
+ * one layer, and that layer is `NuggPool.completeMatch`, which must not strand
+ * two people who already swapped nuggets; having both retry here and a silent
+ * return would leave the caller unable to tell a booked split from a lost one.
+ */
+export async function writeSettledMatch(
+  db: D1Database,
+  match: SettledMatch,
+  options: WriteOptions = {},
+): Promise<void> {
+  const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
+  const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS
+  const sleep = options.sleep ?? wait
   const statements = ledgerStatements(match)
-  // A demo pairing yields no statements: nothing to book, and no empty batch.
+  // A demo pairing yields no statements. Returning before the retry loop rather
+  // than inside it matters: an empty batch that D1 rejected would otherwise be
+  // retried with backoff and then thrown, turning "nothing to book" into an
+  // error on a path that is working correctly.
   if (statements.length === 0) return
-  await db.batch(statements.map((statement) => db.prepare(statement.sql).bind(...statement.params)))
+
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await db.batch(
+        statements.map((statement) => db.prepare(statement.sql).bind(...statement.params)),
+      )
+      return
+    } catch (error) {
+      if (attempt >= maxAttempts) throw error
+      await sleep(retryDelayMs * attempt)
+    }
+  }
 }

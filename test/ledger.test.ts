@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { findDeal } from '../shared/deals'
 import { demoUserId } from '../shared/demo'
 import { settle } from '../shared/economics'
-import { isDemoMatch, ledgerStatements, type SettledMatch } from '../worker/ledger'
+import {
+  isDemoMatch,
+  ledgerStatements,
+  type SettledMatch,
+  writeSettledMatch,
+} from '../worker/ledger'
 
 const deal = findDeal('mcd-nuggets-20')
 if (deal === undefined) throw new Error('benchmark deal missing from the catalogue')
@@ -99,5 +104,86 @@ describe('the demo gate', () => {
     const spoofed: SettledMatch = { ...settled, names: { orderer: 'demo:Robb', receiver: 'Dana' } }
     expect(isDemoMatch(spoofed)).toBe(false)
     expect(ledgerStatements(spoofed)).toHaveLength(3)
+  })
+})
+
+/**
+ * A fake D1 that fails its first `failures` batches, then succeeds.
+ *
+ * Only the surface `writeSettledMatch` touches is modelled — `prepare().bind()`
+ * and `batch()` — so this stays a unit test with no Workers runtime.
+ */
+function flakyDb(failures: number) {
+  const calls: { attempts: number; batched: number[] } = { attempts: 0, batched: [] }
+  const db = {
+    prepare: (sql: string) => ({ bind: (...params: unknown[]) => ({ sql, params }) }),
+    batch: async (statements: unknown[]) => {
+      calls.attempts += 1
+      if (calls.attempts <= failures) throw new Error('D1_ERROR: network')
+      calls.batched.push(statements.length)
+      return []
+    },
+  }
+  return { db: db as unknown as D1Database, calls }
+}
+
+/** Records the backoff without waiting for it. */
+function recordingSleep() {
+  const slept: number[] = []
+  return { slept, sleep: async (ms: number) => void slept.push(ms) }
+}
+
+describe('writeSettledMatch', () => {
+  it('books the split on the first try when D1 is healthy', async () => {
+    const { db, calls } = flakyDb(0)
+    await writeSettledMatch(db, settled)
+    expect(calls.attempts).toBe(1)
+    expect(calls.batched).toEqual([3])
+  })
+
+  it('retries a transient batch failure and eventually books the row', async () => {
+    const { db, calls } = flakyDb(2)
+    const { slept, sleep } = recordingSleep()
+    await writeSettledMatch(db, settled, { sleep })
+    expect(calls.attempts).toBe(3)
+    expect(calls.batched).toEqual([3])
+    // Linear backoff: attempt 1 waits 200ms, attempt 2 waits 400ms.
+    expect(slept).toEqual([200, 400])
+  })
+
+  it('gives up after the bounded attempts and rethrows, rather than silently losing the row', async () => {
+    const { db, calls } = flakyDb(Number.POSITIVE_INFINITY)
+    const { sleep } = recordingSleep()
+    await expect(writeSettledMatch(db, settled, { sleep })).rejects.toThrow('D1_ERROR')
+    expect(calls.attempts).toBe(3)
+  })
+
+  it('honours an overridden attempt bound', async () => {
+    const { db, calls } = flakyDb(4)
+    const { sleep } = recordingSleep()
+    await writeSettledMatch(db, settled, { maxAttempts: 5, sleep })
+    expect(calls.attempts).toBe(5)
+  })
+
+  it('does not sleep when it is not going to retry', async () => {
+    const { db } = flakyDb(Number.POSITIVE_INFINITY)
+    const { slept, sleep } = recordingSleep()
+    await expect(writeSettledMatch(db, settled, { maxAttempts: 1, sleep })).rejects.toThrow()
+    expect(slept).toEqual([])
+  })
+
+  it('never touches D1 for a demo pairing, and does not retry its way to an error', async () => {
+    // The gate has to return before the retry loop: a demo match produces no
+    // statements, and an empty batch that D1 rejected would otherwise be retried
+    // with backoff and then rethrown on a path that is working correctly.
+    const { db, calls } = flakyDb(Number.POSITIVE_INFINITY)
+    const { slept, sleep } = recordingSleep()
+    const pairing: SettledMatch = {
+      ...settled,
+      userIds: { orderer: demoUserId('a'), receiver: demoUserId('b') },
+    }
+    await expect(writeSettledMatch(db, pairing, { sleep })).resolves.toBeUndefined()
+    expect(calls.attempts).toBe(0)
+    expect(slept).toEqual([])
   })
 })

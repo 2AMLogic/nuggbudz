@@ -119,12 +119,12 @@ _The cell **is** the matching market. One event at a time, so double-pairing can
 ## Deployed, and verified end to end
 
 - `nuggbudz.personal-account-251.workers.dev` — real two-phone pairing over WebSockets
-- **32/32** end-to-end checks pass across Worker, Durable Object, KV and D1
+- **57/57** end-to-end checks pass across Worker, Durable Object, KV and D1
 - Settlement, geo, matchmaking and the wire protocol are pure logic, tested without a runtime
 - **Not yet proven**: no users, no revenue, no pilot — that is what the ask is for
 - Built solo, in the hackathon window, by Robb Walters (2AM Logic)
 
-<!-- speaker: The checks are scripts/smoke.mjs against a real running stack, not a mock: two independent sockets in one cell, complementary roles, identical settlement, a buddy name that comes from the session rather than the wire, a buyer outside the radius left waiting, and a survivor requeued when their buddy disconnects. The deployed URL is one commit behind — it is the build before Google sign-in, which is why a judge can pair on it without an account. Say the fourth bullet out loud rather than waiting to be asked. -->
+<!-- speaker: The checks are scripts/smoke.mjs against a real running stack, not a mock: two independent sockets in one cell, complementary roles, identical settlement, a buddy name that comes from the session rather than the wire, a buyer outside the radius left waiting, and a survivor requeued when their buddy disconnects. The largest block is the pickup handshake — only the orderer is told the code, a wrong code settles nothing, one side confirming alone arms a dispute deadline instead of booking, and a row reaches the D1 ledger only when both sides confirm. The deployed URL is one commit behind — it is the build before Google sign-in, which is why a judge can pair on it without an account. Say the fourth bullet out loud rather than waiting to be asked. -->
 
 ---
 

@@ -10,6 +10,7 @@ import {
   type ServerMessage,
 } from '../shared/protocol'
 import { type Env, intVar } from './env'
+import { recordSettledMatch } from './ledger'
 
 /**
  * Who is on the other end of a socket.
@@ -85,10 +86,18 @@ export class NuggPool extends DurableObject<Env> {
     const connId = crypto.randomUUID()
     this.setState(server, { status: 'idle', connId, userId, name })
 
+    // Set by the Worker from the caller's coordinates, never by the client.
+    const cell = params.get('cell') ?? ''
+    // The cell is constant for this DO's whole lifetime (one instance per
+    // cell) but instance fields do not survive hibernation, so it is
+    // persisted here rather than cached in memory — a settled match still
+    // needs it long after this connection's own fetch() call is gone.
+    await this.ctx.storage.put('cell', cell)
+
     this.send(server, {
       type: 'welcome',
       protocol: PROTOCOL_VERSION,
-      cell: params.get('cell') ?? '',
+      cell,
       waiting: this.waitingStates().length,
       user: { id: userId, name },
     })
@@ -185,6 +194,7 @@ export class NuggPool extends DurableObject<Env> {
     }
 
     const matchId = crypto.randomUUID()
+    const createdAt = Date.now()
     const settlement = settle(deal, 2)
     const ordererIsSelf = decision.orderer.id === identity.connId
     const selfIdentity = identity
@@ -193,7 +203,7 @@ export class NuggPool extends DurableObject<Env> {
     await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, {
       matchId,
       dealId,
-      createdAt: Date.now(),
+      createdAt,
       ordererConnId: decision.orderer.id,
       receiverConnId: decision.receiver.id,
       distanceMeters: decision.distanceMeters,
@@ -223,6 +233,27 @@ export class NuggPool extends DurableObject<Env> {
       settlement,
       buddy: { name: selfIdentity.name, distanceMeters: decision.distanceMeters },
     })
+
+    // There is no two-sided pickup confirmation yet (that is #5); until it
+    // lands, a match is the only completion signal available, so it doubles
+    // as the ledger write trigger. `ctx.waitUntil` keeps a slow or failing D1
+    // write from delaying the next event this DO processes.
+    const cell = (await this.ctx.storage.get<string>('cell')) ?? ''
+    this.ctx.waitUntil(
+      recordSettledMatch(this.env.DB, {
+        matchId,
+        dealId,
+        cell,
+        createdAt,
+        settledAt: Date.now(),
+        distanceMeters: decision.distanceMeters,
+        settlement,
+        buyers: [
+          { role: selfRole, displayName: selfIdentity.name },
+          { role: buddyRole, displayName: buddyIdentity.name },
+        ],
+      }),
+    )
   }
 
   private handleCancel(ws: WebSocket): void {

@@ -119,7 +119,7 @@ _The cell **is** the matching market. One event at a time, so double-pairing can
 ## Deployed, and verified end to end
 
 - `nuggbudz.com` — real two-phone pairing over WebSockets
-- **69/69** end-to-end checks pass across Worker, Durable Object, KV and D1
+- **Every** end-to-end check passes across Worker, Durable Object, KV and D1
 - Settlement, geo, matchmaking and the wire protocol are pure logic, tested without a runtime
 - **Not yet proven**: no users, no revenue, no pilot — that is what the ask is for
 - Shipped in the hackathon window by an agent-orchestrated pipeline — every feature

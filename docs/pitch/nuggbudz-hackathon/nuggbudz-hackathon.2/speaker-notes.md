@@ -151,7 +151,7 @@ passes the principal down; a `name` on the wire is ignored.)
 
 ## 10. Deployed, and verified end to end
 
-**Talk track**: Deployed, and 69/69 end-to-end checks pass across the Worker,
+**Talk track**: Deployed, and every end-to-end check passes across the Worker,
 the Durable Object, KV and D1 — two independent sockets in one cell,
 complementary roles, identical settlement, a buddy name that comes from the
 session rather than the wire, a buyer outside the radius left waiting, a
@@ -160,15 +160,15 @@ handshake: only the orderer holds the code, a wrong code settles nothing, and a
 row reaches the ledger only when both sides confirm. Then say the fourth
 bullet: no users, no revenue, no pilot.
 
-**Anticipated questions**: Is that against production? (The 57-check run is
+**Anticipated questions**: Is that against production? (The full run is
 against a full local stack — `pnpm dev` plus the real bindings — because the
 pool socket now requires a session and `pnpm smoke` seeds sessions into the
 local KV namespace. The deployment is behind `main`,
 and it passed its own 22-check run today. Both are in `refs/smoke-runs.md`.)
 Who built it? (An agent-orchestrated pipeline, in the hackathon window — Curator, Builder, Judge, Doctor and Champion, merging as `rjwalters` and `turian`.)
 
-**Backing data**: `refs/smoke-runs.md`; the count is derived from
-`scripts/smoke.mjs` by `countSmokeChecks()`.
+**Backing data**: `refs/smoke-runs.md`. The slide names no count on purpose
+— see "Why the deck does not quote a check count" there.
 
 ## 11. Live demo — two phones, one cell
 

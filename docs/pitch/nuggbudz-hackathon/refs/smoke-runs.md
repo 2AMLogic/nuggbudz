@@ -113,15 +113,19 @@ dispute deadline instead of booking a row.
 are no users. Two scripted clients are not two hungry strangers, and the deck
 must not present this as traction beyond "the system works".
 
-## Why the deck quotes a check count
+## Why the deck does not quote a check count
 
-`61/61` is the count of `check()` assertions in `scripts/smoke.mjs`, counted
-from the source by `countSmokeChecks()` in `scripts/deck-ledger.ts`. Adding an
-assertion changes the count, which fails `test/deck.test.ts` until the slide is
-updated — the same drift guard the money figures get. The count grew 22 -> 32
-when Google sign-in landed, 32 -> 57 when the two-sided pickup handshake
-landed, and 57 -> 61 when the cell map's roster-broadcast checks landed; every
-time the deck was corrected by that failure rather than by anyone noticing. The
-57 figure is the one caught by 2am-nuggbudz#26: #18 added the guard and #22
-added the assertions, neither branch was red on its own, and `main` went red on
-the merge.
+The slide used to print `N/N`, where N was the count of `check()` assertions in
+`scripts/smoke.mjs`, counted from the source by `countSmokeChecks()` in
+`scripts/deck-ledger.ts`, and `test/deck.test.ts` failed until the slide matched.
+The count grew 22 -> 32 when Google sign-in landed, 32 -> 57 when the two-sided
+pickup handshake landed, and 57 -> 61 when the cell map's roster-broadcast
+checks landed. That one line had to be hand-edited by every PR touching
+`scripts/smoke.mjs`, so concurrent branches conflicted on it or, worse, bumped
+it to the same wrong number and merged clean: 2am-nuggbudz#26 is the case where
+#18 added the guard and #22 added the assertions, neither branch was red on its
+own, and `main` went red on the merge.
+
+The slide now says every end-to-end check passes, and the test asserts only
+that the claim is there and that no count is pinned beside it (#46). The live
+count is whatever `pnpm smoke` prints.

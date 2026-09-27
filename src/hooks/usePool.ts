@@ -1,7 +1,12 @@
-import type { MatchedMessage, ServerMessage } from '@shared/protocol'
+import type { MatchedMessage, PaymentRequiredMessage, ServerMessage } from '@shared/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-export type PoolStage = 'idle' | 'connecting' | 'waiting' | 'matched'
+/**
+ * `matched` is paired-and-owing; `cleared` is both halves paid. Only the
+ * second one has a pickup code, and it is the server that says which you are
+ * in — the client cannot promote itself.
+ */
+export type PoolStage = 'idle' | 'connecting' | 'waiting' | 'matched' | 'cleared'
 
 export interface JoinRequest {
   name: string
@@ -17,6 +22,14 @@ export interface PoolState {
   queuedAhead: number
   cell: string | null
   match: MatchedMessage | null
+  /** The charge for your half, once the server has opened it with Stripe. */
+  payment: PaymentRequiredMessage | null
+  /**
+   * Issued by the server only once both halves have cleared. Null means there
+   * is no pickup code to show, which is the whole point: the UI cannot render
+   * one it was never given.
+   */
+  pickupCode: string | null
   error: string | null
   /** Set when a buddy walked away and you were put back in the queue. */
   notice: string | null
@@ -28,6 +41,8 @@ const INITIAL: PoolState = {
   queuedAhead: 0,
   cell: null,
   match: null,
+  payment: null,
+  pickupCode: null,
   error: null,
   notice: null,
 }
@@ -106,12 +121,39 @@ export function usePool() {
                 queuedAhead: message.queuedAhead,
               }
             case 'matched':
-              return { ...prev, stage: 'matched', match: message, notice: null }
+              return {
+                ...prev,
+                stage: 'matched',
+                match: message,
+                payment: null,
+                pickupCode: null,
+                notice: null,
+              }
+            case 'payment_required':
+              return { ...prev, payment: message }
+            case 'payment_cleared':
+              return { ...prev, stage: 'cleared', pickupCode: message.pickupCode }
+            case 'payment_failed':
+              return {
+                ...prev,
+                stage: 'waiting',
+                match: null,
+                payment: null,
+                pickupCode: null,
+                notice:
+                  message.whose === 'you'
+                    ? 'Your payment did not go through. Back in the queue.'
+                    : `Your bud's payment failed${
+                        message.refunded ? ' — your half was refunded' : ''
+                      }. Back in the queue.`,
+              }
             case 'buddy_left':
               return {
                 ...prev,
                 stage: 'waiting',
                 match: null,
+                payment: null,
+                pickupCode: null,
                 notice: 'Your bud dropped out. Back in the queue.',
               }
             case 'error':
@@ -126,7 +168,7 @@ export function usePool() {
         if (socketRef.current !== socket) return
         socketRef.current = null
         setState((prev) =>
-          prev.stage === 'matched'
+          prev.stage === 'matched' || prev.stage === 'cleared'
             ? prev
             : { ...prev, stage: 'idle', error: 'Lost the connection. Try again.' },
         )

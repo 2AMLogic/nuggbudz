@@ -1,7 +1,14 @@
 import type { BuyerRole, BuyerShare, Settlement } from './economics'
 
-/** Wire protocol version. Bump on any breaking message change. */
-export const PROTOCOL_VERSION = 1
+/**
+ * Wire protocol version. Bump on any breaking message change.
+ *
+ * 2 gated pickup behind settlement: `matched` no longer means "go get the box",
+ * it means "you are paired, now pay your half". A v1 client would show a pickup
+ * code for a match nobody has paid for, which is why this is a bump and not an
+ * additive change.
+ */
+export const PROTOCOL_VERSION = 2
 
 export interface JoinMessage {
   type: 'join'
@@ -54,6 +61,48 @@ export interface MatchedMessage {
   }
 }
 
+/**
+ * Pay your half. Sent immediately after `matched`.
+ *
+ * `amountCents` is the buyer's own `share.payCents` copied verbatim — the
+ * client never recomputes a price, and the same number is what was sent to
+ * Stripe as the PaymentIntent amount.
+ */
+export interface PaymentRequiredMessage {
+  type: 'payment_required'
+  matchId: string
+  amountCents: number
+  /** Stripe PaymentIntent client secret, confirmed in the browser. */
+  clientSecret: string
+}
+
+/**
+ * Both halves cleared, so the pickup code now exists.
+ *
+ * The code is issued by the server at this moment rather than derived from the
+ * match id up front: a client that has not been told the code cannot render
+ * one for a match only half of which has been paid for.
+ */
+export interface PaymentClearedMessage {
+  type: 'payment_cleared'
+  matchId: string
+  pickupCode: string
+}
+
+/** Which side of the pair failed to pay. */
+export type PaymentFailureSide = 'you' | 'buddy'
+
+/**
+ * A half went unpaid, so the whole match is off and both buyers are requeued.
+ * If this buyer had already paid, that charge has been refunded.
+ */
+export interface PaymentFailedMessage {
+  type: 'payment_failed'
+  matchId: string
+  whose: PaymentFailureSide
+  refunded: boolean
+}
+
 /** Your buddy disconnected before pickup; you are returned to the queue. */
 export interface BuddyLeftMessage {
   type: 'buddy_left'
@@ -71,6 +120,7 @@ export type ProtocolErrorCode =
   | 'already_waiting'
   | 'already_matched'
   | 'not_waiting'
+  | 'payment_unavailable'
 
 export interface ErrorMessage {
   type: 'error'
@@ -82,6 +132,9 @@ export type ServerMessage =
   | WelcomeMessage
   | WaitingMessage
   | MatchedMessage
+  | PaymentRequiredMessage
+  | PaymentClearedMessage
+  | PaymentFailedMessage
   | BuddyLeftMessage
   | PongMessage
   | ErrorMessage

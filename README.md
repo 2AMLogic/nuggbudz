@@ -29,22 +29,33 @@ $8.98 collected. The gross retail spread is $5.99 per pairing.
    1.2km × 0.6km.
 3. The moment another buyer within walking distance wants the same box, you are
    paired. The buyer who waited longest places the order; the other walks over.
-4. Both see the same itemised settlement, down to the cent, and a pickup code.
+4. Both see the same itemised settlement, down to the cent, and both pay their
+   half.
+5. The pickup code prints only once **both** halves have cleared. If one card
+   declines, the other buyer is refunded and both go back in the queue — a
+   half-paid match never produces a code.
 
 ## Architecture
 
 ```
-Browser (React 19, Tailwind 4)
-   │  GET /api/deals            catalogue + settlement + spread
-   │  WS  /api/pool/ws          live pairing
-   ▼
+Browser (React 19, Tailwind 4)          Stripe
+   │  GET /api/deals                       ▲  confirm card (Stripe.js)
+   │  WS  /api/pool/ws       live pairing  │
+   ▼                                       │  POST /api/stripe/webhook
 Cloudflare Worker (Hono)  ── derives the geohash cell server-side
+   │                         verifies the webhook signature, then routes the
+   │                         event by the `cell` on the PaymentIntent
    ▼
 Durable Object: NuggPool  ── ONE PER CELL = one matching market
    │                          single-threaded, so double-pairing is impossible
    ▼
 D1  ── ledger of settled splits
 ```
+
+Payment results never come back over the buyer's socket — a client that claims
+it paid is a client saying whatever it likes. They arrive as a signed Stripe
+webhook, which the stateless Worker routes to the one NuggPool instance holding
+the match by reading the `cell` stamped into the PaymentIntent metadata.
 
 The matching rule, settlement math and geo helpers live in `shared/` and are
 runtime-free, so they are unit-testable without a Workers runtime. See
@@ -69,12 +80,44 @@ pnpm typecheck
 pnpm lint
 ```
 
+## Stripe runbook
+
+Three keys, and they are not interchangeable — two are Worker secrets that must
+never reach the browser, one is a publishable key that must.
+
+```bash
+# 1 + 2. Worker secrets. Never in wrangler.jsonc, never in .env, never printed.
+wrangler secret put STRIPE_SECRET_KEY        # sk_test_… from the Stripe dashboard
+wrangler secret put STRIPE_WEBHOOK_SECRET    # whsec_… from the webhook endpoint
+
+# 3. Publishable key, baked into the client bundle at build time.
+VITE_STRIPE_PUBLISHABLE_KEY=pk_test_… pnpm run deploy
+```
+
+Point a Stripe webhook endpoint at
+`https://<your-worker>/api/stripe/webhook` and subscribe it to
+`payment_intent.succeeded` and `payment_intent.payment_failed` — nothing else is
+acted on. `STRIPE_WEBHOOK_SECRET` is that endpoint's signing secret, not the API
+key: an unsigned, mis-signed or stale delivery is rejected with a 400.
+
+Locally, `stripe listen --forward-to localhost:5199/api/stripe/webhook` prints a
+`whsec_…` of its own; put it in `.dev.vars` (gitignored) alongside
+`STRIPE_SECRET_KEY` to exercise the flow against `pnpm dev`.
+
+**With no Stripe secrets bound, matches clear without being charged.** That is
+what lets `pnpm dev` and `pnpm smoke` pair two buyers on a laptop with no Stripe
+account. A deployment missing its secrets is a misconfiguration, so check
+`wrangler secret list` after deploying to a new environment.
+
+Test mode only for now: payouts to merchants, Connect accounts and live-mode
+keys are not wired up.
+
 ## Deploy
 
 Live: **https://nuggbudz.personal-account-251.workers.dev**
 
 ```bash
-pnpm run deploy                                   # `pnpm deploy` is a pnpm builtin
+VITE_STRIPE_PUBLISHABLE_KEY=pk_test_… pnpm run deploy   # `pnpm deploy` is a pnpm builtin
 wrangler d1 migrations apply nuggbudz --remote
 ```
 
@@ -93,9 +136,12 @@ BASE=https://nuggbudz.personal-account-251.workers.dev pnpm smoke
 Current milestone: **M0 — live pairing.** Done: the matching engine, settlement
 math, cell routing, and a working two-phone pairing flow.
 
-Next up, tracked as issues: Google OAuth, Stripe settlement with the pairing fee
-taken as an application fee, the D1 ledger write on pickup, a map view of your
-cell, the pickup confirmation handshake, and buddy reputation.
+Stripe settlement is in: both halves are charged on match, the $0.99 pairing fee
+is only retained when both clear, and a one-sided failure refunds and requeues.
+
+Next up, tracked as issues: Google OAuth, the D1 ledger write on pickup, payouts
+to merchants (Connect) and live-mode keys, a map view of your cell, the pickup
+confirmation handshake, and buddy reputation.
 
 ## Development
 

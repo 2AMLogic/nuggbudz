@@ -72,10 +72,15 @@ export function App() {
   const selected = deals.find((deal) => deal.id === dealId) ?? null
   const canStart = name.trim().length > 0 && dealId !== null && !coords.pending
 
-  if (pool.stage === 'matched' && pool.match !== null) {
+  if ((pool.stage === 'matched' || pool.stage === 'cleared') && pool.match !== null) {
     return (
       <Shell cell={pool.cell}>
-        <SettlementReceipt match={pool.match} onDone={pool.leave} />
+        <SettlementReceipt
+          match={pool.match}
+          payment={pool.payment}
+          pickupCode={pool.pickupCode}
+          onDone={pool.leave}
+        />
       </Shell>
     )
   }

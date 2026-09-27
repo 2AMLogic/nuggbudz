@@ -3,7 +3,10 @@ import { DEALS, findDeal } from '../shared/deals'
 import { analyzeSpread, settle } from '../shared/economics'
 import { geohash } from '../shared/geo'
 import { PROTOCOL_VERSION } from '../shared/protocol'
-import { type Env, intVar } from './env'
+import { type Env, intVar, stripeConfigured } from './env'
+import type { PaymentOutcomeRequest } from './lib/payments'
+import { parsePaymentEvent, verifyStripeSignature } from './lib/stripe'
+import { INTERNAL_PAYMENT_PATH } from './pool'
 
 export { NuggPool } from './pool'
 
@@ -66,6 +69,63 @@ app.get('/api/pool/ws', async (c) => {
   const url = new URL(c.req.url)
   url.searchParams.set('cell', cell)
   return stub.fetch(new Request(url, c.req.raw))
+})
+
+/**
+ * Stripe's view of whether the money moved.
+ *
+ * Payment results cannot come back over the buyer's socket — a client that
+ * says "I paid" is a client that says whatever it likes — so they arrive here,
+ * signed. This route is stateless, but the match lives in exactly one NuggPool
+ * instance, so the event is routed by the `cell` the PaymentIntent was tagged
+ * with at creation. Registered ahead of the /api/* catch-all, which would
+ * otherwise 404 it.
+ */
+app.post('/api/stripe/webhook', async (c) => {
+  if (!stripeConfigured(c.env)) return c.json({ error: 'payments are not configured' }, 503)
+
+  // Verified against the exact bytes Stripe signed, so this must not be
+  // re-serialised from a parsed body.
+  const raw = await c.req.text()
+  const verified = await verifyStripeSignature(
+    raw,
+    c.req.header('Stripe-Signature') ?? null,
+    c.env.STRIPE_WEBHOOK_SECRET,
+  )
+  if (!verified.ok) return c.json({ error: verified.reason }, 400)
+
+  const event = parsePaymentEvent(verified.payload)
+  // An event type this app does not act on is still a delivery Stripe should
+  // stop retrying.
+  if (event === null) return c.json({ ok: true, handled: false })
+
+  const { match_id: matchId, role, cell } = event.metadata
+  if (
+    typeof matchId !== 'string' ||
+    typeof cell !== 'string' ||
+    cell.length === 0 ||
+    (role !== 'orderer' && role !== 'receiver')
+  ) {
+    return c.json({ ok: true, handled: false, reason: 'missing routing metadata' })
+  }
+
+  const outcome: PaymentOutcomeRequest = {
+    matchId,
+    role,
+    paymentIntentId: event.paymentIntentId,
+    outcome: event.type === 'payment_intent.succeeded' ? 'succeeded' : 'failed',
+  }
+
+  const stub = c.env.NUGG_POOL.get(c.env.NUGG_POOL.idFromName(cell))
+  const response = await stub.fetch(
+    new Request(`https://nugg-pool.internal${INTERNAL_PAYMENT_PATH}`, {
+      method: 'POST',
+      body: JSON.stringify(outcome),
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  )
+  if (!response.ok) return c.json({ error: 'pool rejected the payment event' }, 500)
+  return c.json({ ok: true, handled: true })
 })
 
 app.all('/api/*', (c) => c.json({ error: 'not found' }, 404))

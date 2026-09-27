@@ -1,8 +1,9 @@
 import { findDeal } from '@shared/deals'
 import { formatCents } from '@shared/economics'
 import { formatDistance } from '@shared/geo'
-import type { MatchedMessage } from '@shared/protocol'
+import type { MatchedMessage, PaymentRequiredMessage } from '@shared/protocol'
 import { Barcode } from './Barcode'
+import { PaymentPanel } from './PaymentPanel'
 import { Line, Perf } from './Roll'
 
 /**
@@ -10,17 +11,25 @@ import { Line, Perf } from './Roll'
  *
  * Every figure here comes off the settlement the server computed, so the split
  * shown to both buddies is the same split, down to the cent.
+ *
+ * The pickup half of the receipt prints only once `pickupCode` arrives, which
+ * the server sends when both halves have actually been paid. The code is not
+ * derivable from anything this component holds, so a half-paid match cannot
+ * show one even by accident.
  */
 export function SettlementReceipt({
   match,
+  payment,
+  pickupCode,
   onDone,
 }: {
   match: MatchedMessage
+  payment: PaymentRequiredMessage | null
+  pickupCode: string | null
   onDone: () => void
 }) {
   const deal = findDeal(match.settlement.dealId)
   const { settlement, share, buddy, role } = match
-  const pickupCode = match.matchId.replace(/-/g, '').slice(0, 6).toUpperCase()
 
   const instruction =
     role === 'orderer'
@@ -79,27 +88,60 @@ export function SettlementReceipt({
         delay={620}
       />
 
-      <Perf label="Pickup" />
+      <Perf label={pickupCode === null ? 'Settle up' : 'Pickup'} />
 
-      <p className="printed font-body text-base leading-snug" style={{ animationDelay: '700ms' }}>
-        {instruction}
-      </p>
+      {pickupCode === null ? (
+        <>
+          <p
+            className="printed font-body text-base leading-snug"
+            style={{ animationDelay: '700ms' }}
+          >
+            Both halves have to clear before either of you gets a pickup code.
+          </p>
+          {payment === null ? (
+            <p
+              className="printed mt-4 font-body text-sm text-faded"
+              style={{ animationDelay: '760ms' }}
+            >
+              Opening your charge…
+            </p>
+          ) : (
+            <PaymentPanel payment={payment} />
+          )}
+          <button
+            type="button"
+            onClick={onDone}
+            className="mt-7 w-full border-2 border-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px"
+          >
+            Call it off
+          </button>
+        </>
+      ) : (
+        <>
+          <p
+            className="printed font-body text-base leading-snug"
+            style={{ animationDelay: '700ms' }}
+          >
+            {instruction}
+          </p>
 
-      <div className="printed mt-5" style={{ animationDelay: '760ms' }}>
-        <Barcode value={pickupCode} />
-        <p className="mt-2 font-display text-lg font-bold tracking-[0.35em]">{pickupCode}</p>
-        <p className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
-          Show this to your bud
-        </p>
-      </div>
+          <div className="printed mt-5" style={{ animationDelay: '760ms' }}>
+            <Barcode value={pickupCode} />
+            <p className="mt-2 font-display text-lg font-bold tracking-[0.35em]">{pickupCode}</p>
+            <p className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
+              Show this to your bud
+            </p>
+          </div>
 
-      <button
-        type="button"
-        onClick={onDone}
-        className="mt-7 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px"
-      >
-        Got the box
-      </button>
+          <button
+            type="button"
+            onClick={onDone}
+            className="mt-7 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px"
+          >
+            Got the box
+          </button>
+        </>
+      )}
     </section>
   )
 }

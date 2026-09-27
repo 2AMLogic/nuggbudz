@@ -1,0 +1,44 @@
+{
+  "name": "nuggbudz",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hyper-local peer-to-peer protein settlement protocol \u2014 split a 20pc box with a nearby stranger",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cf-typegen": "wrangler types",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "hono": "^4.6.15",
+    "leaflet": "^1.9.4",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^2.6.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
+    "@cloudflare/vite-plugin": "^1.43.0",
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/leaflet": "^1.9.12",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.3",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.107.0"
+  }
+}

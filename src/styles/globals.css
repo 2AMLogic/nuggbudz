@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Space Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-body: "Archivo", system-ui, -apple-system, sans-serif;
+
+  /* Thermal paper and printer ink. The whole interface is a till roll. */
+  --color-paper: #faf8f5;
+  --color-ink: #17150f;
+  --color-nugget: #e8a33d;
+  --color-ketchup: #d93a2b;
+  --color-faded: #8c877b;
+  --color-hairline: #d8d2c6;
+}
+
+/* Carbon copy. Same roll, printed in reverse. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-paper: #14120d;
+    --color-ink: #f2ece0;
+    --color-faded: #857f71;
+    --color-hairline: #332e24;
+  }
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+    /* Faint fibre so the paper is paper and not just a light background. */
+    background-image: radial-gradient(var(--color-hairline) 0.5px, transparent 0.5px);
+    background-size: 7px 7px;
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--color-nugget);
+    outline-offset: 2px;
+  }
+
+  button {
+    font: inherit;
+  }
+}
+
+/* A line of punched holes: the receipt's own divider. */
+.perf {
+  height: 0;
+  border-top: 2px dotted var(--color-hairline);
+}
+
+/* Each printed line drops in, top to bottom, like a thermal head passing. */
+@keyframes print-line {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.printed {
+  animation: print-line 220ms steps(4, end) both;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.caret::after {
+  content: "\2588";
+  animation: blink 1s steps(1, end) infinite;
+  margin-left: 0.15em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .printed,
+  .caret::after {
+    animation: none;
+  }
+}

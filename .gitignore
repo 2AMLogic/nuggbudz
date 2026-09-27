@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+.wrangler/
+
+# Environment
+.env
+.env.local
+*.local
+.dev.vars
+
+# Generated types
+worker-configuration.d.ts
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Loom runtime state (don't commit these)
+.loom-in-use
+.loom/state.json
+.loom/sweep-checkpoint/
+.loom/health-metrics.json
+.loom/stuck-history.json
+.loom/alerts.json
+.loom/manifest.json
+.loom/worktrees/
+.loom/interventions/
+.loom/claims/
+.loom/signals/
+.loom/status/
+.loom/progress/
+.loom/diagnostics/
+.loom/metrics/
+.loom/logs/
+.loom/*.log
+.loom/*.sock

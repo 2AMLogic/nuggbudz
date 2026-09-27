@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nuggbudz",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "observability": { "enabled": true },
+  // One Durable Object per geohash cell. The cell IS the matching market:
+  // all pairing for a neighbourhood happens inside a single-threaded object,
+  // which is what makes "two buyers claim the same box" impossible by design.
+  "durable_objects": {
+    "bindings": [{ "name": "NUGG_POOL", "class_name": "NuggPool" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NuggPool"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nuggbudz",
+      "database_id": "681e978e-c782-42b2-ae27-9e9a1a4278a9",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [{ "binding": "SESSIONS", "id": "747a8578350046df8d8c3c0f80851828" }],
+  "vars": {
+    // Geohash precision 6 ≈ 1.2km x 0.6km cell. Pairing also enforces
+    // MATCH_RADIUS_METERS inside the cell so cell-edge buddies aren't matched
+    // across an unwalkable distance.
+    "POOL_CELL_PRECISION": "6",
+    "MATCH_RADIUS_METERS": "800"
+  }
+}

@@ -12,10 +12,23 @@ interface DealWithMath extends DealSpec {
   spread: SpreadAnalysis
 }
 
+const DEMO_NAME_KEY = 'nuggbudz.demoName'
+
+function readStoredDemoName(): string {
+  try {
+    return localStorage.getItem(DEMO_NAME_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 export function App() {
   const [deals, setDeals] = useState<DealWithMath[]>([])
   const [dealId, setDealId] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  /** Null until `/api/health` answers; true when the server pairs without accounts. */
+  const [demoPairing, setDemoPairing] = useState<boolean | null>(null)
+  const [demoName, setDemoName] = useState(readStoredDemoName)
 
   const coords = useCoords()
   const pool = usePool()
@@ -41,18 +54,45 @@ export function App() {
     }
   }, [])
 
+  // Whether this server pairs without accounts. Fails closed: if the probe does
+  // not answer, assume sign-in is required rather than offering a name field the
+  // server would reject.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/health')
+      .then((response) => response.json() as Promise<{ demoPairing?: boolean }>)
+      .then((body) => {
+        if (!cancelled) setDemoPairing(body.demoPairing === true)
+      })
+      .catch(() => {
+        if (!cancelled) setDemoPairing(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  /** In demo mode an unauthenticated buyer pairs under a name they type. */
+  const demoReady = demoPairing === true && session.user === null && demoName.trim().length > 0
+  const identified = session.user !== null || demoReady
+
   /**
    * Get a location, then take the seat. Deliberately not an effect keyed on the
    * fix: leaving the queue would immediately rejoin on the still-set fix.
    */
   const start = async () => {
-    if (dealId === null || session.user === null) return
+    if (dealId === null || !identified) return
     const fix = await coords.locate()
-    pool.join({ dealId, lat: fix.lat, lng: fix.lng })
+    pool.join({
+      dealId,
+      lat: fix.lat,
+      lng: fix.lng,
+      demoName: session.user === null ? demoName.trim() : undefined,
+    })
   }
 
   const selected = deals.find((deal) => deal.id === dealId) ?? null
-  const canStart = session.user !== null && dealId !== null && !coords.pending
+  const canStart = identified && dealId !== null && !coords.pending
 
   if (pool.stage === 'matched' && pool.match !== null) {
     return (
@@ -151,6 +191,32 @@ export function App() {
 
       {session.pending ? (
         <p className="font-body text-sm text-faded">Checking your sign-in…</p>
+      ) : session.user === null && demoPairing === true ? (
+        <>
+          <label className="block">
+            <span className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
+              First name your bud will look for
+            </span>
+            <input
+              value={demoName}
+              onChange={(event) => {
+                setDemoName(event.target.value)
+                try {
+                  localStorage.setItem(DEMO_NAME_KEY, event.target.value)
+                } catch {
+                  // A private window just means the name is not remembered.
+                }
+              }}
+              maxLength={40}
+              placeholder="Robb"
+              className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg focus:outline-none"
+            />
+          </label>
+          <p className="mt-3 font-body text-sm leading-snug text-faded">
+            Demo mode: pairing without accounts, so nothing is settled afterwards and your bud only
+            sees this name.
+          </p>
+        </>
       ) : session.user === null ? (
         <>
           <p className="font-body text-sm leading-snug text-faded">

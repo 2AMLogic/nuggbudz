@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "cf-typegen": "wrangler types",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "demo-check": "node scripts/demo-pairing-check.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

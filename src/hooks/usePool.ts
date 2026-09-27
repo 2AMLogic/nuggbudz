@@ -7,6 +7,12 @@ export interface JoinRequest {
   dealId: string
   lat: number
   lng: number
+  /**
+   * A name to pair under when the server is in demo mode and nobody is signed
+   * in. Ignored whenever a session exists — the server takes the display name
+   * off the session, so this can never rename a real account.
+   */
+  demoName?: string
 }
 
 export interface PoolState {
@@ -31,9 +37,14 @@ const INITIAL: PoolState = {
   notice: null,
 }
 
-function socketUrl({ lat, lng }: JoinRequest): string {
+function socketUrl({ lat, lng, demoName }: JoinRequest): string {
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
   const params = new URLSearchParams({ lat: String(lat), lng: String(lng) })
+  // Only meaningful in demo mode; the server ignores it whenever a session
+  // exists, and sanitizes it when one does not.
+  if (demoName !== undefined && demoName.trim().length > 0) {
+    params.set('name', demoName.trim())
+  }
   return `${scheme}://${window.location.host}/api/pool/ws?${params}`
 }
 

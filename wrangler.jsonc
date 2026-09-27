@@ -14,6 +14,12 @@
     "run_worker_first": ["/api/*"]
   },
   "observability": { "enabled": true },
+  // Custom domains. Wrangler provisions the DNS records and the certificate on
+  // deploy; the zone must be on the same Cloudflare account as this Worker.
+  "routes": [
+    { "pattern": "nuggbudz.com", "custom_domain": true },
+    { "pattern": "www.nuggbudz.com", "custom_domain": true }
+  ],
   // One Durable Object per geohash cell. The cell IS the matching market:
   // all pairing for a neighbourhood happens inside a single-threaded object,
   // which is what makes "two buyers claim the same box" impossible by design.

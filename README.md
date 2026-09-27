@@ -89,7 +89,10 @@ pnpm lint
 
 ## Deploy
 
-Live: **https://nuggbudz.personal-account-251.workers.dev**
+Live: **https://nuggbudz.com** (also `www.nuggbudz.com`, and the
+`*.workers.dev` name). Both custom domains are declared as `routes` in
+`wrangler.jsonc`, so Wrangler provisions the DNS records and the certificate on
+deploy — the zone has to be on the same Cloudflare account as the Worker.
 
 ```bash
 wrangler secret put GOOGLE_CLIENT_ID              # once per environment
@@ -97,6 +100,35 @@ wrangler secret put GOOGLE_CLIENT_SECRET
 pnpm run deploy                                   # `pnpm deploy` is a pnpm builtin
 wrangler d1 migrations apply nuggbudz --remote
 ```
+
+### Demo pairing
+
+Pairing requires a signed-in account. That is right for production and fatal on
+a stage: without the two secrets above, sign-in answers 503 and the pool socket
+answers 401, so **nobody can pair at all**. The escape hatch is a deploy-time
+var:
+
+```bash
+pnpm exec vite build && wrangler deploy --var ALLOW_DEMO_PAIRING:1
+```
+
+With it set, an unauthenticated socket is given a throwaway `demo:<uuid>`
+identity and pairs under a name the caller types; the UI says on screen that it
+is pairing without accounts. The caller may propose a *display name* but never a
+user id — the id is minted server-side, so two tabs cannot claim one identity.
+
+**It is deliberately absent from `wrangler.jsonc`.** Passing it only at deploy
+time means a checkout, `pnpm test`, `pnpm smoke` and CI all keep exercising the
+strict authenticated path, and no `vite build` can bake an auth bypass into a
+production artifact. Verify whichever mode a server is in:
+
+```bash
+BASE=http://localhost:5199 node scripts/demo-pairing-check.mjs
+```
+
+It reads `/api/health` and asserts the matching half: flag off ⇒ an
+unauthenticated upgrade is refused 401; flag on ⇒ two unauthenticated clients
+pair with each other, with `demo:` identities and the same $4.49 split.
 
 D1 and KV bindings are already provisioned in `wrangler.jsonc`. `/api/*` is
 pinned to `run_worker_first`, because otherwise the SPA fallback answers the API

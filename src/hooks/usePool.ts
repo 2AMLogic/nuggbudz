@@ -1,5 +1,5 @@
 import type { BuyerRole } from '@shared/economics'
-import type { MatchedMessage, ServerMessage } from '@shared/protocol'
+import type { CellBuddy, MatchedMessage, ServerMessage } from '@shared/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 export type PoolStage = 'idle' | 'connecting' | 'waiting' | 'matched' | 'settled' | 'disputed'
@@ -19,6 +19,15 @@ export interface PoolState {
   waiting: number
   queuedAhead: number
   cell: string | null
+  /**
+   * Where you told the server you are standing. Kept around (not just handed
+   * off to `join` and discarded) so the cell map has a "you are here" marker
+   * to draw at full precision — the server only ever coarsens *other*
+   * buyers' positions, since this one is already yours.
+   */
+  own: { lat: number; lng: number } | null
+  /** Everyone else waiting in your cell, snapped to a coarse grid server-side. */
+  buddies: CellBuddy[]
   match: MatchedMessage | null
   error: string | null
   /** Set when a buddy walked away and you were put back in the queue. */
@@ -34,6 +43,8 @@ const INITIAL: PoolState = {
   waiting: 0,
   queuedAhead: 0,
   cell: null,
+  own: null,
+  buddies: [],
   match: null,
   error: null,
   notice: null,
@@ -78,7 +89,7 @@ export function usePool() {
   const join = useCallback(
     (request: JoinRequest) => {
       close()
-      setState({ ...INITIAL, stage: 'connecting' })
+      setState({ ...INITIAL, stage: 'connecting', own: { lat: request.lat, lng: request.lng } })
 
       const socket = new WebSocket(socketUrl(request))
       socketRef.current = socket
@@ -112,6 +123,7 @@ export function usePool() {
                 stage: 'waiting',
                 waiting: message.waiting,
                 queuedAhead: message.queuedAhead,
+                buddies: message.buddies,
               }
             case 'matched':
               return {

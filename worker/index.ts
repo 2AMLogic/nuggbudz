@@ -3,8 +3,10 @@ import { DEALS, findDeal } from '../shared/deals'
 import { analyzeSpread, settle } from '../shared/economics'
 import { geohash } from '../shared/geo'
 import { PROTOCOL_VERSION } from '../shared/protocol'
+import { clientKey as deriveClientKey } from '../shared/ratelimit'
 import { authRoutes, sessionFromRequest } from './auth'
 import { type Env, intVar } from './env'
+import { checkUpgradeRate } from './ratelimit'
 
 export { NuggPool } from './pool'
 
@@ -65,6 +67,19 @@ app.get('/api/pool/ws', async (c) => {
   }
   if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
     return c.json({ error: 'lng must be a number in -180..180' }, 400)
+  }
+
+  // Cloudflare sets CF-Connecting-IP at the edge and a caller cannot override
+  // it, unlike X-Forwarded-For. Local dev may omit it; those share one bucket.
+  const clientKey = deriveClientKey(c.req.header('CF-Connecting-IP')) ?? 'unknown'
+
+  // Checked here, before the pool is addressed, so a flood costs a KV read and
+  // no Durable Object time. It runs after the session check so an
+  // unauthenticated flood is turned away without touching the limiter's keys.
+  const rate = await checkUpgradeRate(c.env, clientKey)
+  if (!rate.allowed) {
+    c.header('Retry-After', String(rate.retryAfterSeconds))
+    return c.json({ error: 'too many connection attempts, slow down' }, 429)
   }
 
   const cell = geohash(lat, lng, intVar(c.env.POOL_CELL_PRECISION, 6))

@@ -9,6 +9,7 @@ import {
   parseClientMessage,
   type ServerMessage,
 } from '../shared/protocol'
+import { accountSocketTag, underConcurrencyCap } from '../shared/ratelimit'
 import { type Env, intVar } from './env'
 
 /**
@@ -79,8 +80,18 @@ export class NuggPool extends DurableObject<Env> {
       return new Response('unauthenticated', { status: 401 })
     }
 
+    // Keyed on the verified account, not the IP: carrier-grade NAT puts many
+    // unrelated buyers behind one address, and they must not share a cap.
+    const accountTag = accountSocketTag(userId)
+    const cap = Math.max(1, intVar(this.env.POOL_MAX_SOCKETS_PER_CELL, 3))
+    // Tags survive hibernation, so this count is exact even after eviction.
+    // Rejected before accepting, so a phantom never enters the queue.
+    if (!underConcurrencyCap(this.ctx.getWebSockets(accountTag).length, cap)) {
+      return new Response('too many open connections in this area', { status: 429 })
+    }
+
     const { 0: client, 1: server } = new WebSocketPair()
-    this.ctx.acceptWebSocket(server)
+    this.ctx.acceptWebSocket(server, [accountTag])
 
     const connId = crypto.randomUUID()
     this.setState(server, { status: 'idle', connId, userId, name })

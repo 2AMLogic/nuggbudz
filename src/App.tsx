@@ -1,6 +1,7 @@
 import type { DealSpec, Settlement, SpreadAnalysis } from '@shared/economics'
 import { formatCents } from '@shared/economics'
 import { useEffect, useState } from 'react'
+import { CellMap } from './components/CellMap'
 import { Line, Perf, Roll } from './components/Roll'
 import { SettlementReceipt } from './components/SettlementReceipt'
 import { useCoords } from './hooks/useCoords'
@@ -83,6 +84,10 @@ export function App() {
           <h2 className="caret mt-1 font-display text-2xl font-bold">
             {pool.stage === 'connecting' ? 'Standing in line' : `${pool.waiting} in your cell`}
           </h2>
+
+          {pool.stage === 'waiting' && pool.cell !== null && pool.own !== null && (
+            <CellMap cell={pool.cell} you={pool.own} buddies={pool.buddies} />
+          )}
 
           <Perf label={selected?.merchant ?? 'Deal'} />
 

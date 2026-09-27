@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { distanceMeters, formatDistance, geohash } from '../shared/geo'
+import { decodeCell, distanceMeters, formatDistance, geohash, snapToGrid } from '../shared/geo'
 
 describe('geohash', () => {
   it('matches the canonical reference vector', () => {
@@ -26,6 +26,78 @@ describe('geohash', () => {
     expect(() => geohash(0, 181)).toThrow(RangeError)
     expect(() => geohash(0, 0, 0)).toThrow(RangeError)
     expect(() => geohash(0, 0, 13)).toThrow(RangeError)
+  })
+})
+
+describe('decodeCell', () => {
+  it('matches the canonical reference vector', () => {
+    const box = decodeCell('u4pruydqqvj')
+    expect(box.latMin).toBeLessThanOrEqual(57.64911)
+    expect(box.latMax).toBeGreaterThanOrEqual(57.64911)
+    expect(box.lngMin).toBeLessThanOrEqual(10.40744)
+    expect(box.lngMax).toBeGreaterThanOrEqual(10.40744)
+  })
+
+  it('is the exact inverse of the encoder: the box always contains the original point', () => {
+    const points = [
+      { lat: 37.7749, lng: -122.4194 },
+      { lat: 0, lng: 0 },
+      { lat: -33.8688, lng: 151.2093 },
+      { lat: 89.9, lng: 179.9 },
+      { lat: -89.9, lng: -179.9 },
+    ]
+    for (const point of points) {
+      for (let precision = 1; precision <= 12; precision += 1) {
+        const hash = geohash(point.lat, point.lng, precision)
+        const box = decodeCell(hash)
+        expect(box.latMin).toBeLessThanOrEqual(point.lat)
+        expect(box.latMax).toBeGreaterThanOrEqual(point.lat)
+        expect(box.lngMin).toBeLessThanOrEqual(point.lng)
+        expect(box.lngMax).toBeGreaterThanOrEqual(point.lng)
+      }
+    }
+  })
+
+  it('shrinks monotonically as precision increases', () => {
+    const fine = decodeCell(geohash(37.7749, -122.4194, 9))
+    const coarse = decodeCell(geohash(37.7749, -122.4194, 3))
+    expect(fine.latMax - fine.latMin).toBeLessThan(coarse.latMax - coarse.latMin)
+    expect(fine.lngMax - fine.lngMin).toBeLessThan(coarse.lngMax - coarse.lngMin)
+  })
+
+  it('rejects an empty hash or an invalid character', () => {
+    expect(() => decodeCell('')).toThrow(RangeError)
+    expect(() => decodeCell('u4a!')).toThrow(RangeError)
+  })
+})
+
+describe('snapToGrid', () => {
+  it('never returns the exact input coordinate a buyer supplied', () => {
+    const point = { lat: 37.774912345, lng: -122.419412345 }
+    const snapped = snapToGrid(point)
+    expect(snapped).not.toEqual(point)
+  })
+
+  it('puts two nearby buyers on the same coarse dot', () => {
+    const a = snapToGrid({ lat: 37.7749, lng: -122.4194 })
+    const b = snapToGrid({ lat: 37.77491, lng: -122.41941 })
+    expect(a).toEqual(b)
+  })
+
+  it('is stable — snapping an already-snapped point is a no-op', () => {
+    const once = snapToGrid({ lat: 37.7749, lng: -122.4194 })
+    expect(snapToGrid(once)).toEqual(once)
+  })
+
+  it('stays within half a grid cell of the true position', () => {
+    const point = { lat: 37.7749, lng: -122.4194 }
+    const snapped = snapToGrid(point, 75)
+    expect(distanceMeters(point, snapped)).toBeLessThan(75)
+  })
+
+  it('rejects a non-positive grid size', () => {
+    expect(() => snapToGrid({ lat: 0, lng: 0 }, 0)).toThrow(RangeError)
+    expect(() => snapToGrid({ lat: 0, lng: 0 }, -5)).toThrow(RangeError)
   })
 })
 

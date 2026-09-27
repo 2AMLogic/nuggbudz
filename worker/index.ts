@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { ACTIVE_DEALS, findDeal } from '../shared/deals'
+import { ACTIVE_DEALS, findDeal, isDealOffered } from '../shared/deals'
 import { analyzeSpread, settle } from '../shared/economics'
 import { geohash } from '../shared/geo'
 import { PROTOCOL_VERSION } from '../shared/protocol'
@@ -30,8 +30,13 @@ app.get('/api/deals', (c) =>
 )
 
 app.get('/api/deals/:dealId/quote', (c) => {
+  // A gated deal exists in the catalogue but is not on offer, so it must 404
+  // exactly like one that does not exist — quoting a price for a chain the app
+  // will not pair you on is an invitation to a dead end.
   const deal = findDeal(c.req.param('dealId'))
-  if (deal === undefined) return c.json({ error: 'unknown deal' }, 404)
+  if (deal === undefined || !isDealOffered(deal.id)) {
+    return c.json({ error: 'unknown deal' }, 404)
+  }
 
   const rawParty = c.req.query('partySize')
   const partySize = rawParty === undefined ? deal.partySize : Number.parseInt(rawParty, 10)

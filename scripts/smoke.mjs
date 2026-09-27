@@ -139,6 +139,17 @@ const bad = await fetch(`${BASE}/api/deals/mcd-nuggets-20/quote?partySize=1`)
 check('party of 1 rejected', bad.status === 400, `status ${bad.status}`)
 const missing = await fetch(`${BASE}/api/deals/nope/quote`)
 check('unknown deal 404s', missing.status === 404, `status ${missing.status}`)
+// A gated deal is the harder case: it *is* in the catalogue, so `findDeal`
+// resolves it. Quoting a price for a chain the app will not pair you on is a
+// dead end, so it has to 404 like a deal that does not exist at all.
+const gatedQuotes = await Promise.all(
+  ['wendys-nuggets-20', 'bk-nuggets-20'].map((id) => fetch(`${BASE}/api/deals/${id}/quote`)),
+)
+check(
+  'a gated deal is not quotable',
+  gatedQuotes.every((r) => r.status === 404),
+  gatedQuotes.map((r) => r.status).join('/'),
+)
 
 // --- sessions ---
 const anonMe = await fetch(`${BASE}/api/auth/me`)
@@ -355,10 +366,11 @@ const requeued = await b.expect('waiting')
 check('survivor requeued', requeued.waiting >= 1, JSON.stringify(requeued))
 
 // --- the pickup handshake ---
-// A different deal, so this pair cannot be matched with anyone still queued
-// above: the cell is shared, the market is per deal.
-const g = open(BUYERS.gus, 37.7955, -122.3937, 'wendys-nuggets-20')
-const h = open(BUYERS.hana, 37.7956, -122.3938, 'wendys-nuggets-20')
+// A different neighbourhood (geohash `9q9p3w`, ~14m apart), so this pair cannot
+// be matched with anyone still queued above: only one deal is offered now, so
+// the cell is the axis that isolates a market, not the deal.
+const g = open(BUYERS.gus, 37.8715, -122.273)
+const h = open(BUYERS.hana, 37.8716, -122.2731)
 await Promise.all([g.opened, h.opened])
 await Promise.all([g.expect('welcome'), h.expect('welcome')])
 g.join()
@@ -366,7 +378,7 @@ await g.expect('waiting')
 h.join()
 const [orderer, receiver] = await Promise.all([g.expect('matched'), h.expect('matched')])
 check(
-  'handshake pair matched on their own deal',
+  'handshake pair matched in their own cell',
   orderer.matchId === receiver.matchId && orderer.role === 'orderer',
   `${orderer.role}/${receiver.role}`,
 )
@@ -469,8 +481,10 @@ check(
 // here because it would mean holding this script open for PICKUP_CONFIRM_TIMEOUT_MS.
 // To drive it by hand, put `PICKUP_CONFIRM_TIMEOUT_MS="2000"` in `.dev.vars`,
 // restart the dev server, and half-confirm a match: the alarm disputes it.
-const i = open(BUYERS.ivy, 37.7955, -122.3937, 'bk-nuggets-20')
-const j = open(BUYERS.jed, 37.7956, -122.3938, 'bk-nuggets-20')
+// Again a cell of their own (`9q9k6m`), so the dispute below is unambiguously
+// this pair's and cannot draw in a buyer left queued by an earlier scenario.
+const i = open(BUYERS.ivy, 37.3382, -121.8863)
+const j = open(BUYERS.jed, 37.3383, -121.8864)
 await Promise.all([i.opened, j.opened])
 await Promise.all([i.expect('welcome'), j.expect('welcome')])
 i.join()
@@ -513,26 +527,35 @@ check('garbage rejected', err.code === 'bad_message', err.code)
 c.confirm('A2B3C4')
 const unmatched = await c.expectError()
 check('confirming without a match is refused', unmatched.code === 'not_matched', unmatched.code)
-c.ws.send(
-  JSON.stringify({
-    type: 'join',
-    dealId: 'no-such-deal',
-    lat: 37.7955,
-    lng: -122.3937,
-  }),
-)
-const sawUnknownDeal = await (async () => {
-  for (let i = 0; i < 40; i++) {
-    if (c.inbox.some((m) => m.code === 'unknown_deal')) return true
-    await new Promise((r) => setTimeout(r, 100))
-  }
-  return false
-})()
+/** Send a hand-rolled `join` frame, bypassing whatever the UI would offer. */
+const rawJoin = (socket, dealId) =>
+  socket.ws.send(JSON.stringify({ type: 'join', dealId, lat: 37.7955, lng: -122.3937 }))
+
+rawJoin(c, 'no-such-deal')
+const unknownDeal = await c.expectError()
+check('unknown deal rejected over ws', unknownDeal.code === 'unknown_deal', unknownDeal.code)
+
+// The pairing path, not the storefront. `/api/deals` only ever lists what is
+// offered, but nothing stops a client sending its own `join` frame naming a
+// gated chain — and being paired there means being *settled* there. The gate has
+// to hold on this socket, not just on the listing.
+rawJoin(c, 'wendys-nuggets-20')
+const gatedJoin = await c.expectError()
 check(
-  'unknown deal rejected over ws',
-  sawUnknownDeal,
-  JSON.stringify(c.inbox.filter((m) => m.type === 'error')),
+  'a gated deal is refused on the pairing path',
+  gatedJoin.code === 'unknown_deal',
+  gatedJoin.code,
 )
+rawJoin(c, 'bk-nuggets-20')
+const gatedJoin2 = await c.expectError()
+check(
+  'every gated deal is refused on the pairing path',
+  gatedJoin2.code === 'unknown_deal',
+  gatedJoin2.code,
+)
+// Refusing with an error is not enough: a buyer queued on a gated deal would sit
+// in the pool waiting for a buddy who can never legitimately arrive.
+check('a refused gated join never queues the buyer', (await c.settles('waiting')) === false)
 
 for (const s of [b, far, c, g, h, j]) s.ws.close()
 

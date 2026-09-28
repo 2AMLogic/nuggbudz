@@ -26,7 +26,7 @@
  *   MATCH_CONFIRM_SECONDS="8"
  */
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -38,6 +38,17 @@ let failures = 0
 const check = (name, ok, extra = '') => {
   log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? ` — ${extra}` : ''}`)
   if (!ok) failures++
+}
+
+/** Poll a predicate until it is truthy, or give up. Returns the value, or null. */
+async function until(predicate, ms = 4_000, step = 100) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const value = predicate()
+    if (value) return value
+    if (Date.now() >= deadline) return null
+    await new Promise((r) => setTimeout(r, step))
+  }
 }
 
 /**
@@ -86,6 +97,19 @@ const BUYERS = {
   // the dispute path.
   halfOne: { sid: sessionId('smoke-half-one'), userId: accountId(18), name: 'Half One' },
   halfTwo: { sid: sessionId('smoke-half-two'), userId: accountId(19), name: 'Half Two' },
+  // Nuggchat. Two matched pairs and a lone queued buyer, all in one cell, which
+  // is what makes "only the two buddies in a match" a discriminating claim.
+  chatA: { sid: sessionId('smoke-chat-a'), userId: accountId(20), name: 'Chat A' },
+  chatB: { sid: sessionId('smoke-chat-b'), userId: accountId(21), name: 'Chat B' },
+  chatC: { sid: sessionId('smoke-chat-c'), userId: accountId(22), name: 'Chat C' },
+  chatD: { sid: sessionId('smoke-chat-d'), userId: accountId(23), name: 'Chat D' },
+  chatE: { sid: sessionId('smoke-chat-e'), userId: accountId(24), name: 'Chat E' },
+  // The pair whose chat has to die on a dispute, and the pair whose chat has to
+  // die when one of them walks away.
+  chatDisputeOne: { sid: sessionId('smoke-chat-d1'), userId: accountId(25), name: 'Dis One' },
+  chatDisputeTwo: { sid: sessionId('smoke-chat-d2'), userId: accountId(26), name: 'Dis Two' },
+  chatLeaveOne: { sid: sessionId('smoke-chat-l1'), userId: accountId(27), name: 'Left One' },
+  chatLeaveTwo: { sid: sessionId('smoke-chat-l2'), userId: accountId(28), name: 'Left Two' },
 }
 
 /** Write the sessions into the dev server's KV namespace, in one CLI call. */
@@ -142,6 +166,85 @@ function ledgerQuery(sql) {
     { stdio: ['ignore', 'pipe', 'pipe'], env: WRANGLER_ENV },
   )
   return JSON.parse(out.toString())[0]?.results ?? []
+}
+
+/**
+ * Every row of every table in the local D1, searched for a string.
+ *
+ * Deliberately schema-blind. Asserting "no chat text in `matches`" would go stale
+ * the first time somebody adds a table; this reads `sqlite_master` and looks
+ * everywhere, so a future `CREATE TABLE chat_messages` fails this check on the
+ * commit that introduces it.
+ */
+function ledgerRowsContaining(needle) {
+  const tables = ledgerQuery(
+    // `sqlite_%` and `_cf_%` are the engine's and D1's own bookkeeping, and D1
+    // refuses to read the latter at all (SQLITE_AUTH). Nothing is lost by
+    // skipping them: the file scan below reads the whole database file, those
+    // tables included.
+    `SELECT name FROM sqlite_master
+     WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'`,
+  ).map((row) => row.name)
+  const hits = []
+  for (const table of tables) {
+    for (const row of ledgerQuery(`SELECT * FROM "${table}"`)) {
+      if (JSON.stringify(row).includes(needle)) hits.push(`${table} ${JSON.stringify(row)}`)
+    }
+  }
+  return { tables, hits }
+}
+
+/**
+ * Every byte the dev server has persisted locally, searched for a string.
+ *
+ * `.wrangler/state` is the whole of it: the D1 SQLite file (and its WAL), the
+ * Durable Object SQLite files, the KV blobs, the cache, the observability log.
+ * SQLite stores TEXT as UTF-8, so an ASCII marker appears verbatim in the file if
+ * it was ever written — which makes this a much stronger claim than any query
+ * could be. A query can only look where somebody thought to look.
+ *
+ * Relative to this process's cwd, which is the same tree as the dev server under
+ * `pnpm dev` / `pnpm smoke`. The positive control below is what keeps that
+ * assumption honest: if this is scanning the wrong tree, the control fails and
+ * the result is reported as inconclusive rather than as a pass.
+ */
+function persistedFilesContaining(needle) {
+  const root = join(process.cwd(), '.wrangler', 'state')
+  // Two encodings. D1 keeps TEXT as UTF-8, and a Durable Object value is a
+  // V8-serialized blob which writes a Latin-1-representable string as raw bytes —
+  // both match the UTF-8 form for an ASCII marker. But V8 writes any string it is
+  // holding as UTF-16 (one emoji anywhere in it is enough) as UTF-16 too, so a
+  // single-encoding scan would quietly miss a stored message that happened to
+  // contain a non-Latin-1 character.
+  const targets = [Buffer.from(needle, 'utf8'), Buffer.from(needle, 'utf16le')]
+  const hits = []
+  let scanned = 0
+  const walk = (dir) => {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(path)
+        continue
+      }
+      if (!entry.isFile()) continue
+      let bytes
+      try {
+        bytes = readFileSync(path)
+      } catch {
+        continue
+      }
+      scanned++
+      if (targets.some((target) => bytes.includes(target))) hits.push(path)
+    }
+  }
+  walk(root)
+  return { root, scanned, hits }
 }
 
 seedSessions()
@@ -368,6 +471,25 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
       const payload = { type: 'confirm_pickup' }
       if (code !== undefined) payload.code = code
       ws.send(JSON.stringify(payload))
+    },
+    /**
+     * Say something to your bud.
+     *
+     * Raw text, and no `matchId` or `from`: the server reads both off the
+     * connection. `forgeAs` sends them anyway, to prove they are ignored.
+     */
+    chat(text, forgeAs = null) {
+      const payload = { type: 'chat', text }
+      if (forgeAs !== null) {
+        payload.matchId = forgeAs.matchId
+        payload.from = forgeAs.from
+        payload.name = forgeAs.name
+      }
+      ws.send(JSON.stringify(payload))
+    },
+    /** Every chat line this socket has been handed, in arrival order. */
+    chats() {
+      return inbox.filter((m) => m.type === 'chat_message')
     },
   }
 }
@@ -799,6 +921,375 @@ check(
   JSON.stringify(latestForKim.buddies),
 )
 
+// --- Nuggchat: relayed to one buddy, and stored nowhere ---
+//
+// One cell (`9v6kpy`, downtown Austin — untouched by every other scenario here)
+// holding *two* live matches and a third buyer queued alone. That shape is the
+// point: relaying by cell instead of by match, or trusting a `matchId` off the
+// wire, both look correct with a single pair in a cell and both cross the wires
+// here. The five fixtures sit 11m apart, so the only thing separating the two
+// conversations is the match each connection belongs to.
+const CHAT_CELL = '9v6kpy'
+const chatA = open(BUYERS.chatA, 30.2676, -97.7433)
+const chatB = open(BUYERS.chatB, 30.2677, -97.7433)
+const chatC = open(BUYERS.chatC, 30.2678, -97.7433)
+const chatD = open(BUYERS.chatD, 30.2679, -97.7433)
+const chatE = open(BUYERS.chatE, 30.268, -97.7433)
+await Promise.all([chatA, chatB, chatC, chatD, chatE].map((s) => s.opened))
+const chatWelcome = await chatA.expect('welcome')
+await Promise.all([chatB, chatC, chatD, chatE].map((s) => s.expect('welcome')))
+
+// A buyer cannot chat before there is anybody to chat to.
+chatA.chat('anyone there?')
+const chatUnmatched = await chatA.expectError()
+check(
+  'an unmatched connection has nobody to talk to',
+  chatUnmatched.code === 'not_matched',
+  chatUnmatched.code,
+)
+
+chatA.join()
+const chatAlone = await chatA.expect('waiting')
+check(
+  'the chat cell starts empty, so both conversations below are only this pair and that pair',
+  chatWelcome.cell === CHAT_CELL && chatAlone.waiting === 1 && chatAlone.buddies.length === 0,
+  `${chatWelcome.cell} ${JSON.stringify(chatAlone)}`,
+)
+chatB.join()
+const [pairOneA, pairOneB] = await Promise.all([chatA.expect('matched'), chatB.expect('matched')])
+chatC.join()
+await chatC.expect('waiting')
+chatD.join()
+const [pairTwoC, pairTwoD] = await Promise.all([chatC.expect('matched'), chatD.expect('matched')])
+chatE.join()
+const chatQueued = await chatE.expect('waiting')
+check(
+  'two separate matches and one queued buyer share the cell',
+  pairOneA.matchId === pairOneB.matchId &&
+    pairTwoC.matchId === pairTwoD.matchId &&
+    pairOneA.matchId !== pairTwoC.matchId &&
+    chatQueued.waiting === 1,
+  `${pairOneA.matchId} / ${pairTwoC.matchId}`,
+)
+
+// A queued buyer is still not in a conversation, however busy the cell is.
+chatE.chat('what are you two saying?')
+const queuedChat = await chatE.expectError()
+check(
+  'a buyer queued in the same cell cannot join a conversation',
+  queuedChat.code === 'not_matched',
+  queuedChat.code,
+)
+
+/**
+ * Markers that must never reach any store. Fresh per run, ASCII, and shaped so
+ * they cannot plausibly occur for any other reason — SQLite keeps TEXT as UTF-8,
+ * so if either of these was ever written it is findable verbatim on disk.
+ */
+const SAID_BY_A = `NUGGCHAT-NEVER-STORED-A-${crypto.randomUUID()}`
+const SAID_BY_B = `NUGGCHAT-NEVER-STORED-B-${crypto.randomUUID()}`
+
+// Hostile text, sent with a forged `matchId`, `from` and `name` attached. The
+// forged match is pair two's real one, so a server that believed any of it would
+// deliver this into the other conversation or attribute it to the wrong person.
+const hostile = `by the${String.fromCharCode(0x200b)}drinks\n${SAID_BY_A}${String.fromCharCode(0)}`
+chatA.chat(hostile, {
+  matchId: pairTwoC.matchId,
+  from: 'receiver',
+  name: 'Definitely Not Chat A',
+})
+const heardByB = await until(() => chatB.chats()[0] ?? null)
+check(
+  'a matched buddy hears their bud in real time',
+  heardByB !== null,
+  heardByB === null ? 'nothing arrived' : heardByB.text,
+)
+check(
+  'the text is cleaned by the hardened sanitizer before anyone reads it',
+  // Zero-width space and NUL stripped, the newline turned into a separating
+  // space rather than gluing two words together.
+  heardByB?.text === `by thedrinks ${SAID_BY_A}`,
+  JSON.stringify(heardByB?.text),
+)
+check(
+  'the sender and the match come off the connection, never off the message',
+  heardByB?.from === pairOneA.role &&
+    heardByB?.name === BUYERS.chatA.name &&
+    heardByB?.matchId === pairOneA.matchId,
+  `${heardByB?.from}/${heardByB?.name}/${heardByB?.matchId}`,
+)
+const echoedToA = await until(() => chatA.chats()[0] ?? null)
+check(
+  'the sender sees the same cleaned line their bud was shown',
+  echoedToA?.text === heardByB?.text,
+  `${JSON.stringify(echoedToA?.text)} vs ${JSON.stringify(heardByB?.text)}`,
+)
+
+// And back the other way, with a bidi override thrown in — the primitive that
+// makes text render differently from its bytes.
+chatB.chat(`${String.fromCharCode(0x202e)}${SAID_BY_B}`)
+const heardByA = await until(() => chatA.chats()[1] ?? null)
+check(
+  'the reply reaches the other buddy, also cleaned',
+  heardByA?.text === SAID_BY_B && heardByA?.from === pairOneB.role,
+  `${JSON.stringify(heardByA?.text)} from ${heardByA?.from}`,
+)
+
+// The claim the shape of this cell exists to test.
+check(
+  'the other match in the same cell hears none of it',
+  chatC.chats().length === 0 && chatD.chats().length === 0,
+  `${chatC.chats().length}/${chatD.chats().length} lines`,
+)
+check('the queued buyer in the same cell hears none of it', chatE.chats().length === 0)
+
+// --- server-side limits, driven through the socket ---
+// The length cap. Under the frame bound, so this reaches the policy check rather
+// than being thrown out as a malformed frame.
+chatB.chat('x'.repeat(4_000))
+const tooLong = await chatB.expectError()
+check(
+  'an over-long message is refused, not truncated',
+  tooLong.code === 'chat_too_long',
+  tooLong.code,
+)
+// Over the frame bound, which is a different answer on purpose.
+chatB.chat('x'.repeat(100_000))
+const tooBig = await chatB.expectError()
+check('a message far too large is not even sanitized', tooBig.code === 'bad_message', tooBig.code)
+// Invisible characters are not a message.
+chatB.chat(`${String.fromCharCode(0x200b)}${String.fromCharCode(0x202e)}  `)
+const emptyChat = await chatB.expectError()
+check(
+  'a message with nothing readable in it is refused',
+  emptyChat.code === 'chat_empty',
+  emptyChat.code,
+)
+const heardAfterRefusals = chatA.chats().length
+check(
+  'none of the refused messages were delivered anyway',
+  heardAfterRefusals === 2,
+  `${heardAfterRefusals} lines`,
+)
+
+// The rate limit, tripped by flooding a real socket rather than by calling the
+// limiter. Pair two is used for this so pair one's counters stay clean. The exact
+// threshold is pinned in `test/chat.test.ts`; what matters here is that the
+// socket consults it at all, and that a limited message is not relayed.
+const FLOOD = 40
+for (let i = 0; i < FLOOD; i++) chatC.chat(`flood ${i}`)
+const limited = await until(
+  () => chatC.inbox.find((m) => m.type === 'error' && m.code === 'chat_rate_limited') ?? null,
+)
+check(
+  'flooding the socket is refused server-side',
+  limited !== null,
+  limited === null ? `no chat_rate_limited after ${FLOOD} messages` : limited.message,
+)
+const relayed = chatD.chats().length
+check(
+  'a rate-limited message is dropped rather than relayed',
+  relayed > 0 && relayed < FLOOD,
+  `${relayed} of ${FLOOD} relayed`,
+)
+check(
+  'and the flood never leaks into the other match',
+  chatA.chats().length === 2 && chatB.chats().length === 2,
+  `${chatA.chats().length}/${chatB.chats().length} lines`,
+)
+// The socket survives being limited: it is a refusal, not a disconnect.
+chatC.ws.send(JSON.stringify({ type: 'ping', at: 9_191 }))
+check(
+  'a limited connection is still alive',
+  (await until(() => chatC.inbox.some((m) => m.type === 'pong' && m.at === 9_191))) === true,
+)
+
+// An unknown message type — a newer client talking to this server — is refused
+// without taking the socket, or the conversation, down with it.
+chatE.ws.send(JSON.stringify({ type: 'chat_typing', matchId: pairOneA.matchId }))
+const unknownType = await chatE.expectError()
+check(
+  'an unknown message type is refused, not fatal',
+  unknownType.code === 'bad_message',
+  unknownType.code,
+)
+chatB.chat('still here')
+check(
+  'and the conversation carries on afterwards',
+  (await until(() => chatA.chats().length === 3)) === true,
+  `${chatA.chats().length} lines`,
+)
+
+// --- the channel closes at pickup_complete ---
+const chatOrderer = pairOneA.role === 'orderer' ? chatA : chatB
+const chatReceiver = pairOneA.role === 'orderer' ? chatB : chatA
+const chatCode = pairOneA.role === 'orderer' ? pairOneA.pickupCode : pairOneB.pickupCode
+chatReceiver.confirm(chatCode)
+await chatReceiver.expect('pickup_confirmed')
+chatOrderer.confirm()
+const [completedA] = await Promise.all([
+  chatA.expect('pickup_complete'),
+  chatB.expect('pickup_complete'),
+])
+const linesAtCompletion = chatA.chats().length
+chatA.chat('one more thing')
+const afterComplete = await chatA.expectError()
+check(
+  'a message sent after the handshake completes is refused, not queued',
+  afterComplete.code === 'not_matched',
+  afterComplete.code,
+)
+chatB.chat('are you still there?')
+const afterCompleteB = await chatB.expectError()
+check(
+  'and refused for the other side too — the channel is gone, not half open',
+  afterCompleteB.code === 'not_matched',
+  afterCompleteB.code,
+)
+await new Promise((r) => setTimeout(r, 600))
+check(
+  'nothing was delivered after the match closed',
+  chatA.chats().length === linesAtCompletion && chatB.chats().length === linesAtCompletion,
+  `${chatA.chats().length}/${chatB.chats().length} vs ${linesAtCompletion}`,
+)
+
+// --- the central claim: nothing was stored ---
+// Same match that just settled, which makes this as sharp as it gets: the
+// settlement reached D1 and the conversation did not.
+const settledChatMatch = completedA.matchId
+// The positive control. Without it a scan that looks in the wrong place, or at a
+// store that has not flushed, reports a clean bill of health for a feature that
+// is quietly writing everything down. The settled match id IS stored — in the
+// ledger and in the cell's Durable Object — so the same two scans must find it.
+const controlRows = await until(() => {
+  const found = ledgerRowsContaining(settledChatMatch)
+  return found.hits.length > 0 ? found : null
+}, 10_000)
+check(
+  'control: the settled match IS in D1, so a D1 scan can find what is there',
+  controlRows !== null,
+  controlRows === null
+    ? 'the settled match was not found — the D1 scan proves nothing below'
+    : `${controlRows.hits.length} row(s) across ${controlRows.tables.length} table(s)`,
+)
+const controlFiles = await until(() => {
+  const found = persistedFilesContaining(settledChatMatch)
+  return found.hits.length > 0 ? found : null
+}, 10_000)
+check(
+  'control: the settled match IS on disk, so a file scan can find what is there',
+  controlFiles !== null,
+  controlFiles === null
+    ? 'the settled match was not found on disk — the file scan proves nothing below'
+    : `${controlFiles.hits.length} of ${controlFiles.scanned} persisted file(s): ${controlFiles.hits
+        .map((path) => path.replace(`${process.cwd()}/`, ''))
+        .join(', ')}`,
+)
+
+for (const [who, marker] of [
+  ['the orderer', SAID_BY_A],
+  ['the receiver', SAID_BY_B],
+]) {
+  const rows = ledgerRowsContaining(marker)
+  check(
+    `nothing ${who} said reached D1 — no table in the database contains it`,
+    rows.hits.length === 0,
+    `searched ${rows.tables.length} table(s): ${rows.tables.join(', ')}`,
+  )
+  const files = persistedFilesContaining(marker)
+  check(
+    `nothing ${who} said reached any local store — not D1, not the Durable Object, not KV`,
+    files.hits.length === 0,
+    files.hits.length === 0
+      ? `${files.scanned} persisted file(s) scanned under .wrangler/state`
+      : files.hits.join(', '),
+  )
+}
+// The flood is the volume case: hundreds of characters of conversation through a
+// cell whose Durable Object was writing match records the whole time.
+const floodRows = ledgerRowsContaining('flood ')
+const floodFiles = persistedFilesContaining('flood 0')
+check(
+  'and forty flooded messages left no trace either',
+  floodRows.hits.length === 0 && floodFiles.hits.length === 0,
+  `${floodRows.hits.length} rows / ${floodFiles.hits.length} files`,
+)
+
+// --- the channel closes on a dispute ---
+// Their own cell (`9xj64f`, Denver), so this dispute is unambiguously theirs.
+const chatDis1 = open(BUYERS.chatDisputeOne, 39.7392, -104.9903)
+const chatDis2 = open(BUYERS.chatDisputeTwo, 39.7394, -104.9905)
+await Promise.all([chatDis1.opened, chatDis2.opened])
+await Promise.all([chatDis1.expect('welcome'), chatDis2.expect('welcome')])
+chatDis1.join()
+await chatDis1.expect('waiting')
+chatDis2.join()
+// chatDis1 waited, so the fairness rule makes them the orderer deterministically.
+const [disOrdererMatch] = await Promise.all([
+  chatDis1.expect('matched'),
+  chatDis2.expect('matched'),
+])
+check(
+  'the disputed pair is matched with the expected roles',
+  disOrdererMatch.role === 'orderer',
+  disOrdererMatch.role,
+)
+chatDis1.chat('on my way')
+check(
+  'the disputed pair could chat while matched',
+  (await until(() => chatDis2.chats().length === 1)) === true,
+)
+// The receiver confirms and the orderer vanishes: a dispute, not an abandonment.
+chatDis2.confirm(disOrdererMatch.pickupCode)
+await chatDis2.expect('pickup_confirmed')
+chatDis1.ws.close()
+await chatDis2.expect('pickup_disputed')
+const linesAtDispute = chatDis2.chats().length
+chatDis2.chat('this is not over')
+const afterChatDispute = await chatDis2.expectError()
+check(
+  'a message sent after a dispute is refused, not queued',
+  afterChatDispute.code === 'not_matched',
+  afterChatDispute.code,
+)
+check(
+  'and a disputed match relays nothing further',
+  chatDis2.chats().length === linesAtDispute,
+  `${chatDis2.chats().length} vs ${linesAtDispute}`,
+)
+
+// --- the channel closes when a buddy leaves ---
+// Their own cell again (`c23nb6`, Seattle).
+const chatLeft1 = open(BUYERS.chatLeaveOne, 47.6062, -122.3321)
+const chatLeft2 = open(BUYERS.chatLeaveTwo, 47.6064, -122.3323)
+await Promise.all([chatLeft1.opened, chatLeft2.opened])
+await Promise.all([chatLeft1.expect('welcome'), chatLeft2.expect('welcome')])
+chatLeft1.join()
+await chatLeft1.expect('waiting')
+chatLeft2.join()
+await Promise.all([chatLeft1.expect('matched'), chatLeft2.expect('matched')])
+chatLeft2.chat('grey hoodie')
+check(
+  'the pair could chat while matched',
+  (await until(() => chatLeft1.chats().length === 1)) === true,
+)
+chatLeft1.ws.close()
+await chatLeft2.expect('buddy_left')
+chatLeft2.chat('where did you go?')
+const afterLeft = await chatLeft2.expectError()
+check(
+  'a message sent after a bud walks away is refused, not held for them',
+  afterLeft.code === 'not_matched',
+  afterLeft.code,
+)
+check(
+  'a requeued survivor has no conversation to return to',
+  chatLeft2.chats().length === 1,
+  `${chatLeft2.chats().length} lines`,
+)
+
+for (const s of [chatA, chatB, chatC, chatD, chatE, chatDis2, chatLeft2]) s.ws.close()
+
 for (const s of [b, far, c, g, h, j, k, l, kim, lee]) s.ws.close()
 
 // --- liveness: stale queue entries and unconfirmed matches ---
@@ -879,6 +1370,15 @@ if (!shortWindows) {
   check(
     'a cancelled match returns nothing, because nothing was taken yet',
     cancelOne.refundedCents === 0 && cancelTwo.refundedCents === 0,
+  )
+  // The fourth way a channel closes: nobody turned up, so the match is called
+  // off and the conversation goes with it.
+  slowOne.chat('hello?')
+  const afterCancelled = await slowOne.expectError()
+  check(
+    'a message sent after a match is cancelled unconfirmed is refused',
+    afterCancelled.code === 'not_matched',
+    afterCancelled.code,
   )
 
   // The boundary between the two timers, which is the thing most easily broken

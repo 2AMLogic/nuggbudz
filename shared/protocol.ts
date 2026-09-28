@@ -1,10 +1,11 @@
+import { CHAT_FRAME_LIMIT } from './chat'
 import type { BuyerRole, BuyerShare, Settlement } from './economics'
 import type { ExpiryWindows } from './expiry'
 import type { LocationSource } from './location'
 import { normalizePickupCode } from './pickup'
 
 /** Wire protocol version. Bump on any breaking message change. */
-export const PROTOCOL_VERSION = 4
+export const PROTOCOL_VERSION = 5
 
 /**
  * Take a seat in the pool.
@@ -53,7 +54,28 @@ export interface ConfirmPickupMessage {
   code: string | null
 }
 
-export type ClientMessage = JoinMessage | CancelMessage | PingMessage | ConfirmPickupMessage
+/**
+ * Say something to the buddy you are matched with.
+ *
+ * There is no `matchId` and no `from` here, and both omissions are deliberate.
+ * The match and the sender are read off the connection's server-side state, so a
+ * caller cannot address a match they are not in or speak as somebody else — the
+ * same rule that keeps `name` off `join`.
+ *
+ * `text` is raw, attacker-chosen input. It is sanitized on the server before it
+ * reaches anyone, never here and never on the sending client.
+ */
+export interface ChatSendMessage {
+  type: 'chat'
+  text: string
+}
+
+export type ClientMessage =
+  | JoinMessage
+  | CancelMessage
+  | PingMessage
+  | ConfirmPickupMessage
+  | ChatSendMessage
 
 export interface WelcomeMessage {
   type: 'welcome'
@@ -199,6 +221,31 @@ export interface MatchExpiredMessage {
   refundedCents: number
 }
 
+/**
+ * One line of a two-party conversation, relayed live.
+ *
+ * Sent to both buddies and to nobody else — not to another buyer queued in the
+ * same cell, not to another match in the same cell. The sender gets it back so
+ * both screens render the same canonical, sanitized text rather than the sender
+ * seeing what they typed and the buddy seeing what survived cleaning.
+ *
+ * **Never stored.** There is no history to fetch on reconnect, and that is the
+ * feature: a buddy who reloads has lost the conversation, exactly as the screen
+ * promises. If this message cannot be handed to a live socket it is refused to
+ * the sender, never queued.
+ */
+export interface ChatRelayMessage {
+  type: 'chat_message'
+  matchId: string
+  /** Which side of the match said it, taken from their connection. */
+  from: BuyerRole
+  /** The sender's session display name — never a name off the wire. */
+  name: string
+  /** Sanitized text, byte for byte what the other buddy is shown. */
+  text: string
+  at: number
+}
+
 export interface PongMessage {
   type: 'pong'
   at: number
@@ -214,6 +261,16 @@ export type ProtocolErrorCode =
   | 'bad_pickup_code'
   | 'already_confirmed'
   | 'match_disputed'
+  /** Nothing printable survived sanitizing — an all-zero-width message, say. */
+  | 'chat_empty'
+  | 'chat_too_long'
+  | 'chat_rate_limited'
+  /**
+   * Still matched, but the buddy's socket is gone. The message is dropped and
+   * said to be dropped: a relay with no live recipient must never look like a
+   * queued one.
+   */
+  | 'buddy_offline'
 
 export interface ErrorMessage {
   type: 'error'
@@ -232,6 +289,7 @@ export type ServerMessage =
   | QueueExpiringMessage
   | QueueExpiredMessage
   | MatchExpiredMessage
+  | ChatRelayMessage
   | PongMessage
   | ErrorMessage
 
@@ -276,9 +334,24 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       const normalized = normalizePickupCode(code)
       return { type: 'confirm_pickup', code: normalized.length === 0 ? null : normalized }
     }
+    case 'chat': {
+      // Any `matchId` or `from` on the wire is ignored, not rejected, for the
+      // same reason `join` ignores `name`: the connection already says who is
+      // talking and which match they are in.
+      const { text } = msg
+      if (typeof text !== 'string') return null
+      // The structural bound only. Whether the *content* is acceptable — empty
+      // after sanitizing, or over the policy cap — is a decision the server
+      // answers with a specific error code, not something to collapse into
+      // `bad_message` here.
+      if (text.length > CHAT_FRAME_LIMIT) return null
+      return { type: 'chat', text }
+    }
     case 'ping':
       return { type: 'ping', at: typeof msg.at === 'number' ? msg.at : Date.now() }
     default:
+      // An unknown type — a newer client talking to an older server, or a probe.
+      // Null, so the caller answers `bad_message` and the socket stays up.
       return null
   }
 }

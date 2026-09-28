@@ -1,9 +1,22 @@
+import { MAX_CHAT_HISTORY } from '@shared/chat'
 import type { BuyerRole } from '@shared/economics'
 import type { LocationSource } from '@shared/location'
-import type { CellBuddy, MatchedMessage, ServerMessage } from '@shared/protocol'
+import type { CellBuddy, ChatRelayMessage, MatchedMessage, ServerMessage } from '@shared/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 export type PoolStage = 'idle' | 'connecting' | 'waiting' | 'matched' | 'settled' | 'disputed'
+
+/**
+ * One relayed message, plus a local sequence number.
+ *
+ * The server's `at` is a millisecond timestamp and two messages can share one,
+ * so it is not a key. `seq` is assigned on arrival and never leaves this tab —
+ * it is not part of the protocol and is not an id anything could look a message
+ * up by, because there is nowhere to look one up.
+ */
+export interface ChatLine extends ChatRelayMessage {
+  seq: number
+}
 
 /** Stages where the socket has done its job and a close is not an error. */
 const TERMINAL: readonly PoolStage[] = ['matched', 'settled', 'disputed']
@@ -54,6 +67,15 @@ export interface PoolState {
   confirmed: BuyerRole[]
   /** The side still owing a confirmation, while the handshake is half done. */
   waitingOn: BuyerRole | null
+  /**
+   * The live conversation with your bud, in arrival order.
+   *
+   * Held in React state and nowhere else — not localStorage, not a ref that
+   * outlives the match. The server keeps no copy either, so this array *is* the
+   * conversation and emptying it is the conversation ending. It is cleared the
+   * moment the match does, which is what makes the line on screen true.
+   */
+  chat: ChatLine[]
 }
 
 const INITIAL: PoolState = {
@@ -69,6 +91,7 @@ const INITIAL: PoolState = {
   notice: null,
   confirmed: [],
   waitingOn: null,
+  chat: [],
 }
 
 /**
@@ -215,13 +238,25 @@ export function usePool() {
                 notice: null,
                 confirmed: [],
                 waitingOn: null,
+                // A new match starts with an empty conversation. Nothing carries
+                // over from the last one, here or on the server.
+                chat: [],
               }
+            case 'chat_message': {
+              const line: ChatLine = { ...message, seq: (prev.chat.at(-1)?.seq ?? 0) + 1 }
+              // Bounded, so a long wait at the counter cannot grow this without
+              // limit. Dropping the oldest line loses nothing that was ever
+              // stored anywhere.
+              return { ...prev, chat: [...prev.chat, line].slice(-MAX_CHAT_HISTORY) }
+            }
             case 'buddy_left':
               return {
                 ...prev,
                 stage: 'waiting',
                 match: null,
                 notice: 'Your bud dropped out. Back in the queue.',
+                // Their half of the conversation left with them.
+                chat: [],
               }
             case 'pickup_confirmed':
               return {
@@ -233,12 +268,16 @@ export function usePool() {
                 waitingOn: message.waitingOn,
               }
             case 'pickup_complete':
-              return { ...prev, stage: 'settled', waitingOn: null, error: null }
+              // The receipt stays; the conversation does not. This is the moment
+              // the screen promised it would disappear, and it is the same moment
+              // the server stops relaying.
+              return { ...prev, stage: 'settled', waitingOn: null, error: null, chat: [] }
             case 'pickup_disputed':
               return {
                 ...prev,
                 stage: 'disputed',
                 waitingOn: null,
+                chat: [],
                 notice:
                   message.reason === 'buddy_left'
                     ? 'Your bud left before confirming. This split is flagged for review.'
@@ -268,6 +307,7 @@ export function usePool() {
                 // handshake to keep on screen — that is the disputed stage.
                 confirmed: [],
                 waitingOn: null,
+                chat: [],
                 notice: 'That match went unconfirmed and was called off. Nothing was charged.',
               }
             case 'error':
@@ -302,5 +342,20 @@ export function usePool() {
     socket.send(JSON.stringify({ type: 'confirm_pickup', code: code ?? null }))
   }, [])
 
-  return { ...state, join, leave, confirmPickup }
+  /**
+   * Say something to your bud.
+   *
+   * Sent raw: sanitizing here would only decide what *this* screen shows, and the
+   * text a stranger reads has to be cleaned by the server that relays it. The
+   * line comes back on the socket like any other, so nothing is added to `chat`
+   * optimistically and both buddies see identical text.
+   */
+  const sendChat = useCallback((text: string) => {
+    const socket = socketRef.current
+    if (socket === null || socket.readyState !== WebSocket.OPEN) return
+    if (text.trim().length === 0) return
+    socket.send(JSON.stringify({ type: 'chat', text }))
+  }, [])
+
+  return { ...state, join, leave, confirmPickup, sendChat }
 }

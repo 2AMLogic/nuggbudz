@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
+import { CHAT_RATE_LIMIT, CHAT_RATE_WINDOW_MS, reviewChatText } from '../shared/chat'
 import { findDeal, isDealOffered } from '../shared/deals'
 import type { BuyerRole, Settlement } from '../shared/economics'
 import { settle } from '../shared/economics'
@@ -33,6 +34,7 @@ import {
   parseClientMessage,
   type ServerMessage,
 } from '../shared/protocol'
+import { slidingWindow } from '../shared/ratelimit'
 import { type Env, intVar } from './env'
 import { writeSettledMatch } from './ledger'
 
@@ -72,7 +74,23 @@ type ConnState =
       /** Whether they have been told they are about to be dropped. */
       warned: boolean
     } & BuyerIdentity)
-  | ({ status: 'matched'; matchId: string; role: BuyerRole } & BuyerIdentity)
+  | ({
+      status: 'matched'
+      matchId: string
+      role: BuyerRole
+      /**
+       * Timestamps of this connection's recent chat attempts, for the sliding
+       * window in `shared/ratelimit.ts`.
+       *
+       * In the hibernation attachment rather than an instance field, like every
+       * other piece of per-connection state, so an evicted cell does not forget
+       * that somebody was mid-flood. Optional because a socket attached before
+       * this field existed has to deserialize rather than break. It is *not*
+       * conversation: only the times messages were attempted, and it dies with
+       * the match when the socket drops back to `principalOf`.
+       */
+      chatHits?: number[]
+    } & BuyerIdentity)
 
 type WaitingState = Extract<ConnState, { status: 'waiting' }>
 type MatchedState = Extract<ConnState, { status: 'matched' }>
@@ -214,10 +232,100 @@ export class NuggPool extends DurableObject<Env> {
       case 'confirm_pickup':
         await this.handleConfirmPickup(ws, msg.code)
         return
+      case 'chat':
+        await this.handleChat(ws, msg.text)
+        return
       case 'join':
         await this.handleJoin(ws, msg)
         return
     }
+  }
+
+  /**
+   * Relay one line of conversation to the buddy on the other side of a match.
+   *
+   * **Nothing is stored.** This method reads the match record to decide whether a
+   * channel is still open and writes only the sender's rate-limit timestamps back
+   * into their own hibernation attachment. No chat text touches
+   * `ctx.storage`, D1 or KV, at any point, which is the whole reason the screen
+   * can promise a buyer the conversation disappears. A message is handed to a
+   * live socket or refused — never buffered for a buddy who might come back.
+   *
+   * Everything that identifies the speaker comes off the connection: the match,
+   * the role and the display name. The frame contributes text and nothing else.
+   */
+  private async handleChat(ws: WebSocket, raw: string): Promise<void> {
+    const state = this.getState(ws)
+    if (state === null) return
+    if (state.status !== 'matched') {
+      this.fail(ws, 'not_matched', 'there is nobody to talk to until you are matched')
+      return
+    }
+
+    // The match record is the authority on whether this channel exists. A
+    // settled, disputed or deleted match closes it, so a message arriving after
+    // `pickup_complete`, after a dispute, or after a buddy walked away is refused
+    // here rather than relayed into a conversation that is over. Both this and
+    // the socket-state check above have to hold: the socket is dropped back to
+    // idle at the same moments, and either alone would be a single point of
+    // failure for the one guarantee the feature makes.
+    const record = await this.ctx.storage.get<MatchRecord>(`match:${state.matchId}`)
+    if (record === undefined || record.status !== 'pending') {
+      this.fail(ws, 'not_matched', 'that match is finished, and the chat went with it')
+      return
+    }
+
+    const now = Date.now()
+    // Same sliding window the upgrade limiter uses (#10), per connection rather
+    // than per IP, because the thing being limited here is one seat in one match.
+    const verdict = slidingWindow(state.chatHits ?? [], now, CHAT_RATE_WINDOW_MS, CHAT_RATE_LIMIT)
+    if (!verdict.allowed) {
+      this.fail(
+        ws,
+        'chat_rate_limited',
+        `slow down — wait ${verdict.retryAfterSeconds}s before sending again`,
+      )
+      return
+    }
+    // Recorded before the text is judged, so a flood of rejected garbage is
+    // limited exactly like a flood of valid messages. A rejected *attempt* costs
+    // nothing (`slidingWindow` does not record one), so backing off works.
+    this.setState(ws, { ...state, chatHits: verdict.hits })
+
+    const reviewed = reviewChatText(raw)
+    if (!reviewed.ok) {
+      if (reviewed.reason === 'too_long') {
+        this.fail(ws, 'chat_too_long', 'that is too long to shout across a counter')
+      } else {
+        this.fail(ws, 'chat_empty', 'there was nothing readable in that message')
+      }
+      return
+    }
+
+    // Exactly the two sockets in this match, which is what keeps a third buyer in
+    // the same cell from hearing any of it. `matchSockets` filters on the
+    // connection's own matchId, so a cell hosting several matches at once relays
+    // each conversation only within itself.
+    const [buddy] = this.matchSockets(state.matchId, ws)
+    if (buddy === undefined) {
+      this.fail(ws, 'buddy_offline', 'your bud is not connected right now')
+      return
+    }
+
+    const relay: ServerMessage = {
+      type: 'chat_message',
+      matchId: state.matchId,
+      from: state.role,
+      // The authenticated name, like everywhere else.
+      name: state.name,
+      text: reviewed.text,
+      at: now,
+    }
+    this.send(buddy.ws, relay)
+    // Echoed to the sender so both screens show the same sanitized line, rather
+    // than the sender reading their own draft and the buddy reading what
+    // survived cleaning.
+    this.send(ws, relay)
   }
 
   /**

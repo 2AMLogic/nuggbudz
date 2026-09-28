@@ -111,7 +111,10 @@ export function App() {
           waitingOn={pool.waitingOn}
           stage={pool.stage}
           notice={pool.notice}
+          chat={pool.chat}
+          chatError={pool.error}
           onConfirm={pool.confirmPickup}
+          onSendChat={pool.sendChat}
           onDone={pool.leave}
         />
       </Shell>

@@ -5,7 +5,9 @@ import { formatDistance } from '@shared/geo'
 import { PICKUP_CODE_LENGTH } from '@shared/pickup'
 import type { MatchedMessage } from '@shared/protocol'
 import { useState } from 'react'
+import type { ChatLine } from '../hooks/usePool'
 import { Barcode } from './Barcode'
+import { BuddyChat } from './BuddyChat'
 import { Line, Perf } from './Roll'
 
 /**
@@ -20,7 +22,10 @@ export function SettlementReceipt({
   waitingOn,
   stage,
   notice,
+  chat,
+  chatError,
   onConfirm,
+  onSendChat,
   onDone,
 }: {
   match: MatchedMessage
@@ -29,7 +34,11 @@ export function SettlementReceipt({
   waitingOn: BuyerRole | null
   stage: 'matched' | 'settled' | 'disputed'
   notice: string | null
+  /** The live conversation. Empty once the match is over, because it is gone. */
+  chat: ChatLine[]
+  chatError: string | null
   onConfirm: (code?: string) => void
+  onSendChat: (text: string) => void
   onDone: () => void
 }) {
   const deal = findDeal(match.settlement.dealId)
@@ -154,6 +163,19 @@ export function SettlementReceipt({
               />
             </label>
           )}
+
+          {/* Only while the match is live. There is no chat before a match and
+              none after one, on screen or on the server. */}
+          <Perf label="Find each other" />
+          <BuddyChat
+            lines={chat}
+            myRole={role}
+            buddyName={buddy.name}
+            error={chatError}
+            onSend={onSendChat}
+          />
+
+          <Perf />
 
           {iConfirmed ? (
             <p className="mt-7 font-body text-sm leading-snug text-faded" aria-live="polite">

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { parseClientMessage } from '../shared/protocol'
+import { CHAT_FRAME_LIMIT } from '../shared/chat'
+import { PROTOCOL_VERSION, parseClientMessage } from '../shared/protocol'
 
 describe('parseClientMessage', () => {
   it('accepts a well-formed join', () => {
@@ -111,5 +112,58 @@ describe('parseClientMessage', () => {
     expect(bad('d'.repeat(65))).toBeNull()
     expect(bad(42)).toBeNull()
     expect(bad(null)).toBeNull()
+  })
+
+  it('accepts a chat message and leaves the text alone for the server to clean', () => {
+    // Raw on purpose: sanitizing here would mean the parser decides what a
+    // stranger reads, and the server would have no way to distinguish "empty
+    // after cleaning" from "never sent anything".
+    expect(parseClientMessage('{"type":"chat","text":"  by the drinks\\n "}')).toEqual({
+      type: 'chat',
+      text: '  by the drinks\n ',
+    })
+  })
+
+  it('ignores a matchId or sender on a chat frame — both come off the connection', () => {
+    // The `join`-ignores-`name` rule, applied to the other direction: a caller
+    // must not be able to address a match they are not in, or speak as somebody
+    // else. Dropped rather than rejected, so a chatty client is not disconnected.
+    const raw = JSON.stringify({
+      type: 'chat',
+      text: 'here',
+      matchId: 'somebody-elses-match',
+      from: 'orderer',
+      name: 'Definitely Not Me',
+    })
+    expect(parseClientMessage(raw)).toEqual({ type: 'chat', text: 'here' })
+  })
+
+  it('rejects a chat whose text is not a string', () => {
+    expect(parseClientMessage('{"type":"chat"}')).toBeNull()
+    expect(parseClientMessage('{"type":"chat","text":null}')).toBeNull()
+    expect(parseClientMessage('{"type":"chat","text":42}')).toBeNull()
+    expect(parseClientMessage('{"type":"chat","text":["a"]}')).toBeNull()
+  })
+
+  it('rejects a chat frame too large to be worth sanitizing', () => {
+    const ok = JSON.stringify({ type: 'chat', text: 'x'.repeat(CHAT_FRAME_LIMIT) })
+    expect(parseClientMessage(ok)).not.toBeNull()
+    const over = JSON.stringify({ type: 'chat', text: 'x'.repeat(CHAT_FRAME_LIMIT + 1) })
+    expect(parseClientMessage(over)).toBeNull()
+  })
+
+  it('ignores an unknown chat-adjacent type rather than mistaking it for one', () => {
+    // A newer client may send things this server has never heard of. Null means
+    // the caller answers `bad_message` and the socket stays up.
+    expect(parseClientMessage('{"type":"chat_typing"}')).toBeNull()
+    expect(parseClientMessage('{"type":"chat_message","text":"forged"}')).toBeNull()
+  })
+})
+
+describe('PROTOCOL_VERSION', () => {
+  it('is bumped past the version that had no chat', () => {
+    // Chat added client and server message types, so a client and server that
+    // disagree about this number disagree about the message set.
+    expect(PROTOCOL_VERSION).toBeGreaterThan(4)
   })
 })

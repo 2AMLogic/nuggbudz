@@ -45,10 +45,17 @@ disagree. The closed set the drafter may spell:
 | `bk-nuggets-20.*` | $5.99, $4.49, $3.49, $1.00, $2.99 | box, solo, each pays, each saves, spread |
 | `volume.{10,25,100}.take` | $9.90, $24.75, $99.00 | fee × pairings |
 | `volume.{10,25,100}.savings` | $50.00, $125.00, $500.00 | party savings × pairings |
-| `smoke.checks` | 32/32 | `check()` call count in `scripts/smoke.mjs` |
 
 Merchant names are also attested from the catalogue: McDonald's, Wendy's,
 Burger King. No other number, name or logo may appear on a slide.
+
+**The end-to-end check count is deliberately not in that table and may not be
+spelled on a slide.** It was, and the drafter had to hand-edit it for every PR
+that added an assertion to `scripts/smoke.mjs`; concurrent branches then bumped
+it to the same wrong number and merged clean but red (#46, removed the count
+from the deck and `countSmokeChecks()` from the ledger). The slide claims that
+every end-to-end check passes and names no number — see "Why the deck does not
+quote a check count" in `refs/smoke-runs.md`.
 
 ## Problem
 
@@ -157,14 +164,16 @@ unit — fee × pairings — and labels it as arithmetic, not a forecast.
   over WebSockets. As of 2026-09-27 the deployment runs with demo pairing
   enabled, which is why a stranger can pair on it without an account; Google
   sign-in exists and works, and demo mode is an explicit deploy-time flag.
-- `pnpm dev --port 5199` + `pnpm smoke` passes **32/32** end-to-end checks
-  across the Worker, the Durable Object, KV and D1 on current `main`: both
-  buyers matched to one `matchId`, complementary orderer/receiver roles, each
-  paying $4.49, each owed 10 pieces, each saving $2.50, a buddy name taken from
-  the session rather than the wire, a 43 m buddy distance, a buyer outside the
-  radius left waiting, a survivor requeued when their buddy disconnects, and an
-  unauthenticated upgrade refused. Transcript in `refs/smoke-runs.md`, together
-  with the 22-check run against the deployment.
+- `pnpm dev --port 5199` + `pnpm smoke` passes **every** end-to-end check across
+  the Worker, the Durable Object, KV and D1 on current `main` — the real
+  bindings, not a mock: both buyers matched to one `matchId`, complementary
+  orderer/receiver roles, each paying $4.49, each owed 10 pieces, each saving
+  $2.50, a buddy name taken from the session rather than the wire, a 43 m buddy
+  distance, a buyer outside the radius left waiting, a survivor requeued when
+  their buddy disconnects, and an unauthenticated upgrade refused. The suite
+  must pass; how many assertions it took is not a claim worth making, and is not
+  one the drafter may spell. Transcripts in `refs/smoke-runs.md`, together with
+  the run against the deployment.
 - `pnpm test` covers settlement, geo, matchmaking, auth and the wire protocol
   as pure logic, with no Workers runtime.
 - No revenue, no users, no LOIs, no pilots. Do not imply otherwise anywhere.

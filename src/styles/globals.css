@@ -377,12 +377,17 @@
 
     position: relative;
     /* Fed edge to edge through the machine: cancels the console's own gutter so
-       the sheet is as wide as the slot, which is also what keeps the QR at full
-       size on a 320px screen. */
+       the sheet is as wide as the slot, which is also what buys the QR the widest
+       column a 320px screen can give it. */
     margin-inline: -1rem;
-    /* Clears the sprocket strip (1.1rem) with room to spare, and still leaves
-       241px of column on a 320px phone — wider than the QR's 232px symbol, so
-       the pickup code is never downscaled on the narrowest screen. */
+    /* Clears the sprocket strip (1.1rem) with room to spare. What is left is
+       ~240px of column on a 320px phone, which is *narrower* than the symbol the
+       longest deployed origin needs at 8px per module (45 modules quiet zone
+       included, so 360px) — so the pitch adapts to this column rather than the
+       column being claimed to fit a fixed pitch. That claim used to live here and
+       was wrong twice over (#127): it compared 241px against a 232px symbol,
+       which is the 29-module data area with the mandatory quiet zone left out.
+       `PickupQr` measures this width now; do not re-derive it in a comment. */
     padding: 1rem 1.45rem;
     color: var(--color-chrome);
     background-color: var(--color-panel);

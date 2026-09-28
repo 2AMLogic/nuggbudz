@@ -6,7 +6,9 @@ import { PICKUP_CODE_LENGTH } from '@shared/pickup'
 import type { MatchedMessage, PaymentRequiredMessage } from '@shared/protocol'
 import { describeSauceSelection, type SauceSelection } from '@shared/sauces'
 import { useState } from 'react'
+import type { ChatLine } from '../hooks/usePool'
 import { Barcode } from './Barcode'
+import { BuddyChat } from './BuddyChat'
 import { PaymentPanel } from './PaymentPanel'
 import { Line, Perf } from './Roll'
 
@@ -24,7 +26,11 @@ export function SettlementReceipt({
   waitingOn,
   stage,
   notice,
+  error,
+  chat,
+  chatError,
   onConfirm,
+  onSendChat,
   onDone,
 }: {
   match: MatchedMessage
@@ -44,7 +50,18 @@ export function SettlementReceipt({
   waitingOn: BuyerRole | null
   stage: 'matched' | 'settled' | 'disputed'
   notice: string | null
+  /**
+   * A refusal about the handoff itself — a wrong pickup code, a second
+   * confirmation. Shown beside the control that earned it, which is why it is a
+   * separate prop from `chatError` rather than one "last error" for the screen.
+   */
+  error: string | null
+  /** The live conversation. Empty once the match is over, because it is gone. */
+  chat: ChatLine[]
+  /** Why the last line you tried to say did not go. Belongs under the input. */
+  chatError: string | null
   onConfirm: (code?: string) => void
+  onSendChat: (text: string) => void
   onDone: () => void
 }) {
   const deal = findDeal(match.settlement.dealId)
@@ -212,6 +229,25 @@ export function SettlementReceipt({
                 className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg tracking-[0.35em] focus:outline-none"
               />
             </label>
+          )}
+
+          {/* Only while the match is live. There is no chat before a match and
+              none after one, on screen or on the server. */}
+          <Perf label="Find each other" />
+          <BuddyChat
+            lines={chat}
+            myRole={role}
+            buddyName={buddy.name}
+            error={chatError}
+            onSend={onSendChat}
+          />
+
+          <Perf />
+
+          {error !== null && (
+            <p className="mt-4 font-body text-sm text-ketchup" aria-live="polite">
+              {error}
+            </p>
           )}
 
           {iConfirmed ? (

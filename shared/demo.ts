@@ -13,6 +13,7 @@
  * can bake an auth bypass into a production artifact by accident. This mirrors
  * the reasoning 311alarm applies to its dev-OTP flag.
  */
+import { sanitizeDisplayText } from './text'
 
 /** Truthy spellings an operator might plausibly pass to a Worker var. */
 export function demoPairingEnabled(raw: string | undefined): boolean {
@@ -31,46 +32,20 @@ export function demoPairingEnabled(raw: string | undefined): boolean {
 /** Longest display name a buddy card can show without wrapping badly. */
 const MAX_NAME = 40
 
-/** Space, the lowest printable code point. Anything below it is a control char. */
-const FIRST_PRINTABLE = 0x20
-const DELETE_CHAR = 0x7f
-
 /**
  * Clean a demo-supplied name into something safe to show a stranger.
  *
  * An unauthenticated caller chooses this string, so it is untrusted input:
  * control characters stripped, whitespace collapsed, length-capped, never empty.
+ *
+ * The cleaning itself lives in `shared/text.ts` because Nuggchat needs exactly
+ * the same treatment for exactly the same reason, and two copies of a sanitizer
+ * this heavily iterated on would drift. Everything this function still owns is
+ * the *name* policy: the cap, and the fallback when nothing survives.
  */
 export function sanitizeDemoName(raw: string | null | undefined): string {
-  if (typeof raw !== 'string') return 'Guest'
-  // Whitespace first, control characters second. A newline or tab is whitespace
-  // that happens to sit below the printable range, so deleting it before this
-  // step would glue two words together ('Robb\nWalters' -> 'RobbWalters')
-  // instead of separating them.
-  const spaced = raw.replace(/\s/g, ' ')
-  const printable = Array.from(spaced)
-    .filter((ch) => {
-      const code = ch.codePointAt(0) ?? 0
-      if (code < FIRST_PRINTABLE || code === DELETE_CHAR) return false
-      // C1 control block (U+0080-U+009F) — not caught by \s or the C0/DEL check.
-      if (code >= 0x80 && code <= 0x9f) return false
-      // Unicode format characters (category Cf): zero-width space/joiner/
-      // non-joiner, BOM, bidi override/isolate marks. These are invisible and
-      // U+202E in particular can make a name render differently from its
-      // bytes, so they are stripped rather than displayed. No /g flag here —
-      // a stateful global regex reused across `.filter()` calls silently
-      // skips matches via `lastIndex`.
-      if (/\p{Cf}/u.test(ch)) return false
-      return true
-    })
-    .join('')
-  const cleaned = printable.replace(/ +/g, ' ').trim()
-  if (cleaned.length === 0) return 'Guest'
-  // Cap on code points, not UTF-16 code units — slicing by code unit can split
-  // a surrogate pair (e.g. an emoji) in two, leaving a lone surrogate that
-  // decodes to U+FFFD. Trim after capping so the cap itself can't leave a
-  // trailing space.
-  return Array.from(cleaned).slice(0, MAX_NAME).join('').trim()
+  const cleaned = sanitizeDisplayText(raw, MAX_NAME)
+  return cleaned.length === 0 ? 'Guest' : cleaned
 }
 
 /** The marker that makes a demo identity greppable, spelled once. */

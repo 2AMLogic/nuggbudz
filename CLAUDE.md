@@ -54,6 +54,20 @@ state.
 - **Identity comes from the session, never from a message.** The pool socket is
   authenticated at upgrade time and the display name a buddy sees is read off
   the session in KV. A `name` on the wire is ignored, not trusted.
+- **Nuggchat is relayed and never stored.** A message between matched buddies is
+  handed to the other socket or refused — nothing reaches D1, Durable Object
+  storage or KV, and there is no history to fetch on reconnect. That is a
+  constraint, not an omission: it keeps conversation out of a ledger that only
+  accepts authentic settlements, it keeps us out of a moderation surface nobody
+  can staff, and it is what makes the promise on screen true. `pnpm smoke`
+  proves it by scanning every D1 table and every byte under `.wrangler/state`
+  for text that was just exchanged, with a positive control so the scan cannot
+  pass by looking in the wrong place. If something must be stored, raise it.
+- **One sanitizer for untrusted display text.** `sanitizeDisplayText` in
+  `shared/text.ts` is it — a demo display name and a chat message are the same
+  threat. Whitespace is normalised *before* control characters are stripped, so
+  a newline separates words instead of gluing them. Add rules there, never in a
+  second copy.
 - **A split settles only when both sides confirm the handoff.** The orderer
   holds a random pickup code (never derived from the match id, and never sent
   to the receiver); the receiver reads it off them. One side confirming alone

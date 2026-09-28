@@ -43,6 +43,11 @@ const BUYERS = {
   ivy: { sid: sessionId('e2e-ivy'), userId: accountId(3), name: 'Ivy' },
   // Picks a sauce pair in one browser session and expects it back in the next.
   pax: { sid: sessionId('e2e-pax'), userId: accountId(4), name: 'Pax' },
+  // The requeue spec: a buyer whose bud walks away mid-conversation, the bud who
+  // walks, and the stranger they are matched with next.
+  orla: { sid: sessionId('e2e-orla'), userId: accountId(5), name: 'Orla' },
+  pace: { sid: sessionId('e2e-pace'), userId: accountId(6), name: 'Pace' },
+  quin: { sid: sessionId('e2e-quin'), userId: accountId(7), name: 'Quin' },
 } as const
 
 type Buyer = (typeof BUYERS)[keyof typeof BUYERS]
@@ -142,6 +147,20 @@ const BUDDY_B = { latitude: 37.7903, longitude: -122.4003 }
 const OVERRIDE_CELL = geohash(BUDDY_A.latitude, BUDDY_A.longitude)
 const DEMO_CELL = geohash(DEMO_ORIGIN.lat, DEMO_ORIGIN.lng)
 
+/**
+ * A second neighbourhood, for the requeue spec below.
+ *
+ * Its own cell so that spec's queue never shares a Durable Object instance with
+ * the pairing spec above -- `NuggPool` is one instance per cell, and a buyer left
+ * queued by one spec would be a candidate for a match in the other.
+ */
+const REQUEUE_AT = [
+  { latitude: 42.3601, longitude: -71.0589 },
+  { latitude: 42.3602, longitude: -71.059 },
+  { latitude: 42.3603, longitude: -71.0591 },
+] as const
+const REQUEUE_CELL = geohash(REQUEUE_AT[0].latitude, REQUEUE_AT[0].longitude)
+
 // Both buddies have to share a cell to be in one market at all, and that cell
 // has to differ from the fallback for the assertion above to distinguish the
 // rungs. Checked here so moving `DEMO_ORIGIN` (or either fixture point) fails
@@ -151,6 +170,17 @@ if (geohash(BUDDY_B.latitude, BUDDY_B.longitude) !== OVERRIDE_CELL) {
 }
 if (OVERRIDE_CELL === DEMO_CELL) {
   throw new Error('fixture buddies must not sit in the demo fallback cell')
+}
+// All three requeue fixtures must share one cell (or they are not one market) and
+// that cell must be neither of the two above (or the specs can pair across each
+// other). Checked here so nudging a coordinate fails loudly rather than quietly.
+for (const at of REQUEUE_AT) {
+  if (geohash(at.latitude, at.longitude) !== REQUEUE_CELL) {
+    throw new Error('requeue fixtures must share a cell')
+  }
+}
+if (REQUEUE_CELL === OVERRIDE_CELL || REQUEUE_CELL === DEMO_CELL) {
+  throw new Error('the requeue cell must be a neighbourhood of its own')
 }
 
 const deal = findDeal(DEAL_ID)
@@ -310,6 +340,48 @@ test('two nearby buds pair, split the box evenly, and see complementary roles', 
     await expect(pageB.getByText(/^[A-Z0-9]{6}$/)).toHaveCount(0)
     await expect(pageB.getByText(`The code on ${BUYERS.nova.name}'s receipt`)).toBeVisible()
 
+    // Nuggchat. Two strangers who have never met need to find each other at a
+    // counter, and this is the channel for it: relayed between the two matched
+    // buddies and stored nowhere. `scripts/smoke.mjs` proves the "stored
+    // nowhere" half by scanning D1 and the Durable Object's own files; this
+    // proves the half a person experiences — the message arrives on the other
+    // screen, the promise about it is on screen too, and both are gone when the
+    // match is.
+    const novaSays = 'by the drinks in a grey hoodie'
+    await pageA.getByLabel(`Message ${BUYERS.remy.name}`).fill(novaSays)
+    await pageA.getByRole('button', { name: /^send$/i }).click()
+    await expect(pageB.getByText(novaSays)).toBeVisible()
+    // Echoed back to the sender, so both are reading the same sanitized line
+    // rather than the sender reading their own draft.
+    await expect(pageA.getByText(novaSays)).toBeVisible()
+    // Attributed off the connection, so the sender sees their own line as theirs.
+    await expect(pageA.getByRole('listitem').last()).toContainText('You')
+
+    // The honest-tone requirement, in the same register as the location notices
+    // in `src/hooks/useCoords.ts` and the demo-mode notice: say plainly what the
+    // software does, including when what it does is nothing.
+    await expect(pageA.getByText(/nothing here is saved/i)).toBeVisible()
+    await expect(pageB.getByText(/disappears the moment this match is done/i)).toBeVisible()
+
+    const remySays = 'two minutes out'
+    await pageB.getByLabel(`Message ${BUYERS.nova.name}`).fill(remySays)
+    await pageB.getByRole('button', { name: /^send$/i }).click()
+    await expect(pageA.getByText(remySays)).toBeVisible()
+
+    // Hostile text typed into the real input: a zero-width space and a
+    // right-to-left override, the primitive that makes a string render
+    // differently from its bytes. The server cleans it on the way through, so
+    // what the other buddy is shown is the stripped form -- never the original.
+    await pageA.getByLabel(`Message ${BUYERS.remy.name}`).fill('look​for‮the hat')
+    await pageA.getByRole('button', { name: /^send$/i }).click()
+    const smuggledLine = pageB.getByRole('listitem').last()
+    await expect(smuggledLine).toContainText('lookforthe hat')
+    // Read the bytes the browser actually rendered rather than trusting a text
+    // matcher that might normalize invisible characters away for us.
+    const rendered = await smuggledLine.innerText()
+    expect(rendered).not.toContain('​')
+    expect(rendered).not.toContain('‮')
+
     await pageB.getByPlaceholder('------').fill(code)
     await pageB.getByRole('button', { name: /got the box/i }).click()
     await expect(pageB.getByText(/waiting on/i)).toBeVisible()
@@ -317,9 +389,92 @@ test('two nearby buds pair, split the box evenly, and see complementary roles', 
     await pageA.getByRole('button', { name: /handed it over/i }).click()
     await expect(pageA.getByText(/both of you confirmed the handoff/i)).toBeVisible()
     await expect(pageB.getByText(/both of you confirmed the handoff/i)).toBeVisible()
+
+    // Settled, and the conversation is gone from both screens along with the
+    // means to continue it. The receipt stays; the chat does not.
+    //
+    // This is the *screen* claim only. It holds because the settled receipt does
+    // not render the chat at all, so it would keep holding even if the hook
+    // forgot to empty its state — which is why the spec below exercises the
+    // state directly, and why `scripts/smoke.mjs` refuses a message sent after
+    // this point on the server rather than trusting the client to stop asking.
+    await expect(pageA.getByText(novaSays)).toHaveCount(0)
+    await expect(pageA.getByText(remySays)).toHaveCount(0)
+    await expect(pageB.getByText(novaSays)).toHaveCount(0)
+    await expect(pageB.getByText(remySays)).toHaveCount(0)
+    await expect(pageA.getByText(/nothing here is saved/i)).toHaveCount(0)
+    await expect(pageA.getByLabel(`Message ${BUYERS.remy.name}`)).toHaveCount(0)
   } finally {
     await contextA.close()
     await contextB.close()
+  }
+})
+
+test('a new match starts with an empty conversation, never the last one', async ({ browser }) => {
+  // The claim this spec exists for, and the one the settled screen above cannot
+  // make: the transcript is client state, and it has to be emptied rather than
+  // merely hidden. A buyer whose bud walks away mid-conversation is requeued on
+  // the *same socket* and matched with somebody else -- so if the hook keeps the
+  // old lines, a stranger is shown what the previous stranger typed. Two
+  // independent clears guard this (`buddy_left` and `matched` in
+  // `src/hooks/useCoords.ts`'s neighbour `usePool.ts`); this asserts the outcome,
+  // so it fails if both of them go.
+  const contexts = await Promise.all(
+    REQUEUE_AT.map((geolocation) =>
+      browser.newContext({ geolocation, permissions: ['geolocation'] }),
+    ),
+  )
+  const [orlaCtx, paceCtx, quinCtx] = contexts
+  const orla = await orlaCtx.newPage()
+  const pace = await paceCtx.newPage()
+  const quin = await quinCtx.newPage()
+
+  try {
+    await signIn(orla, BUYERS.orla)
+    await signIn(pace, BUYERS.pace)
+    await signIn(quin, BUYERS.quin)
+    for (const page of [orla, pace, quin]) {
+      await page.goto('/')
+      await page.getByRole('button', { name: /use my exact location/i }).click()
+      await expect(page.getByText(/exact location on/i)).toBeVisible()
+    }
+
+    // Orla waits, so she is the deterministic orderer of both matches below.
+    await orla.getByRole('button', { name: /find a bud/i }).click()
+    await expect(orla.getByText(`cell ${REQUEUE_CELL}`).first()).toBeVisible()
+    await pace.getByRole('button', { name: /find a bud/i }).click()
+    await expect(orla.getByText(`${BUYERS.pace.name} comes to you.`)).toBeVisible()
+
+    const toPace = 'wearing a red scarf, by the till'
+    await orla.getByLabel(`Message ${BUYERS.pace.name}`).fill(toPace)
+    await orla.getByRole('button', { name: /^send$/i }).click()
+    await expect(pace.getByText(toPace)).toBeVisible()
+
+    // Pace closes the tab and walks off. Orla goes back to the queue.
+    await paceCtx.close()
+    await expect(orla.getByText(/your bud dropped out/i)).toBeVisible()
+
+    // A different stranger arrives and is matched with her.
+    await quin.getByRole('button', { name: /find a bud/i }).click()
+    await expect(orla.getByText(`${BUYERS.quin.name} comes to you.`)).toBeVisible()
+
+    // The discriminating assertion: what Orla told Pace must not be on the screen
+    // she now shares with Quin, and the transcript must read as untouched.
+    await expect(orla.getByText(toPace)).toHaveCount(0)
+    await expect(
+      orla.getByText(`Say where you are standing. ${BUYERS.quin.name} sees it straight away.`),
+    ).toBeVisible()
+    await expect(orla.getByRole('listitem')).toHaveCount(0)
+
+    // And the channel really is live again on that same socket, not just blank.
+    const toQuin = 'still here, still red scarf'
+    await orla.getByLabel(`Message ${BUYERS.quin.name}`).fill(toQuin)
+    await orla.getByRole('button', { name: /^send$/i }).click()
+    await expect(quin.getByText(toQuin)).toBeVisible()
+    // Quin never sees the conversation he was not part of.
+    await expect(quin.getByText(toPace)).toHaveCount(0)
+  } finally {
+    await Promise.all(contexts.map((context) => context.close().catch(() => {})))
   }
 })
 

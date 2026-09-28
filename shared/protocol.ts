@@ -135,6 +135,13 @@ export interface WelcomeMessage {
    * policy.
    */
   expiry: ExpiryWindows
+  /**
+   * How long a half-confirmed handoff sits before it becomes a dispute — see
+   * `PickupConfirmedMessage.disputeAt`. Sent for the same reason `expiry` is:
+   * so a client (this repo's smoke test included) can tell a correct deadline
+   * from a broken one without hardcoding a guess at the server's policy.
+   */
+  pickupTimeoutMs: number
 }
 
 /**

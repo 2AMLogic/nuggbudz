@@ -232,6 +232,7 @@ export class NuggPool extends DurableObject<Env> {
       waiting: this.withinRadius(origin).length,
       user: { id: userId, name },
       expiry: this.windows,
+      pickupTimeoutMs: this.pickupTimeoutMs,
     })
 
     return new Response(null, { status: 101, webSocket: client })

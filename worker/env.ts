@@ -12,6 +12,12 @@ export interface Env {
   POOL_UPGRADE_WINDOW_SECONDS: string
   /** How long a one-sided pickup confirmation waits before it is a dispute. */
   PICKUP_CONFIRM_TIMEOUT_MS?: string
+  /** Silence from a queued buyer before their entry is dropped. */
+  QUEUE_IDLE_SECONDS?: string
+  /** How far ahead of that drop the buyer is warned. */
+  QUEUE_WARN_LEAD_SECONDS?: string
+  /** How long a match nobody has confirmed at all waits before it is cancelled. */
+  MATCH_CONFIRM_SECONDS?: string
   /**
    * Google OAuth client credentials. Optional so a checkout without them still
    * boots — the auth routes answer 503 instead of the Worker failing to start.

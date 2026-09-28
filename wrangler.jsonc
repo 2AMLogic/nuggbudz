@@ -50,6 +50,15 @@
     // A handoff is two taps seconds apart once the buddies are standing
     // together, so five minutes of silence from the second side means the
     // meeting did not happen — the match is disputed rather than settled.
-    "PICKUP_CONFIRM_TIMEOUT_MS": "300000"
+    "PICKUP_CONFIRM_TIMEOUT_MS": "300000",
+    // Nothing ages out without these. A queued buyer silent for
+    // QUEUE_IDLE_SECONDS is dropped, warned QUEUE_WARN_LEAD_SECONDS earlier so
+    // a ping can save them; a match neither side has confirmed inside
+    // MATCH_CONFIRM_SECONDS is cancelled. Once one side confirms, the match
+    // leaves this window and PICKUP_CONFIRM_TIMEOUT_MS owns it instead, so the
+    // two timers can never both be running on the same match.
+    "QUEUE_IDLE_SECONDS": "900",
+    "QUEUE_WARN_LEAD_SECONDS": "120",
+    "MATCH_CONFIRM_SECONDS": "600"
   }
 }

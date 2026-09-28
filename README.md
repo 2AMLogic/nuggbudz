@@ -31,6 +31,13 @@ $8.98 collected. The gross retail spread is $5.99 per pairing.
    paired. The buyer who waited longest places the order; the other walks over.
 4. Both see the same itemised settlement, down to the cent, and a pickup code.
 
+A seat in the pool is not forever. A buyer who goes quiet for 15 minutes is
+warned and then dropped, and a match nobody confirms within 10 minutes is called
+off and both halves told — otherwise you get paired with somebody who left ten
+minutes ago. Both windows are Worker vars (`QUEUE_IDLE_SECONDS`,
+`QUEUE_WARN_LEAD_SECONDS`, `MATCH_CONFIRM_SECONDS` in `wrangler.jsonc`), and the
+client pings to hold its place while you wait.
+
 ## Architecture
 
 ```

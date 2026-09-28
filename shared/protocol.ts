@@ -1,4 +1,5 @@
 import type { BuyerRole, BuyerShare, Settlement } from './economics'
+import type { ExpiryWindows } from './expiry'
 import { normalizePickupCode } from './pickup'
 
 /** Wire protocol version. Bump on any breaking message change. */
@@ -22,7 +23,10 @@ export interface CancelMessage {
   type: 'cancel'
 }
 
-/** Keeps the socket warm and lets the client measure round-trip latency. */
+/**
+ * Keeps the socket warm, lets the client measure round-trip latency, and — the
+ * part the server cares about — refreshes the sender's place in the queue.
+ */
 export interface PingMessage {
   type: 'ping'
   at: number
@@ -54,6 +58,12 @@ export interface WelcomeMessage {
     id: string
     name: string
   }
+  /**
+   * The liveness windows this cell enforces. Sent so a client knows how often it
+   * has to ping to keep its seat, rather than hardcoding a guess at the server's
+   * policy.
+   */
+  expiry: ExpiryWindows
 }
 
 /**
@@ -141,6 +151,40 @@ export interface PickupDisputedMessage {
   reason: 'timeout' | 'buddy_left'
 }
 
+/** You have gone quiet and are about to lose your place. A ping keeps it. */
+export interface QueueExpiringMessage {
+  type: 'queue_expiring'
+  /** Epoch millis your entry is dropped unless the server hears from you. */
+  expiresAt: number
+}
+
+/** You were dropped from the queue, and why. You are no longer waiting. */
+export interface QueueExpiredMessage {
+  type: 'queue_expired'
+  reason: 'idle'
+  /** The idle window you exceeded, so the client can say so in real units. */
+  idleMs: number
+}
+
+/**
+ * Neither side confirmed the match in time, so it is off.
+ *
+ * Distinct from `pickup_disputed`: this is the case where *nobody* turned up,
+ * so there is no claim to adjudicate. The moment one side confirms, the match
+ * leaves this timer and a one-sided no-show becomes a dispute instead.
+ */
+export interface MatchExpiredMessage {
+  type: 'match_expired'
+  matchId: string
+  reason: 'unconfirmed'
+  /**
+   * Cents returned to you. Always zero while no money is captured before
+   * pickup; the field is here so a cancellation can never be reported without
+   * saying what happened to the payment.
+   */
+  refundedCents: number
+}
+
 export interface PongMessage {
   type: 'pong'
   at: number
@@ -171,6 +215,9 @@ export type ServerMessage =
   | PickupConfirmedMessage
   | PickupCompleteMessage
   | PickupDisputedMessage
+  | QueueExpiringMessage
+  | QueueExpiredMessage
+  | MatchExpiredMessage
   | PongMessage
   | ErrorMessage
 

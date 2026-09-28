@@ -109,6 +109,22 @@ describe('reviewChatText — the length cap', () => {
     expect(result).not.toContain('�')
   })
 
+  it('keeps a combining mark attached to its base letter', () => {
+    // 'e' + combining acute accent (U+0301) is two code points but one
+    // grapheme cluster — the two code points push this message to exactly
+    // MAX_CHAT_CHARS code points, so it must survive whole rather than being
+    // refused or having the accent stranded by a code-point-only cap.
+    const combining = `e${String.fromCharCode(0x0301)}`
+    const text = `${'x'.repeat(MAX_CHAT_CHARS - 2)}${combining}`
+    expect(countCodePoints(text)).toBe(MAX_CHAT_CHARS)
+    expect(accepted(text)).toBe(text)
+  })
+
+  it('strips a lone surrogate, which decodes to U+FFFD wherever it lands', () => {
+    const loneHighSurrogate = String.fromCharCode(0xd800)
+    expect(accepted(`by the ${loneHighSurrogate}door`)).toBe('by the door')
+  })
+
   it('measures the message a person sent, not the padding around it', () => {
     // Zero-width padding and whitespace are removed before the cap is judged, so
     // this is a short message wearing a long costume.

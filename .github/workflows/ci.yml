@@ -45,10 +45,19 @@ jobs:
       # a checkout is in. The id is `BUYERS.op` in scripts/smoke.mjs, and
       # SMOKE_REQUIRE_ADMIN below turns "no operator configured" from a skip into
       # a failure, so a drift between the two cannot quietly delete this lane.
+      # Every client shares one rate-limit bucket here, and only here: the limiter
+      # keys on `CF-Connecting-IP`, which a local `pnpm dev` never sets, so all of
+      # them fall into the `unknown` bucket. The production figure (30 upgrades a
+      # minute, wrangler.jsonc) is sized for a venue NAT with a handful of phones
+      # on it; a suite that opens several dozen sockets a minute from one process
+      # is not that shape, and hitting the limit surfaces as a socket that closes
+      # rather than as a refusal you can read — "Lost the connection. Try again."
+      # Raised for this step's server only. Never `wrangler.jsonc`.
       - run: |
           {
             echo 'ALLOW_UNCHARGED_PAIRING="1"'
             echo 'OPERATOR_USER_IDS="5eed5eed-0000-4000-8000-000000000033"'
+            echo 'POOL_UPGRADE_LIMIT="300"'
           } > .dev.vars
       # Live pairing across two WebSocket clients, against the real Worker.
       - run: pnpm dev --port 5199 &
@@ -87,7 +96,19 @@ jobs:
       # Same reasoning as the `smoke` job: this suite is about the screen, not the
       # money, so it opts out of charging explicitly rather than relying on the
       # absence of secrets -- which now refuses to pair at all.
-      - run: echo 'ALLOW_UNCHARGED_PAIRING="1"' > .dev.vars
+      # Every client shares one rate-limit bucket here, and only here: the limiter
+      # keys on `CF-Connecting-IP`, which a local `pnpm dev` never sets, so all of
+      # them fall into the `unknown` bucket. The production figure (30 upgrades a
+      # minute, wrangler.jsonc) is sized for a venue NAT with a handful of phones
+      # on it; a suite that opens several dozen sockets a minute from one process
+      # is not that shape, and hitting the limit surfaces as a socket that closes
+      # rather than as a refusal you can read — "Lost the connection. Try again."
+      # Raised for this step's server only. Never `wrangler.jsonc`.
+      - run: |
+          {
+            echo 'ALLOW_UNCHARGED_PAIRING="1"'
+            echo 'POOL_UPGRADE_LIMIT="300"'
+          } > .dev.vars
       # Drives the real UI in two browser contexts; playwright.config.ts's
       # webServer boots `pnpm dev` itself, so there is no separate wait-on step.
       - run: pnpm test:e2e

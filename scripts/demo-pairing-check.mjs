@@ -128,6 +128,11 @@ function open(name, identity) {
         setTimeout(() => reject(new Error(`${name}: timed out waiting for ${type}`)), ms)
       })
     },
+    /** Has a message of this type turned up by now? Used to assert absence. */
+    async settles(type, ms = 600) {
+      await new Promise((r) => setTimeout(r, ms))
+      return inbox.some((m) => m.type === type)
+    },
     join(dealId = 'mcd-nuggets-20') {
       ws.send(JSON.stringify({ type: 'join', dealId }))
     },
@@ -197,6 +202,33 @@ if (!demo) {
 
   a.join()
   await a.expect('waiting')
+
+  // --- a second tab of one browser is one buyer, and is told so (#101) ---
+  // The cost the operator accepted, exercised rather than described: the same
+  // cookie is the same person, so this socket cannot queue beside the one it is
+  // sharing an identity with, and it is told which tab it is already in.
+  const sameBrowser = open('Robb', jarA)
+  await sameBrowser.opened
+  const sameBrowserWelcome = await sameBrowser.expect('welcome')
+  check(
+    'a second tab of one browser is the same identity, not a new one',
+    sameBrowserWelcome.user?.id === welcome.user.id,
+    `${sameBrowserWelcome.user?.id} vs ${welcome.user.id}`,
+  )
+  sameBrowser.join()
+  const refused = await sameBrowser.expect('error')
+  check(
+    'a second tab is refused while the first is queued, with a message saying which tab',
+    refused.code === 'already_waiting' && /another tab or window/i.test(refused.message ?? ''),
+    `${refused.code}: ${refused.message}`,
+  )
+  check(
+    'and takes no seat at all',
+    (await sameBrowser.settles('waiting')) === false,
+    JSON.stringify(sameBrowser.inbox.map((m) => m.type)),
+  )
+  sameBrowser.ws.close()
+
   b.join()
   const [ma, mb] = await Promise.all([a.expect('matched'), b.expect('matched')])
 
@@ -243,21 +275,47 @@ if (!demo) {
   )
   check('and the receiver still never gets it', mb.pickupCode === null, `${mb.pickupCode}`)
 
-  // --- a second tab of one browser is one buyer, and is told so (#101) ---
-  // The cost the operator accepted, exercised rather than described: the same
-  // cookie is the same person, so this socket cannot queue beside the one it is
-  // sharing an identity with.
-  const sameBrowser = open('Robb', jarA)
-  await sameBrowser.opened
-  await sameBrowser.expect('welcome')
-  sameBrowser.join()
-  const refused = await sameBrowser.expect('error')
+  // --- the native-camera path, at the protocol level (#101) ---
+  // A phone's own camera app opens the handoff link in a NEW TAB, which is a new
+  // socket. This is what has to happen on that socket: the server recognises the
+  // cookie as the same buyer and seats it in the live match, as the same role,
+  // with no `join` sent and nothing confirmed. Without the sticky identity it
+  // would arrive as a stranger the match has never heard of, which is the whole
+  // reason the cookie exists.
+  const scannerTab = open('Dana', jarB)
+  await scannerTab.opened
+  const scannerWelcome = await scannerTab.expect('welcome')
   check(
-    'a second tab of one browser is refused, with a message saying which tab',
-    refused.code === 'already_matched' && /another tab or window/i.test(refused.message ?? ''),
-    `${refused.code}: ${refused.message}`,
+    'a new tab of the receiver’s browser is the same identity',
+    scannerWelcome.user?.id === welcomeB.user.id,
+    `${scannerWelcome.user?.id} vs ${welcomeB.user.id}`,
   )
-  sameBrowser.ws.close()
+  const adopted = await scannerTab.expect('matched')
+  check(
+    'and is seated in the same live match, without sending a join',
+    adopted.matchId === ma.matchId && adopted.role === 'receiver',
+    `${adopted.matchId} as ${adopted.role}`,
+  )
+  check(
+    'the receiver’s second tab is still never handed the code',
+    adopted.pickupCode === null,
+    `${adopted.pickupCode}`,
+  )
+  check(
+    'and opening it confirmed nothing on its own',
+    (await scannerTab.settles('pickup_confirmed')) === false &&
+      [a, b].every((s) => s.inbox.every((m) => m.type !== 'pickup_confirmed')),
+    JSON.stringify([a, b].map((s) => s.inbox.map((m) => m.type))),
+  )
+  // And closing it does not tear the match down: a match is abandoned only when
+  // the last socket on that side goes.
+  scannerTab.ws.close()
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  check(
+    'closing the tab the link opened leaves the match alone',
+    [a, b].every((s) => s.inbox.every((m) => m.type !== 'buddy_left')),
+    JSON.stringify([a, b].map((s) => s.inbox.map((m) => m.type))),
+  )
 
   // --- a demo handoff completes on screen, and books nothing ---
   // The demo is still worth running on a stage: the pair must get all the way to

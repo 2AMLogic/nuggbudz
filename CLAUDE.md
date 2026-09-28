@@ -257,7 +257,10 @@ looks at. Run all three before calling a change done.
 
 Pairing needs `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars` on a checkout with no
 Stripe keys — otherwise a join is refused rather than paired for free, which is
-the point. `pnpm payment-gate` is the fourth lane: it asserts whichever money
+the point. `pnpm test:e2e` also needs `POOL_UPGRADE_LIMIT="300"` there: the
+limiter keys on `CF-Connecting-IP`, which `pnpm dev` never sets, so locally every
+client shares one bucket and the suite trips a limit sized for a venue NAT —
+visible as "Lost the connection. Try again.", not as a refusal. `pnpm payment-gate` is the fourth lane: it asserts whichever money
 mode the server it is pointed at reports, and it is the only thing that
 exercises the charged path through the real Durable Object.
 

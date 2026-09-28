@@ -146,6 +146,12 @@ pairing, put `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars`; without it (and
 without Stripe secrets) a join is refused with `payment_unavailable` rather than
 quietly pairing for free.
 
+Add `POOL_UPGRADE_LIMIT="300"` there too before running `pnpm test:e2e`. The
+socket limiter keys on `CF-Connecting-IP`, which `pnpm dev` never sets, so every
+local client shares the `unknown` bucket and a suite that opens several dozen
+sockets a minute trips a limit sized for a venue NAT. It surfaces as "Lost the
+connection. Try again." rather than as a refusal you can read.
+
 ```bash
 pnpm test             # pure logic: settlement, geo, matchmaking, auth, protocol
 pnpm dev --port 5199  # in one shell…

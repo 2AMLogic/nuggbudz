@@ -45,6 +45,14 @@ const BUYERS = {
    * photographed the symbol across the table and tapped the link.
    */
   bystander: { sid: sessionId('e2e-hand-c'), userId: accountId(3), name: 'Nils' },
+  /**
+   * The second test's own pair. Distinct accounts rather than reusing the first
+   * test's: since #101 a second socket of one identity is *refused* rather than
+   * quietly queued, so a context whose close has not landed yet would turn a
+   * reused account into a flaky refusal instead of a slow join.
+   */
+  closerOrderer: { sid: sessionId('e2e-hand-d'), userId: accountId(4), name: 'Elsa' },
+  closerReceiver: { sid: sessionId('e2e-hand-e'), userId: accountId(5), name: 'Bram' },
 } as const
 
 type Buyer = (typeof BUYERS)[keyof typeof BUYERS]
@@ -294,8 +302,8 @@ test('closing the tab the link opened does not tear the match down', async ({ br
   // side of a match, and a disconnect used to mean "my buddy walked away" —
   // unconditionally. Closing the tab a camera opened would have requeued the
   // orderer, or disputed the match outright once somebody had confirmed.
-  const first = await openPromptless(browser, BUYERS.orderer)
-  const second = await openPromptless(browser, BUYERS.receiver)
+  const first = await openPromptless(browser, BUYERS.closerOrderer)
+  const second = await openPromptless(browser, BUYERS.closerReceiver)
   const contexts = [first.context, second.context]
 
   try {
@@ -303,7 +311,7 @@ test('closing the tab the link opened does not tear the match down', async ({ br
     await expect(first.page.getByText(/looking for a bud/i)).toBeVisible()
     await second.page.getByRole('button', { name: /find a bud/i }).click()
     await expect(
-      first.page.getByText(`You order the box. ${BUYERS.receiver.name} comes to you.`),
+      first.page.getByText(`You order the box. ${BUYERS.closerReceiver.name} comes to you.`),
     ).toBeVisible()
 
     const code = await first.page.getByText(/^[A-Z0-9]{6}$/).innerText()

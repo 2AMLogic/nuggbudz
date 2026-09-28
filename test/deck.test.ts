@@ -54,6 +54,9 @@ function latestDeck(): { path: string; dir: string; text: string } {
 const deck = latestDeck()
 const ledger = buildLedger()
 
+/** `32/32 end-to-end checks` and friends — the shape #46 removed from the deck. */
+const PINNED_CHECK_COUNT = /\b\d+(?:\/\d+)?\*{0,2} end-to-end checks?/i
+
 /**
  * Live prose around the deck: the briefs, the refs, and the current version's
  * speaker notes. Superseded version dirs and critic siblings are excluded —
@@ -105,6 +108,25 @@ describe('pitch deck figures', () => {
     // red (#46). Whether the checks pass is `pnpm smoke`'s job, not the deck's.
     expect(countSmokeChecks(smokeSource)).toBeGreaterThan(0)
     expect(deck.text).toMatch(/every\*{0,2} end-to-end check passes/i)
-    expect(deck.text).not.toMatch(/\b\d+\/\d+\*{0,2} end-to-end checks?/i)
+    expect(deck.text).not.toMatch(PINNED_CHECK_COUNT)
+  })
+
+  it('pins no check count in the live prose either', () => {
+    // #46 unpinned the slide but left BRIEF.md free to keep its own copy, which
+    // it did — stale by more than 4× before anyone noticed (#47), because the
+    // orphan scan above only recognises money, percent and ratio shapes. This
+    // is the same negative assertion as the deck's, no count attached: the
+    // brief is the drafter's contract, so a number here becomes a number on the
+    // next revision's slide.
+    const pinned = supporting
+      .filter((file) => PINNED_CHECK_COUNT.test(file.text))
+      .map((file) => file.name)
+
+    expect(
+      pinned,
+      'Live pitch prose pins an end-to-end check count. The count moves on\n' +
+        'nearly every merge, so say the checks pass and name no number —\n' +
+        'see "Why the deck does not quote a check count" in refs/smoke-runs.md.\n',
+    ).toEqual([])
   })
 })

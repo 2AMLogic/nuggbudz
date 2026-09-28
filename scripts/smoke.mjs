@@ -46,35 +46,46 @@ const check = (name, ok, extra = '') => {
  */
 const sessionId = (label) => label.padEnd(43, '0').slice(0, 43)
 
+/**
+ * A seeded account id, shaped like a real one.
+ *
+ * `users.id` is a `crypto.randomUUID()`, and the ledger books money only against
+ * an id that could have come out of a sign-in — anything else is refused rather
+ * than booked (`shared/identity.ts`). So these fixtures are UUIDs rather than
+ * readable labels; the buyer's name is what the output shows anyway. Numbered
+ * rather than random so a re-run seeds the same ids as the last one.
+ */
+const accountId = (n) => `5eed5eed-0000-4000-8000-${String(n).padStart(12, '0')}`
+
 const BUYERS = {
-  robb: { sid: sessionId('smoke-robb'), userId: 'smoke-user-robb', name: 'Robb' },
-  dana: { sid: sessionId('smoke-dana'), userId: 'smoke-user-dana', name: 'Dana' },
-  far: { sid: sessionId('smoke-faraway'), userId: 'smoke-user-faraway', name: 'Faraway' },
-  bad: { sid: sessionId('smoke-bad'), userId: 'smoke-user-bad', name: 'Bad' },
+  robb: { sid: sessionId('smoke-robb'), userId: accountId(1), name: 'Robb' },
+  dana: { sid: sessionId('smoke-dana'), userId: accountId(2), name: 'Dana' },
+  far: { sid: sessionId('smoke-faraway'), userId: accountId(3), name: 'Faraway' },
+  bad: { sid: sessionId('smoke-bad'), userId: accountId(4), name: 'Bad' },
   // Same cell, too far apart to pair, purely to prove the cell-wide roster
   // broadcast without either of them ever actually pairing up.
-  kim: { sid: sessionId('smoke-kim'), userId: 'smoke-user-kim', name: 'Kim' },
-  lee: { sid: sessionId('smoke-lee'), userId: 'smoke-user-lee', name: 'Lee' },
+  kim: { sid: sessionId('smoke-kim'), userId: accountId(5), name: 'Kim' },
+  lee: { sid: sessionId('smoke-lee'), userId: accountId(6), name: 'Lee' },
   // Signed in only to be signed out again.
-  doomed: { sid: sessionId('smoke-doomed'), userId: 'smoke-user-doomed', name: 'Doomed' },
+  doomed: { sid: sessionId('smoke-doomed'), userId: accountId(7), name: 'Doomed' },
   // The pickup handshake pair, and the pair that never finishes one.
-  gus: { sid: sessionId('smoke-gus'), userId: 'smoke-user-gus', name: 'Gus' },
-  hana: { sid: sessionId('smoke-hana'), userId: 'smoke-user-hana', name: 'Hana' },
-  ivy: { sid: sessionId('smoke-ivy'), userId: 'smoke-user-ivy', name: 'Ivy' },
-  jed: { sid: sessionId('smoke-jed'), userId: 'smoke-user-jed', name: 'Jed' },
+  gus: { sid: sessionId('smoke-gus'), userId: accountId(8), name: 'Gus' },
+  hana: { sid: sessionId('smoke-hana'), userId: accountId(9), name: 'Hana' },
+  ivy: { sid: sessionId('smoke-ivy'), userId: accountId(10), name: 'Ivy' },
+  jed: { sid: sessionId('smoke-jed'), userId: accountId(11), name: 'Jed' },
   // The pair that never sends a coordinate: the promptless path.
-  kai: { sid: sessionId('smoke-kai'), userId: 'smoke-user-kai', name: 'Kai' },
-  lex: { sid: sessionId('smoke-lex'), userId: 'smoke-user-lex', name: 'Lex' },
+  kai: { sid: sessionId('smoke-kai'), userId: accountId(12), name: 'Kai' },
+  lex: { sid: sessionId('smoke-lex'), userId: accountId(13), name: 'Lex' },
   // Liveness: one buyer who keeps pinging, one who goes quiet, and a pair who
   // match and then never confirm.
-  pinger: { sid: sessionId('smoke-pinger'), userId: 'smoke-user-pinger', name: 'Pinger' },
-  stale: { sid: sessionId('smoke-stale'), userId: 'smoke-user-stale', name: 'Stale' },
-  slowOne: { sid: sessionId('smoke-slow-one'), userId: 'smoke-user-slow-one', name: 'Slow One' },
-  slowTwo: { sid: sessionId('smoke-slow-two'), userId: 'smoke-user-slow-two', name: 'Slow Two' },
+  pinger: { sid: sessionId('smoke-pinger'), userId: accountId(14), name: 'Pinger' },
+  stale: { sid: sessionId('smoke-stale'), userId: accountId(15), name: 'Stale' },
+  slowOne: { sid: sessionId('smoke-slow-one'), userId: accountId(16), name: 'Slow One' },
+  slowTwo: { sid: sessionId('smoke-slow-two'), userId: accountId(17), name: 'Slow Two' },
   // A pair where exactly one side confirms: the expiry sweep must leave them to
   // the dispute path.
-  halfOne: { sid: sessionId('smoke-half-one'), userId: 'smoke-user-half-one', name: 'Half One' },
-  halfTwo: { sid: sessionId('smoke-half-two'), userId: 'smoke-user-half-two', name: 'Half Two' },
+  halfOne: { sid: sessionId('smoke-half-one'), userId: accountId(18), name: 'Half One' },
+  halfTwo: { sid: sessionId('smoke-half-two'), userId: accountId(19), name: 'Half Two' },
 }
 
 /** Write the sessions into the dev server's KV namespace, in one CLI call. */

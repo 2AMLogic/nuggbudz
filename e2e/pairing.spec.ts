@@ -29,10 +29,17 @@ const DEAL_ID = 'mcd-nuggets-20'
 /** Session ids are 43-char base64url strings; padded so every test run reuses the same keys. */
 const sessionId = (label: string): string => label.padEnd(43, '0').slice(0, 43)
 
+/**
+ * A seeded account id, shaped like a real one: `users.id` is a
+ * `crypto.randomUUID()`, and the ledger refuses to book money against an id that
+ * could not have come out of a sign-in (`shared/identity.ts`).
+ */
+const accountId = (n: number): string => `e2ee2ee2-0000-4000-8000-${String(n).padStart(12, '0')}`
+
 const BUYERS = {
-  nova: { sid: sessionId('e2e-nova'), userId: 'e2e-user-nova', name: 'Nova' },
-  remy: { sid: sessionId('e2e-remy'), userId: 'e2e-user-remy', name: 'Remy' },
-  ivy: { sid: sessionId('e2e-ivy'), userId: 'e2e-user-ivy', name: 'Ivy' },
+  nova: { sid: sessionId('e2e-nova'), userId: accountId(1), name: 'Nova' },
+  remy: { sid: sessionId('e2e-remy'), userId: accountId(2), name: 'Remy' },
+  ivy: { sid: sessionId('e2e-ivy'), userId: accountId(3), name: 'Ivy' },
 } as const
 
 type Buyer = (typeof BUYERS)[keyof typeof BUYERS]

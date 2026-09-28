@@ -88,3 +88,28 @@
     animation: none;
   }
 }
+
+/*
+ * The cell map: same till-roll palette as the rest of the app, not a stock
+ * map widget. The tile layer is desaturated in CSS rather than swapped for a
+ * custom tile source, so it stays a drop-in Leaflet basemap.
+ */
+.leaflet-container {
+  background: var(--color-paper);
+  font-family: var(--font-body);
+}
+
+.cell-map-tiles {
+  filter: grayscale(1) contrast(1.05) brightness(1.04) sepia(0.06);
+}
+
+/* `dragging: false` etc. already keeps the map from grabbing page scroll on
+   phones, but the default cursor still implies it is draggable. */
+.leaflet-container.leaflet-touch {
+  cursor: default;
+}
+
+.cell-map-dot {
+  background: transparent;
+  border: none;
+}

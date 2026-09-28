@@ -1,23 +1,53 @@
 import { DurableObject } from 'cloudflare:workers'
-import { findDeal } from '../shared/deals'
+import { findDeal, isDealOffered } from '../shared/deals'
 import type { BuyerRole, Settlement } from '../shared/economics'
 import { settle } from '../shared/economics'
+import {
+  DEFAULT_EXPIRY_WINDOWS,
+  type ExpiryWindows,
+  nextAlarmAt,
+  type OpenMatch,
+  planSweep,
+  type QueueEntry,
+  queueDeadline,
+  resolveWindows,
+} from '../shared/expiry'
+import { type LatLng, snapToGrid } from '../shared/geo'
+import { type LocationSource, parseCoords, parseLocationSource } from '../shared/location'
 import { type Candidate, findMatch } from '../shared/matchmaker'
 import {
+  bothConfirmed,
+  confirmedRole,
+  DEFAULT_PICKUP_TIMEOUT_MS,
+  disputeDeadline,
+  generatePickupCode,
+  isPickupDisputed,
+  noConfirmations,
+  type PickupConfirmations,
+  pendingRole,
+} from '../shared/pickup'
+import {
+  type JoinMessage,
   PROTOCOL_VERSION,
   type ProtocolErrorCode,
   parseClientMessage,
   type ServerMessage,
 } from '../shared/protocol'
-import { type Env, intVar, stripeConfigured } from './env'
+import { parseSauceSelection, type SauceSelection } from '../shared/sauces'
+import { boolVar, type Env, intVar, stripeConfigured } from './env'
+import { writeSettledMatch } from './ledger'
 import {
+  allLegsPaid,
   applyPaymentOutcome,
+  codeAtMatchTime,
+  collectedCents,
   openLedger,
+  type PaymentDisposition,
   type PaymentLedger,
   type PaymentLeg,
   parsePaymentOutcome,
+  paymentDisposition,
   paymentIntentSpecs,
-  pickupCode,
   refundIdempotencyKey,
   unwindLedger,
 } from './lib/payments'
@@ -29,46 +59,106 @@ import { createPaymentIntent, refundPaymentIntent, type StripeClientConfig } fro
  */
 export const INTERNAL_PAYMENT_PATH = '/__internal/payment'
 
-/** Storage key for the cell name, which the DO needs for PaymentIntent metadata. */
-const CELL_KEY = 'cell'
-
-interface BuyerIdentity {
+/**
+ * Who is on the other end of a socket.
+ *
+ * Identity and cell are both set by the Worker at upgrade time and never from a
+ * client message, so a connection cannot rename itself or move market.
+ */
+interface Principal {
   connId: string
+  userId: string
   name: string
+  cell: string
+  /**
+   * The location the Worker resolved for this socket, and the rung it came from.
+   * A join with no coordinates of its own — the promptless default — is placed
+   * here, which is also the coordinate the cell was derived from.
+   */
+  origin: LatLng
+  locationSource: LocationSource
+}
+
+interface BuyerIdentity extends Principal {
   dealId: string
   lat: number
   lng: number
   joinedAt: number
+  /**
+   * The two sauces this buyer asked for, validated against the catalogue before
+   * it was ever put here, or null if they picked none. Shown to their buddy,
+   * because one of the two is about to stand at a counter and order.
+   */
+  sauces: SauceSelection | null
 }
 
-/**
- * `matched` means paired and owing money; `cleared` means both halves paid and
- * the pickup code released. They are separate states because the difference
- * between them is the difference between a buyer who can collect a box and one
- * who cannot, and collapsing them is how a half-paid match shows a pickup code.
- */
 type ConnState =
-  | { status: 'idle'; connId: string }
-  | ({ status: 'waiting' } & BuyerIdentity)
+  | ({ status: 'idle' } & Principal)
+  | ({
+      status: 'waiting'
+      /** Last sign of life from this buyer: the join, or their latest ping. */
+      lastSeenAt: number
+      /** Whether they have been told they are about to be dropped. */
+      warned: boolean
+    } & BuyerIdentity)
   | ({ status: 'matched'; matchId: string; role: BuyerRole } & BuyerIdentity)
-  | ({ status: 'cleared'; matchId: string; role: BuyerRole } & BuyerIdentity)
 
 type WaitingState = Extract<ConnState, { status: 'waiting' }>
-type PairedState = Extract<ConnState, { status: 'matched' | 'cleared' }>
+type MatchedState = Extract<ConnState, { status: 'matched' }>
+
+/** One buyer as the match record remembers them, independent of their socket. */
+interface MatchBuyer {
+  connId: string
+  userId: string
+  name: string
+}
 
 interface MatchRecord {
   matchId: string
   dealId: string
+  cell: string
   createdAt: number
-  ordererConnId: string
-  receiverConnId: string
   distanceMeters: number
-  /** Absent only for a match made while Stripe is unconfigured. */
+  orderer: MatchBuyer
+  receiver: MatchBuyer
+  /**
+   * Random, and deliberately not derived from `matchId`: the match id is sent to
+   * both buddies, so a derived code would prove nothing about having met.
+   */
+  pickupCode: string
+  confirmations: PickupConfirmations
+  /** `pending` until both sides confirm, or until one side runs out of time. */
+  status: 'pending' | 'complete' | 'disputed'
+  /** The split as computed at match time; the ledger writes exactly this. */
+  settlement: Settlement
+  settledAt: number | null
+  disputedAt: number | null
+  /**
+   * How this match is paid for, decided once and written before either buddy is
+   * told they are matched. Persisted rather than recomputed so the answer cannot
+   * change underneath a live match when a secret is rotated — and so the window
+   * between `matched` and the first PaymentIntent is not a window in which the
+   * pickup gate is open.
+   */
+  disposition: PaymentDisposition
+  /** The charges, once opened. Absent for every disposition but `charge`. */
   ledger?: PaymentLedger
 }
 
-function isPaired(state: ConnState): state is PairedState {
-  return state.status === 'matched' || state.status === 'cleared'
+/**
+ * Is this match's pickup code released yet?
+ *
+ * The one question that gates both the code itself and `confirm_pickup`, and
+ * therefore the only route to a D1 ledger row. A `charge` match answers false
+ * until the ledger says both halves actually succeeded, so neither a half-paid
+ * nor an unpaid match can reach a code or a settled row.
+ *
+ * A record from before this field existed has no disposition, which answers
+ * false — the fail-closed direction.
+ */
+function pickupUnlocked(record: MatchRecord): boolean {
+  if (codeAtMatchTime(record.disposition)) return true
+  return record.ledger !== undefined && allLegsPaid(record.ledger)
 }
 
 /**
@@ -89,36 +179,104 @@ export class NuggPool extends DurableObject<Env> {
     return intVar(this.env.MATCH_RADIUS_METERS, 800)
   }
 
+  private get pickupTimeoutMs(): number {
+    return intVar(this.env.PICKUP_CONFIRM_TIMEOUT_MS, DEFAULT_PICKUP_TIMEOUT_MS)
+  }
+
+  /** Liveness policy for this cell, read fresh so a var change takes effect. */
+  private get windows(): ExpiryWindows {
+    const ms = (raw: string | undefined, fallbackMs: number) =>
+      intVar(raw, Math.round(fallbackMs / 1_000)) * 1_000
+    return resolveWindows({
+      queueIdleMs: ms(this.env.QUEUE_IDLE_SECONDS, DEFAULT_EXPIRY_WINDOWS.queueIdleMs),
+      queueWarnLeadMs: ms(this.env.QUEUE_WARN_LEAD_SECONDS, DEFAULT_EXPIRY_WINDOWS.queueWarnLeadMs),
+      matchTimeoutMs: ms(this.env.MATCH_CONFIRM_SECONDS, DEFAULT_EXPIRY_WINDOWS.matchTimeoutMs),
+    })
+  }
+
+  /**
+   * The Stripe client for this cell, or null when payments are not configured.
+   *
+   * Read fresh each time rather than cached in a field: a Durable Object can live
+   * across a secret rotation, and a stale null here would be a cell that quietly
+   * stopped taking money.
+   */
   private get stripe(): StripeClientConfig | null {
-    return stripeConfigured(this.env) ? { secretKey: this.env.STRIPE_SECRET_KEY } : null
+    if (!stripeConfigured(this.env)) return null
+    const apiBase = this.env.STRIPE_API_BASE
+    return {
+      secretKey: this.env.STRIPE_SECRET_KEY,
+      ...(apiBase !== undefined && apiBase.length > 0 ? { apiBase } : {}),
+    }
+  }
+
+  /**
+   * How a pair would be paid for. Called with the real pair at match time, and
+   * with one buyer standing in for both at join time — a buyer nobody could
+   * charge should be told so before they wait in a queue for nothing.
+   *
+   * The single decision both the Stripe call and the pickup-code release read.
+   */
+  private dispositionFor(userIds: Record<BuyerRole, string>): PaymentDisposition {
+    return paymentDisposition({
+      stripeConfigured: stripeConfigured(this.env),
+      unchargedAllowed: boolVar(this.env.ALLOW_UNCHARGED_PAIRING),
+      userIds,
+    })
   }
 
   override async fetch(request: Request): Promise<Response> {
     // Two ways in: a buyer's socket, and a signature-verified Stripe event the
     // Worker forwarded here because this instance owns the match.
     if (new URL(request.url).pathname === INTERNAL_PAYMENT_PATH) {
-      return this.handlePaymentEvent(request)
+      return await this.handlePaymentEvent(request)
     }
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('expected websocket upgrade', { status: 426 })
+    }
+
+    const params = new URL(request.url).searchParams
+    // The Worker authenticates the upgrade and passes the session's identity
+    // down. Missing identity means the request did not come through that path,
+    // so refuse rather than seat an anonymous buyer.
+    const userId = params.get('userId') ?? ''
+    const name = params.get('displayName') ?? ''
+    if (userId.length === 0 || name.length === 0) {
+      return new Response('unauthenticated', { status: 401 })
+    }
+
+    // Same reasoning for the location: the Worker resolves it and passes it down,
+    // so its absence means this request did not come through that path. Refusing
+    // is better than seating a buyer at a coordinate nobody chose.
+    const origin = parseCoords({ lat: params.get('lat'), lng: params.get('lng') })
+    const locationSource = parseLocationSource(params.get('locationSource'))
+    if (origin === null || locationSource === null) {
+      return new Response('missing server-derived location', { status: 400 })
     }
 
     const { 0: client, 1: server } = new WebSocketPair()
     this.ctx.acceptWebSocket(server)
 
     const connId = crypto.randomUUID()
-    this.setState(server, { status: 'idle', connId })
+    const cell = params.get('cell') ?? ''
+    this.setState(server, {
+      status: 'idle',
+      connId,
+      userId,
+      name,
+      cell,
+      origin,
+      locationSource,
+    })
 
-    const cell = new URL(request.url).searchParams.get('cell') ?? ''
-    // Stashed because a PaymentIntent has to name the cell in its metadata:
-    // that is the only breadcrumb the stateless webhook route can follow back
-    // to this instance.
-    await this.ctx.storage.put(CELL_KEY, cell)
     this.send(server, {
       type: 'welcome',
       protocol: PROTOCOL_VERSION,
       cell,
+      locationSource,
       waiting: this.waitingStates().length,
+      user: { id: userId, name },
+      expiry: this.windows,
     })
 
     return new Response(null, { status: 101, webSocket: client })
@@ -138,15 +296,115 @@ export class NuggPool extends DurableObject<Env> {
 
     switch (msg.type) {
       case 'ping':
+        this.refreshLiveness(ws)
         this.send(ws, { type: 'pong', at: msg.at })
         return
       case 'cancel':
-        this.handleCancel(ws)
+        await this.handleCancel(ws)
+        return
+      case 'confirm_pickup':
+        await this.handleConfirmPickup(ws, msg.code)
         return
       case 'join':
-        await this.handleJoin(ws, msg.name, msg.dealId, msg.lat, msg.lng)
+        await this.handleJoin(ws, msg)
         return
     }
+  }
+
+  /**
+   * The one alarm this cell gets, shared by the two deadlines a match can be
+   * under and by the queue's idle timer.
+   *
+   * The dispute sweep runs first, and that ordering is load-bearing: a match one
+   * side has confirmed must become a dispute, never an expiry cancellation, so
+   * it is taken out of contention before the expiry sweep looks at the market.
+   */
+  override async alarm(): Promise<void> {
+    const now = Date.now()
+    for (const record of (await this.matchRecords()).values()) {
+      if (record.status !== 'pending') continue
+      if (!isPickupDisputed(record.confirmations, now, this.pickupTimeoutMs)) continue
+      await this.disputeMatch(record, now, 'timeout')
+    }
+
+    await this.sweepExpired(now)
+    await this.scheduleSweep()
+  }
+
+  /**
+   * Age out whatever has gone stale in this cell: buyers who stopped answering,
+   * and matches neither side ever confirmed.
+   *
+   * One sweep per cell rather than a timer per connection — a Durable Object
+   * processes one event at a time, so a single sweep sees the whole market and
+   * two timers can never disagree about who is still queued.
+   */
+  private async sweepExpired(now: number): Promise<void> {
+    const windows = this.windows
+    const queue = this.waitingStates()
+    const plan = planSweep(
+      now,
+      queue.map(({ state }) => livenessOf(state)),
+      expirableMatches((await this.matchRecords()).values()),
+      windows,
+    )
+
+    for (const connId of plan.warn) {
+      const entry = queue.find((q) => q.state.connId === connId)
+      if (entry === undefined) continue
+      this.setState(entry.ws, { ...entry.state, warned: true })
+      this.send(entry.ws, {
+        type: 'queue_expiring',
+        expiresAt: queueDeadline(livenessOf(entry.state), windows),
+      })
+    }
+
+    for (const connId of plan.expire) {
+      const entry = queue.find((q) => q.state.connId === connId)
+      if (entry === undefined) continue
+      this.setState(entry.ws, principalOf(entry.state))
+      // Dropped, and told why: a silent removal looks like the pool losing them.
+      this.send(entry.ws, { type: 'queue_expired', reason: 'idle', idleMs: windows.queueIdleMs })
+    }
+
+    for (const matchId of plan.cancel) await this.cancelMatch(matchId)
+
+    // Anyone dropped has left everyone else's roster, so the map dots and pool
+    // counts still showing them have to be refreshed.
+    if (plan.expire.length > 0 || plan.cancel.length > 0) this.broadcastWaiting()
+  }
+
+  /**
+   * Call off a match neither side ever confirmed.
+   *
+   * Both halves go back to idle rather than the queue: at least one of them has
+   * walked away, and requeueing two still-connected buyers would just pair them
+   * with each other again on the spot. The record is deleted, unlike a dispute —
+   * nobody claimed anything, so there is nothing for a human to look at.
+   */
+  private async cancelMatch(matchId: string): Promise<void> {
+    const record = await this.ctx.storage.get<MatchRecord>(`match:${matchId}`)
+    // Whatever was collected for a box nobody turned up for goes back. This is
+    // the field `match_expired.refundedCents` was reserved for: a cancellation
+    // can never be reported without saying what happened to the money.
+    let refundedCents = 0
+    if (record?.ledger !== undefined) {
+      refundedCents = collectedCents(record.ledger)
+      const { ledger, refund } = unwindLedger(record.ledger)
+      await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, { ...record, ledger })
+      await this.refund(refund, matchId)
+    }
+
+    for (const peer of this.matchSockets(matchId)) {
+      this.setState(peer.ws, principalOf(peer.state))
+      this.send(peer.ws, {
+        type: 'match_expired',
+        matchId,
+        reason: 'unconfirmed',
+        refundedCents,
+      })
+    }
+    await this.ctx.storage.delete(`match:${matchId}`)
   }
 
   override async webSocketClose(ws: WebSocket): Promise<void> {
@@ -157,39 +415,79 @@ export class NuggPool extends DurableObject<Env> {
     await this.handleDisconnect(ws)
   }
 
-  private async handleJoin(
-    ws: WebSocket,
-    name: string,
-    dealId: string,
-    lat: number,
-    lng: number,
-  ): Promise<void> {
+  private async handleJoin(ws: WebSocket, msg: JoinMessage): Promise<void> {
+    const dealId = msg.dealId
     const state = this.getState(ws)
     if (state === null) return
     if (state.status === 'waiting') {
       this.fail(ws, 'already_waiting', 'this connection is already queued')
       return
     }
-    if (isPaired(state)) {
+    if (state.status === 'matched') {
       this.fail(ws, 'already_matched', 'this connection is already matched')
       return
     }
 
+    // This id came off a socket, so the question is "may this be chosen", not
+    // "does this exist" — a gated deal still resolves in the catalogue, and
+    // `findDeal` alone would let a hand-rolled `join` frame pair and settle on a
+    // chain the app does not offer. `unknown_deal` rather than a distinct code
+    // on purpose: which chains are gated is not a caller's to enumerate.
     const deal = findDeal(dealId)
-    if (deal === undefined) {
+    if (deal === undefined || !isDealOffered(deal.id)) {
       this.fail(ws, 'unknown_deal', `no such deal: ${dealId}`)
+      return
+    }
+
+    // Fail closed, and fail early. A pool with no Stripe secrets bound — and no
+    // operator saying that was deliberate — cannot charge anybody, so it must not
+    // seat a buyer who would be paired and then told there is no way to pay. The
+    // same decision runs again with the real pair below; this one asks it of a
+    // buyer standing alone, which is what a queue seat is a promise about.
+    if (this.dispositionFor({ orderer: state.userId, receiver: state.userId }) === 'refuse') {
+      console.error('NuggPool: refusing to queue %s — payments are not configured', state.cell)
+      this.fail(ws, 'payment_unavailable', 'this pool cannot take payments right now')
+      return
+    }
+
+    // Coordinates in the join message are the opt-in precise path; without them
+    // the socket's server-resolved origin stands. Either only ever moves a buyer
+    // within the market they were already routed to — the cell was decided at
+    // upgrade time and is not re-derived here. `parseCoords` re-validates both,
+    // and covers a socket whose attachment predates this field.
+    const fix = parseCoords(msg) ?? parseCoords(state.origin)
+    if (fix === null) {
+      this.fail(ws, 'bad_message', 'this connection has no location; reconnect')
+      return
+    }
+
+    // These ids came off a socket too, so they are checked against the catalogue
+    // rather than stored as sent — and against *this deal's* menu, because a
+    // Wendy's sauce with a McDonald's box is not an order anyone can place. The
+    // refusal deliberately does not repeat the id back: an unvalidated string is
+    // not something to echo, and which ids exist is not a caller's to enumerate.
+    const sauces = msg.sauces === undefined ? null : parseSauceSelection(msg.sauces, deal.merchant)
+    if (msg.sauces !== undefined && sauces === null) {
+      this.fail(ws, 'unknown_sauce', 'those are not two sauces on this menu')
       return
     }
 
     const identity: BuyerIdentity = {
       connId: state.connId,
-      name,
+      // The authenticated name, not anything the client sent.
+      userId: state.userId,
+      name: state.name,
+      cell: state.cell,
+      origin: state.origin,
+      locationSource: state.locationSource,
       dealId,
-      lat,
-      lng,
+      lat: fix.lat,
+      lng: fix.lng,
       joinedAt: Date.now(),
+      sauces,
     }
-    const others = this.waitingStates()
+    // A second tab is not a second buyer: never pair an account with itself.
+    const others = this.waitingStates().filter((o) => o.state.userId !== identity.userId)
     const decision = findMatch(
       toCandidate(identity),
       others.map((o) => toCandidate(o.state)),
@@ -197,9 +495,7 @@ export class NuggPool extends DurableObject<Env> {
     )
 
     if (decision === null) {
-      const waiting: WaitingState = { ...identity, status: 'waiting' }
-      this.setState(ws, waiting)
-      this.sendWaiting(ws, waiting)
+      await this.enqueue(ws, identity)
       return
     }
 
@@ -209,9 +505,7 @@ export class NuggPool extends DurableObject<Env> {
     const buddy = others.find((o) => o.state.connId === buddyConnId)
     if (buddy === undefined) {
       // Buddy vanished between the scan and here. Queue instead of pairing with a ghost.
-      const waiting: WaitingState = { ...identity, status: 'waiting' }
-      this.setState(ws, waiting)
-      this.sendWaiting(ws, waiting)
+      await this.enqueue(ws, identity)
       return
     }
 
@@ -221,19 +515,45 @@ export class NuggPool extends DurableObject<Env> {
     const selfIdentity = identity
     const buddyIdentity = identityOf(buddy.state)
 
+    const selfRole: BuyerRole = ordererIsSelf ? 'orderer' : 'receiver'
+    const buddyRole: BuyerRole = ordererIsSelf ? 'receiver' : 'orderer'
+    const ordererIdentity = ordererIsSelf ? selfIdentity : buddyIdentity
+    const receiverIdentity = ordererIsSelf ? buddyIdentity : selfIdentity
+
+    const pickupCode = generatePickupCode()
+    // Decided from the real pair, and written with the record — before either
+    // buddy is told they are matched, so there is no instant at which a
+    // chargeable match has an unlocked pickup gate.
+    const disposition = this.dispositionFor({
+      orderer: ordererIdentity.userId,
+      receiver: receiverIdentity.userId,
+    })
     await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, {
       matchId,
       dealId,
+      cell: identity.cell,
       createdAt: Date.now(),
-      ordererConnId: decision.orderer.id,
-      receiverConnId: decision.receiver.id,
       distanceMeters: decision.distanceMeters,
+      orderer: buyerOf(ordererIdentity),
+      receiver: buyerOf(receiverIdentity),
+      pickupCode,
+      confirmations: noConfirmations(),
+      status: 'pending',
+      settlement,
+      settledAt: null,
+      disputedAt: null,
+      disposition,
     })
 
-    const selfRole: BuyerRole = ordererIsSelf ? 'orderer' : 'receiver'
-    const buddyRole: BuyerRole = ordererIsSelf ? 'receiver' : 'orderer'
     const shareFor = (role: BuyerRole) =>
       role === 'orderer' ? settlement.shares[0] : settlement.shares[1]
+    // Only the orderer is told the code. The receiver has to go and read it off
+    // them, which is the entire proof that the two of them met — and not even the
+    // orderer gets it yet when the match is being charged, because a code handed
+    // out before both cards clear buys a box nobody paid for. `payment_cleared`
+    // delivers it then, to the same single side.
+    const codeReleased = codeAtMatchTime(disposition)
+    const codeFor = (role: BuyerRole) => (role === 'orderer' && codeReleased ? pickupCode : null)
 
     this.setState(ws, { ...selfIdentity, status: 'matched', matchId, role: selfRole })
     this.setState(buddy.ws, { ...buddyIdentity, status: 'matched', matchId, role: buddyRole })
@@ -244,7 +564,12 @@ export class NuggPool extends DurableObject<Env> {
       role: selfRole,
       share: shareFor(selfRole),
       settlement,
-      buddy: { name: buddyIdentity.name, distanceMeters: decision.distanceMeters },
+      buddy: {
+        name: buddyIdentity.name,
+        distanceMeters: decision.distanceMeters,
+        sauces: buddyIdentity.sauces,
+      },
+      pickupCode: codeFor(selfRole),
     })
     this.send(buddy.ws, {
       type: 'matched',
@@ -252,39 +577,61 @@ export class NuggPool extends DurableObject<Env> {
       role: buddyRole,
       share: shareFor(buddyRole),
       settlement,
-      buddy: { name: selfIdentity.name, distanceMeters: decision.distanceMeters },
+      buddy: {
+        name: selfIdentity.name,
+        distanceMeters: decision.distanceMeters,
+        sauces: selfIdentity.sauces,
+      },
+      pickupCode: codeFor(buddyRole),
     })
 
-    await this.startPayments(matchId, deal.label, settlement)
+    // Two buyers just left the waiting pool: everyone still queued in this
+    // cell needs the roster refreshed, or their map would keep showing dots
+    // for buddies who are no longer waiting.
+    this.broadcastWaiting()
+    // The match now has a confirmation deadline of its own.
+    await this.scheduleSweep()
+
+    // Last, so a processor that will not open the charges tears down a match
+    // that was otherwise fully consistent.
+    await this.startPayments(matchId, disposition, deal.label, settlement)
   }
 
   /**
    * Put both halves of a fresh match up for payment.
    *
-   * Amounts come out of the settlement untouched — see `paymentIntentSpecs` —
-   * and each intent is keyed on `${matchId}:${role}`, so a retried match
-   * message resolves to the charge that already exists rather than a second
-   * one.
+   * Amounts come out of the settlement untouched — see `paymentIntentSpecs` — and
+   * each intent is keyed on `${matchId}:${role}`, so a retry resolves to the
+   * charge that already exists rather than a second one.
+   *
+   * Nothing but a `charge` disposition reaches Stripe. That is enforced here, on
+   * the one path that talks to the processor, rather than by a predicate a future
+   * caller has to remember to ask: a demo pair returns before `this.stripe` is
+   * even read.
    */
   private async startPayments(
     matchId: string,
+    disposition: PaymentDisposition,
     dealLabel: string,
     settlement: Settlement,
   ): Promise<void> {
-    const stripe = this.stripe
+    if (disposition === 'demo' || disposition === 'uncharged') return
+    const stripe = disposition === 'charge' ? this.stripe : null
     if (stripe === null) {
-      // No Stripe secrets bound: `vite dev` and the smoke test pair buyers
-      // without money changing hands. A deployment missing its secrets is a
-      // misconfiguration, and the README runbook says so.
-      console.warn('NuggPool: STRIPE secrets unset — clearing match %s uncharged', matchId)
-      await this.clearMatch(matchId)
+      // Either `refuse`, or a secret that vanished between the join check and
+      // here. Both mean the same thing: there is no way to charge for this box,
+      // so there is no box. The one thing this must never do is release a code.
+      console.error('NuggPool: cannot charge match %s — aborting rather than clearing', matchId)
+      await this.abortMatch(matchId, 'this pool cannot take payments right now')
       return
     }
 
-    const cell = (await this.ctx.storage.get<string>(CELL_KEY)) ?? ''
+    const record = await this.ctx.storage.get<MatchRecord>(`match:${matchId}`)
+    if (record === undefined) return
+
     const specs = paymentIntentSpecs(settlement, {
       matchId,
-      cell,
+      cell: record.cell,
       description: `NuggBudz split — ${dealLabel}`,
     })
 
@@ -303,23 +650,18 @@ export class NuggPool extends DurableObject<Env> {
       }
     } catch (error) {
       console.error('NuggPool: could not open payments for match %s: %o', matchId, error)
-      for (const { ws } of this.pairedWith(matchId)) {
-        this.fail(ws, 'payment_unavailable', 'could not reach the payment processor')
-      }
-      await this.abandonMatch(matchId, null, true)
+      await this.abortMatch(matchId, 'could not reach the payment processor')
       return
     }
 
-    const record = await this.ctx.storage.get<MatchRecord>(`match:${matchId}`)
-    if (record === undefined) return
     const ledger = openLedger(
       settlement,
-      { matchId, cell },
+      { matchId, cell: record.cell },
       created.map((intent) => intent.id),
     )
     await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, { ...record, ledger })
 
-    for (const { ws, state } of this.pairedWith(matchId)) {
+    for (const { ws, state } of this.matchSockets(matchId)) {
       const index = specs.findIndex((spec) => spec.role === state.role)
       if (index === -1) continue
       this.send(ws, {
@@ -329,6 +671,33 @@ export class NuggPool extends DurableObject<Env> {
         clientSecret: created[index].clientSecret,
       })
     }
+  }
+
+  /**
+   * Call off a match that cannot be charged for at all.
+   *
+   * Both buddies drop to idle rather than back into the queue, for the same
+   * reason `cancelMatch` does: requeueing two still-connected buyers in a pool
+   * that cannot take money would pair them again on the spot and refuse them
+   * again, forever.
+   */
+  private async abortMatch(matchId: string, why: string): Promise<void> {
+    const record = await this.ctx.storage.get<MatchRecord>(`match:${matchId}`)
+    if (record?.ledger !== undefined) {
+      // Defensive: reaching here with a ledger means charges were opened and then
+      // something failed, so anything collected goes back.
+      const { ledger, refund } = unwindLedger(record.ledger)
+      await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, { ...record, ledger })
+      await this.refund(refund, matchId)
+    }
+
+    for (const peer of this.matchSockets(matchId)) {
+      this.fail(peer.ws, 'payment_unavailable', why)
+      this.setState(peer.ws, principalOf(peer.state))
+    }
+    await this.ctx.storage.delete(`match:${matchId}`)
+    this.broadcastWaiting()
+    await this.scheduleSweep()
   }
 
   /**
@@ -344,8 +713,8 @@ export class NuggPool extends DurableObject<Env> {
 
     const record = await this.ctx.storage.get<MatchRecord>(`match:${outcome.matchId}`)
     if (record?.ledger === undefined) {
-      // Already unwound, already collected, or never ours. Acknowledge so
-      // Stripe stops retrying a delivery nobody is waiting for.
+      // Already unwound, already settled, or never ours. Acknowledge so Stripe
+      // stops retrying a delivery nobody is waiting for.
       return Response.json({ ok: true, effect: 'unknown_match' })
     }
 
@@ -354,11 +723,11 @@ export class NuggPool extends DurableObject<Env> {
 
     switch (effect.kind) {
       case 'cleared':
-        await this.clearMatch(outcome.matchId)
+        this.releasePickupCode({ ...record, ledger })
         break
       case 'unwind':
         await this.refund(effect.refund, outcome.matchId)
-        await this.unwindMatch(outcome.matchId, effect.failedRole)
+        await this.unwindMatch({ ...record, ledger }, effect.failedRole, effect.refund)
         break
       default:
         break
@@ -367,77 +736,69 @@ export class NuggPool extends DurableObject<Env> {
     return Response.json({ ok: true, effect: effect.kind })
   }
 
-  /** Both halves paid: promote both connections and hand out the pickup code. */
-  private async clearMatch(matchId: string): Promise<void> {
-    const code = pickupCode(matchId)
-    for (const { ws, state } of this.pairedWith(matchId)) {
-      this.setState(ws, { ...identityOf(state), status: 'cleared', matchId, role: state.role })
-      this.send(ws, { type: 'payment_cleared', matchId, pickupCode: code })
-    }
-  }
-
   /**
-   * A half will never be paid, so there is no box. Tell both buyers whose
-   * side broke and put them back in the queue at the back.
-   */
-  private async unwindMatch(matchId: string, failedRole: BuyerRole): Promise<void> {
-    for (const { ws, state } of this.pairedWith(matchId)) {
-      const requeued: WaitingState = {
-        ...identityOf(state),
-        status: 'waiting',
-        joinedAt: Date.now(),
-      }
-      this.setState(ws, requeued)
-      this.send(ws, {
-        type: 'payment_failed',
-        matchId,
-        whose: state.role === failedRole ? 'you' : 'buddy',
-        // The buyer who failed has nothing to refund; the other one does.
-        refunded: state.role !== failedRole,
-      })
-      this.sendWaiting(ws, requeued)
-    }
-    await this.ctx.storage.delete(`match:${matchId}`)
-  }
-
-  /**
-   * Tear a match down for a non-payment reason: a buddy who walked away, or a
-   * processor that would not open the charges.
+   * Both halves paid: hand the orderer the code and let the handoff begin.
    *
-   * `refundCollected` is false only for a match that had already cleared —
-   * both halves paid, pickup code out — where a closing tab is a finished
-   * transaction and handing the money back would be handing back the price of
-   * a box that was collected.
+   * The code is the random one the match was struck with, sent to the orderer
+   * alone — payment decides *when* it is released, never *who* gets it. The
+   * receiver is told the match cleared so their screen can move on to asking for
+   * it, and is told nothing else.
    */
-  private async abandonMatch(
-    matchId: string,
-    except: WebSocket | null,
-    refundCollected: boolean,
-  ): Promise<void> {
-    const record = await this.ctx.storage.get<MatchRecord>(`match:${matchId}`)
-    if (refundCollected && record?.ledger !== undefined) {
-      const { ledger, refund } = unwindLedger(record.ledger)
-      await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, { ...record, ledger })
-      await this.refund(refund, matchId)
+  private releasePickupCode(record: MatchRecord): void {
+    for (const peer of this.matchSockets(record.matchId)) {
+      this.send(peer.ws, {
+        type: 'payment_cleared',
+        matchId: record.matchId,
+        pickupCode: peer.state.role === 'orderer' ? record.pickupCode : null,
+      })
     }
-
-    for (const { ws, state } of this.pairedWith(matchId)) {
-      if (ws === except) continue
-      const requeued: WaitingState = {
-        ...identityOf(state),
-        // Requeued at the back, so they do not jump buyers who waited honestly.
-        status: 'waiting',
-        joinedAt: Date.now(),
-      }
-      this.setState(ws, requeued)
-      this.send(ws, { type: 'buddy_left', matchId })
-      // Without this the survivor's UI would keep showing the pool count from
-      // before they were matched, which for an instant match is zero.
-      this.sendWaiting(ws, requeued)
-    }
-    await this.ctx.storage.delete(`match:${matchId}`)
   }
 
+  /**
+   * A half will never be paid, so there is no box.
+   *
+   * The buyer who paid is requeued, having done nothing wrong; the one whose card
+   * failed drops to idle and has to join again deliberately, so a permanently
+   * declining card cannot loop through the same match forever.
+   */
+  private async unwindMatch(
+    record: MatchRecord,
+    failedRole: BuyerRole,
+    refunded: PaymentLeg[],
+  ): Promise<void> {
+    const refundedFor = (role: BuyerRole) =>
+      refunded.filter((leg) => leg.role === role).reduce((sum, leg) => sum + leg.amountCents, 0)
+
+    for (const peer of this.matchSockets(record.matchId)) {
+      const mine = refundedFor(peer.state.role)
+      this.send(peer.ws, {
+        type: 'payment_failed',
+        matchId: record.matchId,
+        whose: peer.state.role === failedRole ? 'you' : 'buddy',
+        refunded: mine > 0,
+        refundedCents: mine,
+      })
+      if (peer.state.role === failedRole) {
+        this.setState(peer.ws, principalOf(peer.state))
+        continue
+      }
+      const now = Date.now()
+      this.setState(peer.ws, {
+        ...identityOf(peer.state),
+        status: 'waiting',
+        // At the back of the queue, so they do not jump buyers who waited honestly.
+        joinedAt: now,
+        lastSeenAt: now,
+        warned: false,
+      })
+    }
+
+    await this.ctx.storage.delete(`match:${record.matchId}`)
+    this.broadcastWaiting()
+    await this.scheduleSweep()
+  }
+
+  /** Hand money back for legs that were collected against a match that is off. */
   private async refund(legs: PaymentLeg[], matchId: string): Promise<void> {
     const stripe = this.stripe
     if (stripe === null || legs.length === 0) return
@@ -455,29 +816,268 @@ export class NuggPool extends DurableObject<Env> {
     }
   }
 
-  private handleCancel(ws: WebSocket): void {
+  /** Seat a buyer in the queue, alive as of now, and arm the cell's alarm. */
+  private async enqueue(ws: WebSocket, identity: BuyerIdentity): Promise<void> {
+    const waiting: WaitingState = {
+      ...identity,
+      status: 'waiting',
+      lastSeenAt: Date.now(),
+      warned: false,
+    }
+    this.setState(ws, waiting)
+    this.broadcastWaiting()
+    await this.scheduleSweep()
+  }
+
+  /**
+   * Treat a ping as a sign of life, which is what keeps a buyer who is sitting
+   * on the page from being aged out mid-wait. A buyer who speaks up after being
+   * warned is forgiven, so the warning can be sent again later.
+   *
+   * No rescheduling here on purpose: a queued entry always has an alarm armed at
+   * or before its old deadline, so that alarm fires, finds nothing due, and
+   * re-arms — and pings stay cheap, which matters because they are constant.
+   */
+  private refreshLiveness(ws: WebSocket): void {
+    const state = this.getState(ws)
+    if (state === null || state.status !== 'waiting') return
+    this.setState(ws, { ...state, lastSeenAt: Date.now(), warned: false })
+  }
+
+  /**
+   * Record one side of the handoff, and settle only when both sides are in.
+   *
+   * The receiver has to produce the orderer's code; the orderer taps. Neither
+   * side can complete a match alone, and a wrong code is an error rather than a
+   * quiet no-op, so a receiver who mistyped knows to look again.
+   */
+  private async handleConfirmPickup(ws: WebSocket, code: string | null): Promise<void> {
+    const state = this.getState(ws)
+    if (state === null) return
+    if (state.status !== 'matched') {
+      this.fail(ws, 'not_matched', 'you are not in a match to confirm')
+      return
+    }
+
+    const record = await this.ctx.storage.get<MatchRecord>(`match:${state.matchId}`)
+    if (record === undefined) {
+      this.fail(ws, 'not_matched', 'that match is no longer live')
+      return
+    }
+    if (record.status === 'disputed') {
+      this.fail(ws, 'match_disputed', 'this match is disputed and cannot be confirmed')
+      return
+    }
+    if (record.status === 'complete') {
+      this.fail(ws, 'already_confirmed', 'this match is already settled')
+      return
+    }
+    // Money before nuggets. Both sides confirming is the only route to a D1
+    // ledger row (`completeMatch`), so refusing here is what keeps a half-paid
+    // match from reaching one — and the receiver could not have the code to
+    // confirm with anyway, because it has not been released.
+    if (!pickupUnlocked(record)) {
+      this.fail(ws, 'payment_pending', 'both halves have to clear before the handoff')
+      return
+    }
+    if (record.confirmations[state.role] !== null) {
+      this.fail(ws, 'already_confirmed', 'you already confirmed this handoff')
+      return
+    }
+    // Validated against the stored code, never against anything the client was
+    // told: the orderer's own receipt is the only place this code exists.
+    if (state.role === 'receiver' && code !== record.pickupCode) {
+      this.fail(ws, 'bad_pickup_code', "that is not your bud's pickup code")
+      return
+    }
+
+    const at = Date.now()
+    record.confirmations[state.role] = at
+    const settled = bothConfirmed(record.confirmations)
+    await this.ctx.storage.put(`match:${state.matchId}`, record)
+
+    const deadline = disputeDeadline(record.confirmations, this.pickupTimeoutMs)
+    for (const peer of this.matchSockets(record.matchId)) {
+      this.send(peer.ws, {
+        type: 'pickup_confirmed',
+        matchId: record.matchId,
+        by: state.role,
+        waitingOn: pendingRole(record.confirmations),
+        disputeAt: deadline,
+      })
+    }
+
+    if (settled) {
+      await this.completeMatch(record, at)
+      return
+    }
+    await this.scheduleSweep()
+  }
+
+  /**
+   * Both sides confirmed: book the split and let both buddies go.
+   *
+   * This is the only place a ledger row is written. Anything that has not been
+   * confirmed by both sides is live state, and live state belongs to this
+   * object rather than to D1.
+   */
+  private async completeMatch(record: MatchRecord, at: number): Promise<void> {
+    record.status = 'complete'
+    record.settledAt = at
+    await this.ctx.storage.put(`match:${record.matchId}`, record)
+
+    try {
+      await writeSettledMatch(this.env.DB, {
+        matchId: record.matchId,
+        dealId: record.dealId,
+        cell: record.cell,
+        distanceMeters: record.distanceMeters,
+        createdAt: record.createdAt,
+        settledAt: at,
+        settlement: record.settlement,
+        names: { orderer: record.orderer.name, receiver: record.receiver.name },
+        // The ledger decides for itself whether this is a real split; a demo
+        // pairing settles on screen and books nothing. See `isDemoMatch`.
+        userIds: { orderer: record.orderer.userId, receiver: record.receiver.userId },
+      })
+    } catch (error) {
+      // A ledger outage must not strand two people who already swapped nuggets.
+      // The completed record stays in storage, which is what a reconciliation
+      // pass replays from.
+      console.error('ledger write failed', record.matchId, error)
+    }
+
+    for (const peer of this.matchSockets(record.matchId)) {
+      this.send(peer.ws, { type: 'pickup_complete', matchId: record.matchId, settledAt: at })
+      // Free to queue for the next box.
+      this.setState(peer.ws, principalOf(peer.state))
+    }
+    await this.scheduleSweep()
+  }
+
+  /**
+   * One side confirmed and the other never did.
+   *
+   * Nothing is written to the ledger: a split where one buddy says the handoff
+   * happened and the other says nothing is a case for a human. Callers re-arm
+   * the alarm afterwards.
+   */
+  private async disputeMatch(
+    record: MatchRecord,
+    at: number,
+    reason: 'timeout' | 'buddy_left',
+    except?: WebSocket,
+  ): Promise<void> {
+    record.status = 'disputed'
+    record.disputedAt = at
+    await this.ctx.storage.put(`match:${record.matchId}`, record)
+    if (record.ledger !== undefined && collectedCents(record.ledger) > 0) {
+      // Deliberately NOT refunded. A dispute means one buddy says the nuggets
+      // changed hands and the other says nothing; auto-refunding would make "stay
+      // silent after collecting the box" the cheapest way to eat for free. The
+      // money is held against the stored record, which is what a human
+      // reconciles from — the same reason no ledger row is written.
+      console.warn(
+        'NuggPool: match %s disputed holding %d cents for reconciliation',
+        record.matchId,
+        collectedCents(record.ledger),
+      )
+    }
+
+    const confirmedBy = confirmedRole(record.confirmations)
+    for (const peer of this.matchSockets(record.matchId, except)) {
+      this.send(peer.ws, {
+        type: 'pickup_disputed',
+        matchId: record.matchId,
+        confirmedBy,
+        reason,
+      })
+      this.setState(peer.ws, principalOf(peer.state))
+    }
+  }
+
+  private async handleCancel(ws: WebSocket): Promise<void> {
     const state = this.getState(ws)
     if (state === null) return
     if (state.status !== 'waiting') {
       this.fail(ws, 'not_waiting', 'nothing to cancel')
       return
     }
-    this.setState(ws, { status: 'idle', connId: state.connId })
+    this.setState(ws, principalOf(state))
+    // One fewer dot on everyone else's map.
+    this.broadcastWaiting()
+    await this.scheduleSweep()
   }
 
   /**
    * Drop a connection, and if it was half of a match, return the abandoned
    * buddy to the queue rather than leaving them staring at a dead match.
    *
-   * Anything collected for a match that had not yet cleared is refunded: the
-   * buyer who stayed has paid for a box that is not being ordered. A match
-   * that had already cleared keeps its money — the code was issued, the box
-   * was bought.
+   * Unless somebody already confirmed the handoff: requeueing then would erase a
+   * claim that the nuggets changed hands, so that is a dispute, not an
+   * abandonment.
    */
   private async handleDisconnect(ws: WebSocket): Promise<void> {
     const state = this.getState(ws)
-    if (state === null || !isPaired(state)) return
-    await this.abandonMatch(state.matchId, ws, state.status !== 'cleared')
+    if (state === null) return
+    if (state.status !== 'matched') {
+      // A waiting buyer who simply closed the tab still needs to fall out of
+      // everyone else's roster — and may have been the last thing keeping this
+      // cell's alarm armed.
+      if (state.status === 'waiting') {
+        this.broadcastWaiting()
+        await this.scheduleSweep()
+      }
+      return
+    }
+
+    const record = await this.ctx.storage.get<MatchRecord>(`match:${state.matchId}`)
+    if (
+      record !== undefined &&
+      record.status === 'pending' &&
+      confirmedRole(record.confirmations) !== null
+    ) {
+      await this.disputeMatch(record, Date.now(), 'buddy_left', ws)
+      await this.scheduleSweep()
+      return
+    }
+
+    // Nobody confirmed, so nobody has a box — anything collected goes back. The
+    // buyer who stayed has paid for an order that is not being placed, and the one
+    // who walked away has paid for nothing at all.
+    if (record?.ledger !== undefined) {
+      const { ledger, refund } = unwindLedger(record.ledger)
+      await this.ctx.storage.put<MatchRecord>(`match:${state.matchId}`, { ...record, ledger })
+      await this.refund(refund, state.matchId)
+    }
+
+    for (const other of this.states()) {
+      if (other.ws === ws) continue
+      if (other.state.status !== 'matched' || other.state.matchId !== state.matchId) continue
+
+      const now = Date.now()
+      const requeued: WaitingState = {
+        ...identityOf(other.state),
+        status: 'waiting',
+        // Requeued at the back, so they do not jump buyers who waited honestly.
+        joinedAt: now,
+        // Alive as of now: their wait starts over, not where the match left it.
+        lastSeenAt: now,
+        warned: false,
+      }
+      this.setState(other.ws, requeued)
+      this.send(other.ws, { type: 'buddy_left', matchId: state.matchId })
+    }
+
+    await this.ctx.storage.delete(`match:${state.matchId}`)
+    // Without this the survivor's UI would keep showing the pool count (and
+    // buddy dots) from before they were matched, which for an instant match
+    // is zero — and it also tells everyone else in the cell about the
+    // buyer who just got requeued.
+    this.broadcastWaiting()
+    // The requeued buddy is back under the queue's idle timer, and the match's
+    // own deadline is gone with the record.
+    await this.scheduleSweep()
   }
 
   /**
@@ -486,13 +1086,90 @@ export class NuggPool extends DurableObject<Env> {
    */
   private sendWaiting(ws: WebSocket, state: WaitingState): void {
     const eligible = this.waitingStates().filter((o) => o.state.dealId === state.dealId)
+    // The map roster is the whole cell, not just this buyer's deal: a cell can
+    // host more than one deal's queue at once, and the point of the map is to
+    // explain the cell as a market, not to leak who could actually pair.
+    const buddies = this.waitingStates()
+      .filter((o) => o.state.connId !== state.connId)
+      // Quantized here, at the one chokepoint every waiting broadcast passes
+      // through, so a buyer's exact position never reaches the wire.
+      .map((o) => snapToGrid(o.state))
+
     this.send(ws, {
       type: 'waiting',
       waiting: eligible.length,
       queuedAhead: eligible.filter(
         (o) => o.state.connId !== state.connId && o.state.joinedAt < state.joinedAt,
       ).length,
+      buddies,
     })
+  }
+
+  private async matchRecords(): Promise<Map<string, MatchRecord>> {
+    return await this.ctx.storage.list<MatchRecord>({ prefix: 'match:' })
+  }
+
+  /**
+   * Re-arm the cell's single alarm at the earliest of everything outstanding —
+   * and delete it when nothing is, so a cell nobody is using is never woken to
+   * do nothing.
+   *
+   * The two match deadlines are computed from disjoint sets and that is what
+   * keeps them from competing: `disputeDeadline` is null until somebody
+   * confirms, and `expirableMatches` drops a match the moment somebody does.
+   */
+  private async scheduleSweep(): Promise<void> {
+    const now = Date.now()
+    const records = [...(await this.matchRecords()).values()]
+
+    let next: number | null = null
+    const dueAt = (at: number | null) => {
+      if (at === null) return
+      if (next === null || at < next) next = at
+    }
+
+    for (const record of records) {
+      if (record.status !== 'pending') continue
+      dueAt(disputeDeadline(record.confirmations, this.pickupTimeoutMs))
+    }
+
+    const plan = planSweep(
+      now,
+      this.waitingStates().map(({ state }) => livenessOf(state)),
+      expirableMatches(records),
+      this.windows,
+    )
+    dueAt(nextAlarmAt(now, plan))
+
+    const current = await this.ctx.storage.getAlarm()
+    if (next === null) {
+      if (current !== null) await this.ctx.storage.deleteAlarm()
+      return
+    }
+    // An alarm that is already earlier is harmless — it fires, finds nothing
+    // due, and re-arms from here — so only ever pull the wake-up forward.
+    if (current === null || current > next) await this.ctx.storage.setAlarm(next)
+  }
+
+  /** The live sockets on both sides of a match, optionally skipping one. */
+  private matchSockets(
+    matchId: string,
+    except?: WebSocket,
+  ): { ws: WebSocket; state: MatchedState }[] {
+    const out: { ws: WebSocket; state: MatchedState }[] = []
+    for (const { ws, state } of this.states()) {
+      if (ws === except) continue
+      if (state.status !== 'matched' || state.matchId !== matchId) continue
+      out.push({ ws, state })
+    }
+    return out
+  }
+
+  /** Refresh every waiting socket's roster after a join, cancel or disconnect. */
+  private broadcastWaiting(): void {
+    for (const { ws, state } of this.waitingStates()) {
+      this.sendWaiting(ws, state)
+    }
   }
 
   private states(): { ws: WebSocket; state: ConnState }[] {
@@ -500,15 +1177,6 @@ export class NuggPool extends DurableObject<Env> {
     for (const ws of this.ctx.getWebSockets()) {
       const state = this.getState(ws)
       if (state !== null) out.push({ ws, state })
-    }
-    return out
-  }
-
-  /** Every live connection that is part of one match, in no particular order. */
-  private pairedWith(matchId: string): { ws: WebSocket; state: PairedState }[] {
-    const out: { ws: WebSocket; state: PairedState }[] = []
-    for (const { ws, state } of this.states()) {
-      if (isPaired(state) && state.matchId === matchId) out.push({ ws, state })
     }
     return out
   }
@@ -538,10 +1206,62 @@ export class NuggPool extends DurableObject<Env> {
   }
 }
 
+/** The liveness view of a queue entry, which is all the expiry rule needs. */
+function livenessOf(state: WaitingState): QueueEntry {
+  return { id: state.connId, lastSeenAt: state.lastSeenAt, warned: state.warned }
+}
+
+/**
+ * The matches the expiry sweep is allowed to cancel: struck, and with not one
+ * confirmation on them.
+ *
+ * This filter is the whole reason the two timers coexist. The moment either side
+ * confirms, the match acquires a dispute deadline and belongs to `disputeMatch`;
+ * expiring it here instead would erase a buddy's claim that the nuggets changed
+ * hands, which is the one thing the handshake exists to prevent. A match nobody
+ * has confirmed has no dispute deadline at all — `disputeDeadline` returns null
+ * for it — so without this sweep it would sit in the cell forever.
+ */
+function expirableMatches(records: Iterable<MatchRecord>): OpenMatch[] {
+  const out: OpenMatch[] = []
+  for (const record of records) {
+    if (record.status !== 'pending') continue
+    if (record.confirmations.orderer !== null || record.confirmations.receiver !== null) continue
+    out.push({ matchId: record.matchId, createdAt: record.createdAt })
+  }
+  return out
+}
+
 /** Strip connection status off a state, leaving just who and where the buyer is. */
 function identityOf(state: BuyerIdentity): BuyerIdentity {
-  const { connId, name, dealId, lat, lng, joinedAt } = state
-  return { connId, name, dealId, lat, lng, joinedAt }
+  const { connId, userId, name, cell, origin, locationSource, dealId, lat, lng, joinedAt } = state
+  return {
+    connId,
+    userId,
+    name,
+    cell,
+    origin,
+    locationSource,
+    dealId,
+    lat,
+    lng,
+    joinedAt,
+    // A socket whose hibernation attachment predates this field has no sauces
+    // rather than an undefined pair.
+    sauces: state.sauces ?? null,
+  }
+}
+
+/** Drop back to an idle connection, keeping only the session-derived identity. */
+function principalOf(state: Principal): ConnState {
+  const { connId, userId, name, cell, origin, locationSource } = state
+  return { status: 'idle', connId, userId, name, cell, origin, locationSource }
+}
+
+/** What the match record remembers about a buyer once their socket is gone. */
+function buyerOf(identity: BuyerIdentity): MatchBuyer {
+  const { connId, userId, name } = identity
+  return { connId, userId, name }
 }
 
 function toCandidate(identity: BuyerIdentity): Candidate {

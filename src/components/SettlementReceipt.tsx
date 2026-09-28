@@ -1,7 +1,11 @@
 import { findDeal } from '@shared/deals'
+import type { BuyerRole } from '@shared/economics'
 import { formatCents } from '@shared/economics'
 import { formatDistance } from '@shared/geo'
+import { PICKUP_CODE_LENGTH } from '@shared/pickup'
 import type { MatchedMessage, PaymentRequiredMessage } from '@shared/protocol'
+import { describeSauceSelection, type SauceSelection } from '@shared/sauces'
+import { useState } from 'react'
 import { Barcode } from './Barcode'
 import { PaymentPanel } from './PaymentPanel'
 import { Line, Perf } from './Roll'
@@ -11,25 +15,48 @@ import { Line, Perf } from './Roll'
  *
  * Every figure here comes off the settlement the server computed, so the split
  * shown to both buddies is the same split, down to the cent.
- *
- * The pickup half of the receipt prints only once `pickupCode` arrives, which
- * the server sends when both halves have actually been paid. The code is not
- * derivable from anything this component holds, so a half-paid match cannot
- * show one even by accident.
  */
 export function SettlementReceipt({
   match,
   payment,
-  pickupCode,
+  yourSauces,
+  confirmed,
+  waitingOn,
+  stage,
+  notice,
+  onConfirm,
   onDone,
 }: {
   match: MatchedMessage
+  /**
+   * Your half, while it is still owed. Non-null means the handoff has not been
+   * paid for yet, which is why the pickup block below is replaced by the card
+   * form rather than shown alongside it.
+   */
   payment: PaymentRequiredMessage | null
-  pickupCode: string | null
+  /**
+   * Your own pair, from this browser rather than off the wire — the server has no
+   * reason to echo back a choice you just made. Null if you picked none.
+   */
+  yourSauces: SauceSelection | null
+  /** Sides of the handoff confirmed so far. */
+  confirmed: BuyerRole[]
+  waitingOn: BuyerRole | null
+  stage: 'matched' | 'settled' | 'disputed'
+  notice: string | null
+  onConfirm: (code?: string) => void
   onDone: () => void
 }) {
   const deal = findDeal(match.settlement.dealId)
   const { settlement, share, buddy, role } = match
+  const [typedCode, setTypedCode] = useState('')
+  const iConfirmed = confirmed.includes(role)
+
+  // Ids resolve to labels through the catalogue, so a buddy's pick is never a
+  // string off the wire being rendered — and an id the menu no longer holds shows
+  // as nothing rather than as itself.
+  const yourOrder = describeSauceSelection(yourSauces)
+  const buddyOrder = describeSauceSelection(buddy.sauces)
 
   const instruction =
     role === 'orderer'
@@ -88,32 +115,64 @@ export function SettlementReceipt({
         delay={620}
       />
 
-      <Perf label={pickupCode === null ? 'Settle up' : 'Pickup'} />
-
-      {pickupCode === null ? (
+      {/* The practical half of the sauce chart: whoever is standing at the counter
+          is ordering for two, so both pairs are on both receipts. */}
+      {(yourOrder !== null || buddyOrder !== null) && (
         <>
+          <Perf label="Sauces" />
+          <Line label="Yours" value={yourOrder ?? 'Dealer’s choice'} delay={660} />
+          <Line label={`${buddy.name}’s`} value={buddyOrder ?? 'Dealer’s choice'} delay={700} />
+        </>
+      )}
+
+      <Perf
+        label={
+          stage === 'settled'
+            ? 'Settled'
+            : stage === 'disputed'
+              ? 'Disputed'
+              : payment !== null
+                ? 'Your half'
+                : 'Pickup'
+        }
+      />
+
+      {stage === 'settled' ? (
+        <>
+          <p className="printed font-body text-base leading-snug">
+            Both of you confirmed the handoff. The split is on the books.
+          </p>
+          <button type="button" onClick={onDone} className={PRIMARY}>
+            Done
+          </button>
+        </>
+      ) : stage === 'disputed' ? (
+        <>
+          <p className="printed font-body text-base leading-snug text-ketchup">
+            {notice ?? 'Only one of you confirmed the handoff. This split is flagged for review.'}
+          </p>
+          <button type="button" onClick={onDone} className={PRIMARY}>
+            Done
+          </button>
+        </>
+      ) : payment !== null ? (
+        <>
+          {/* Money first. There is deliberately no pickup code and no confirm
+              button on this screen: the server has not released one, and the
+              handshake it gates is refused until both halves clear. */}
           <p
             className="printed font-body text-base leading-snug"
             style={{ animationDelay: '700ms' }}
           >
-            Both halves have to clear before either of you gets a pickup code.
+            {instruction}
           </p>
-          {payment === null ? (
-            <p
-              className="printed mt-4 font-body text-sm text-faded"
-              style={{ animationDelay: '760ms' }}
-            >
-              Opening your charge…
-            </p>
-          ) : (
-            <PaymentPanel payment={payment} />
-          )}
+          <PaymentPanel payment={payment} />
           <button
             type="button"
             onClick={onDone}
-            className="mt-7 w-full border-2 border-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px"
+            className="mt-4 w-full font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase underline"
           >
-            Call it off
+            Leave this match
           </button>
         </>
       ) : (
@@ -125,23 +184,64 @@ export function SettlementReceipt({
             {instruction}
           </p>
 
-          <div className="printed mt-5" style={{ animationDelay: '760ms' }}>
-            <Barcode value={pickupCode} />
-            <p className="mt-2 font-display text-lg font-bold tracking-[0.35em]">{pickupCode}</p>
-            <p className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
-              Show this to your bud
+          {match.pickupCode !== null && (
+            <div className="printed mt-5" style={{ animationDelay: '760ms' }}>
+              <Barcode value={match.pickupCode} />
+              <p className="mt-2 font-display text-lg font-bold tracking-[0.35em]">
+                {match.pickupCode}
+              </p>
+              <p className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
+                Read this out to your bud
+              </p>
+            </div>
+          )}
+
+          {role === 'receiver' && !iConfirmed && (
+            <label className="mt-5 block">
+              <span className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
+                The code on {buddy.name}'s receipt
+              </span>
+              <input
+                value={typedCode}
+                onChange={(event) => setTypedCode(event.target.value.toUpperCase())}
+                maxLength={PICKUP_CODE_LENGTH + 2}
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder="------"
+                className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg tracking-[0.35em] focus:outline-none"
+              />
+            </label>
+          )}
+
+          {iConfirmed ? (
+            <p className="mt-7 font-body text-sm leading-snug text-faded" aria-live="polite">
+              You confirmed. Waiting on {waitingOn === null ? 'your bud' : buddy.name} — nothing
+              settles until you both do.
             </p>
-          </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onConfirm(role === 'receiver' ? typedCode : undefined)}
+              disabled={role === 'receiver' && typedCode.trim().length === 0}
+              className={`${PRIMARY} disabled:opacity-35`}
+            >
+              {role === 'orderer' ? 'Handed it over' : 'Got the box'}
+            </button>
+          )}
 
           <button
             type="button"
             onClick={onDone}
-            className="mt-7 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px"
+            className="mt-4 w-full font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase underline"
           >
-            Got the box
+            Leave this match
           </button>
         </>
       )}
     </section>
   )
 }
+
+const PRIMARY =
+  'mt-7 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px'

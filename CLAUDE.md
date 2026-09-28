@@ -27,13 +27,48 @@ state.
   sum back to the total exactly. Indivisible remainders go to the orderer.
 - **Deal prices are data, not literals.** They live in `shared/deals.ts` and
   vary by market and promo. Never inline `799` at a call site.
+- **Sauces are data too, and the horoscope is derived.** `shared/sauces.ts` holds
+  the ids, labels and per-sauce traits, per merchant, and which sauces are
+  *offered* follows `ACTIVE_DEALS` rather than a second list. Never inline a sauce
+  id or label at a call site. The readout is a pure function of the chosen pair —
+  no randomness, no clock, no fetch — and `test/sauces.test.ts` enumerates the
+  whole selection space from the catalogue, so adding a sauce fails the build
+  rather than printing a blank card.
 - **`shared/` must stay runtime-free.** No Workers types, no DOM, no React. It
   is imported by the Worker, the Durable Object, the client and the tests, and
   the pairing rule has to be testable without a Workers runtime.
 - **Anything off a WebSocket is hostile.** Validate through
   `parseClientMessage` rather than casting.
+- **Deck figures are derived, never typed.** Every money amount on a slide in
+  `docs/pitch/` comes from `scripts/deck-ledger.ts`, which reads the catalogue
+  and the settlement functions. Reprice a deal and `pnpm test` goes red until
+  the slides are corrected — fix the slides, never the ledger.
 - **The server derives the cell, never the client.** Otherwise a caller parks
-  themselves in someone else's market.
+  themselves in someone else's market. It also derives the *coordinates* by
+  default: `shared/location.ts` resolves client-supplied coords (opt-in only) →
+  Cloudflare edge geo (`request.cf`) → a fixed demo origin, so pairing never
+  needs a location prompt. `cf` is untrusted and can be missing or partial —
+  parse it through `parseCoords`, never straight into `geohash()`. Miniflare
+  caches a real `cf` locally, so `pnpm dev` usually gets rung 2; with no usable
+  one (offline, or unit tests) rung 3 keeps the flow alive.
+- **Identity comes from the session, never from a message.** The pool socket is
+  authenticated at upgrade time and the display name a buddy sees is read off
+  the session in KV. A `name` on the wire is ignored, not trusted.
+- **A split settles only when both sides confirm the handoff.** The orderer
+  holds a random pickup code (never derived from the match id, and never sent
+  to the receiver); the receiver reads it off them. One side confirming alone
+  times out into a dispute, and completing the handshake is the only thing that
+  writes a row to the D1 ledger.
+- **Money clears before the handshake starts, and the gate fails closed.**
+  `paymentDisposition` in `worker/lib/payments.ts` decides once per match
+  whether it is charged, is a demo pair, is deliberately uncharged, or cannot
+  happen at all — and that one value gates both the pickup code and
+  `confirm_pickup`, so a half-paid match reaches neither a code nor a ledger
+  row. A pool with no Stripe secrets and no explicit `ALLOW_UNCHARGED_PAIRING`
+  **refuses to pair**; it never pairs for free. Demo pairs never reach Stripe,
+  because `demo` is answered before the secrets are consulted — enforced on the
+  path, and proved by the `demo-check` CI job running with Stripe pointed at a
+  dead address.
 
 ## Commands
 
@@ -41,13 +76,24 @@ state.
 pnpm dev          # Vite + Worker together, full stack
 pnpm test         # vitest — pure logic (settlement, geo, matchmaking, protocol)
 pnpm smoke        # end-to-end pairing against a running `pnpm dev`
+pnpm payment-gate # the money gate, in whichever mode that server reports
+pnpm fake-stripe  # a local stand-in for Stripe's REST API, for the charged path
+pnpm test:e2e     # Playwright — two browsers driving the real UI end to end
 pnpm typecheck    # wrangler types && tsc --noEmit
 pnpm lint         # biome
 pnpm run deploy    # vite build && wrangler deploy (pnpm deploy is a pnpm builtin)
 ```
 
 `pnpm test` does not cover the Durable Object. `pnpm smoke` does, and needs a
-dev server on port 5199. Run both before calling a change done.
+dev server on port 5199. `pnpm test:e2e` boots one itself (or reuses one
+already running there) and additionally exercises the screen a person actually
+looks at. Run all three before calling a change done.
+
+Pairing needs `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars` on a checkout with no
+Stripe keys — otherwise a join is refused rather than paired for free, which is
+the point. `pnpm payment-gate` is the fourth lane: it asserts whichever money
+mode the server it is pointed at reports, and it is the only thing that
+exercises the charged path through the real Durable Object.
 
 ## Style
 

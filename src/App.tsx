@@ -1,42 +1,46 @@
 import type { DealSpec, Settlement, SpreadAnalysis } from '@shared/economics'
 import { formatCents } from '@shared/economics'
+import { describeLocationSource, type LocationSource } from '@shared/location'
+import { saucesForMerchant } from '@shared/sauces'
 import { useEffect, useState } from 'react'
+import { CellMap } from './components/CellMap'
 import { Line, Perf, Roll } from './components/Roll'
+import { SaucePicker } from './components/SaucePicker'
 import { SettlementReceipt } from './components/SettlementReceipt'
 import { useCoords } from './hooks/useCoords'
 import { usePool } from './hooks/usePool'
+import { useSauces } from './hooks/useSauces'
+import { useSession } from './hooks/useSession'
 
 interface DealWithMath extends DealSpec {
   settlement: Settlement
   spread: SpreadAnalysis
 }
 
-const NAME_KEY = 'nuggbudz.name'
+const DEMO_NAME_KEY = 'nuggbudz.demoName'
 
-function readStoredName(): string {
+function readStoredDemoName(): string {
   try {
-    return localStorage.getItem(NAME_KEY) ?? ''
+    return localStorage.getItem(DEMO_NAME_KEY) ?? ''
   } catch {
     return ''
-  }
-}
-
-function storeName(name: string): void {
-  try {
-    localStorage.setItem(NAME_KEY, name)
-  } catch {
-    // Private windows and blocked site data are fine; the name is a convenience.
   }
 }
 
 export function App() {
   const [deals, setDeals] = useState<DealWithMath[]>([])
   const [dealId, setDealId] = useState<string | null>(null)
-  const [name, setName] = useState(readStoredName)
   const [loadError, setLoadError] = useState<string | null>(null)
+  /** Null until `/api/health` answers; true when the server pairs without accounts. */
+  const [demoPairing, setDemoPairing] = useState<boolean | null>(null)
+  const [demoName, setDemoName] = useState(readStoredDemoName)
 
   const coords = useCoords()
   const pool = usePool()
+  const session = useSession()
+  // Signed in, and the pair lives on the account; not, and this browser is its
+  // only home — which is the whole story for a demo buyer, who has no account.
+  const sauces = useSauces(session.user !== null)
 
   useEffect(() => {
     let cancelled = false
@@ -58,27 +62,66 @@ export function App() {
     }
   }, [])
 
+  // Whether this server pairs without accounts. Fails closed: if the probe does
+  // not answer, assume sign-in is required rather than offering a name field the
+  // server would reject.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/health')
+      .then((response) => response.json() as Promise<{ demoPairing?: boolean }>)
+      .then((body) => {
+        if (!cancelled) setDemoPairing(body.demoPairing === true)
+      })
+      .catch(() => {
+        if (!cancelled) setDemoPairing(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  /** In demo mode an unauthenticated buyer pairs under a name they type. */
+  const demoReady = demoPairing === true && session.user === null && demoName.trim().length > 0
+  const identified = session.user !== null || demoReady
+
   /**
-   * Get a location, then take the seat. Deliberately not an effect keyed on the
-   * fix: leaving the queue would immediately rejoin on the still-set fix.
+   * Take the seat. No location prompt: coordinates are sent only if the buyer
+   * already turned on precise location, and the server places the socket from the
+   * edge otherwise. Deliberately not an effect keyed on the fix — leaving the
+   * queue would immediately rejoin on the still-set fix.
    */
-  const start = async () => {
-    const trimmed = name.trim()
-    if (trimmed.length === 0 || dealId === null) return
-    const fix = await coords.locate()
-    pool.join({ name: trimmed, dealId, lat: fix.lat, lng: fix.lng })
+  const start = () => {
+    if (dealId === null || !identified) return
+    pool.join({
+      dealId,
+      lat: coords.fix?.lat,
+      lng: coords.fix?.lng,
+      demoName: session.user === null ? demoName.trim() : undefined,
+      // Only a finished pair goes up; the server validates it against the menu.
+      sauces: sauces.selection ?? undefined,
+    })
   }
 
   const selected = deals.find((deal) => deal.id === dealId) ?? null
-  const canStart = name.trim().length > 0 && dealId !== null && !coords.pending
+  const canStart = identified && dealId !== null && !coords.pending
+  const placement =
+    pool.locationSource === null ? null : describeLocationSource(pool.locationSource)
 
-  if ((pool.stage === 'matched' || pool.stage === 'cleared') && pool.match !== null) {
+  if (
+    pool.match !== null &&
+    (pool.stage === 'matched' || pool.stage === 'settled' || pool.stage === 'disputed')
+  ) {
     return (
-      <Shell cell={pool.cell}>
+      <Shell cell={pool.cell} source={pool.locationSource}>
         <SettlementReceipt
           match={pool.match}
           payment={pool.payment}
-          pickupCode={pool.pickupCode}
+          yourSauces={sauces.selection}
+          confirmed={pool.confirmed}
+          waitingOn={pool.waitingOn}
+          stage={pool.stage}
+          notice={pool.notice}
+          onConfirm={pool.confirmPickup}
           onDone={pool.leave}
         />
       </Shell>
@@ -87,7 +130,7 @@ export function App() {
 
   if (pool.stage === 'connecting' || pool.stage === 'waiting') {
     return (
-      <Shell cell={pool.cell}>
+      <Shell cell={pool.cell} source={pool.locationSource}>
         <section aria-live="polite">
           <p className="font-display text-[0.65rem] tracking-[0.2em] text-faded uppercase">
             {pool.stage === 'connecting' ? 'Joining your cell' : 'Looking for a bud'}
@@ -95,6 +138,15 @@ export function App() {
           <h2 className="caret mt-1 font-display text-2xl font-bold">
             {pool.stage === 'connecting' ? 'Standing in line' : `${pool.waiting} in your cell`}
           </h2>
+
+          {/* The map needs a "you are here" at full precision, and on the
+              promptless path nobody has one: the server knows where it placed
+              this socket but `welcome` carries only the cell. So the map appears
+              once the buyer opts into exact location, rather than drawing the
+              cell centre and calling it them. */}
+          {pool.stage === 'waiting' && pool.cell !== null && pool.own !== null && (
+            <CellMap cell={pool.cell} you={pool.own} buddies={pool.buddies} />
+          )}
 
           <Perf label={selected?.merchant ?? 'Deal'} />
 
@@ -114,6 +166,10 @@ export function App() {
             open.
           </p>
 
+          {placement !== null && (
+            <p className="mt-3 font-body text-xs leading-snug text-faded">{placement.detail}</p>
+          )}
+
           <button
             type="button"
             onClick={pool.leave}
@@ -127,7 +183,7 @@ export function App() {
   }
 
   return (
-    <Shell cell={pool.cell}>
+    <Shell cell={pool.cell} source={pool.locationSource}>
       <p className="font-body text-base leading-snug">
         Twenty nuggets cost less than ten. Split the box with someone nearby and you both stop
         paying the single-person tax.
@@ -170,23 +226,77 @@ export function App() {
         })}
       </div>
 
+      {selected !== null && (
+        <>
+          <Perf label="Sauce chart" />
+          <SaucePicker
+            sauces={saucesForMerchant(selected.merchant)}
+            picks={sauces.picks}
+            selection={sauces.selection}
+            onTap={sauces.tap}
+          />
+        </>
+      )}
+
       <Perf label="Who are you" />
 
-      <label className="block">
-        <span className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
-          First name your bud will look for
-        </span>
-        <input
-          value={name}
-          onChange={(event) => {
-            setName(event.target.value)
-            storeName(event.target.value)
-          }}
-          maxLength={40}
-          placeholder="Robb"
-          className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg focus:outline-none"
-        />
-      </label>
+      {session.pending ? (
+        <p className="font-body text-sm text-faded">Checking your sign-in…</p>
+      ) : session.user === null && demoPairing === true ? (
+        <>
+          <label className="block">
+            <span className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
+              First name your bud will look for
+            </span>
+            <input
+              value={demoName}
+              onChange={(event) => {
+                setDemoName(event.target.value)
+                try {
+                  localStorage.setItem(DEMO_NAME_KEY, event.target.value)
+                } catch {
+                  // A private window just means the name is not remembered.
+                }
+              }}
+              maxLength={40}
+              placeholder="e.g. Alex"
+              className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg focus:outline-none"
+            />
+          </label>
+          <p className="mt-3 font-body text-sm leading-snug text-faded">
+            Demo mode: pairing without accounts. You will run the whole handoff and get a receipt,
+            but the split is never booked to the ledger, and your bud only sees this name.
+          </p>
+        </>
+      ) : session.user === null ? (
+        <>
+          <p className="font-body text-sm leading-snug text-faded">
+            Sign in so your bud knows who they are meeting, and so a split can be settled
+            afterwards.
+          </p>
+          <button
+            type="button"
+            onClick={session.signIn}
+            className="mt-4 w-full border-2 border-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px"
+          >
+            Sign in with Google
+          </button>
+        </>
+      ) : (
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="font-display text-lg">{session.user.displayName}</span>
+          <button
+            type="button"
+            onClick={() => {
+              pool.leave()
+              void session.signOut()
+            }}
+            className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase underline"
+          >
+            Sign out
+          </button>
+        </div>
+      )}
 
       {coords.notice !== null && (
         <p className="mt-4 font-body text-sm text-faded">{coords.notice}</p>
@@ -199,17 +309,45 @@ export function App() {
         onClick={start}
         className="mt-6 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px disabled:opacity-35"
       >
-        {coords.pending ? 'Finding your cell…' : 'Find a bud'}
+        Find a bud
       </button>
+
+      {/* The only control that may prompt for location, and nothing calls it for
+          you. Pairing works whether or not it is ever tapped. */}
+      {coords.fix === null ? (
+        <button
+          type="button"
+          disabled={coords.pending}
+          onClick={() => void coords.requestPrecise()}
+          className="mt-3 w-full border-2 border-hairline px-4 py-3 font-display text-[0.7rem] font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px disabled:opacity-35"
+        >
+          {coords.pending ? 'Asking your device…' : 'Use my exact location'}
+        </button>
+      ) : (
+        <p className="mt-3 font-body text-sm text-faded">
+          Exact location on, so the walk to your bud is measured properly.
+        </p>
+      )}
+
       <p className="mt-3 font-body text-xs leading-snug text-faded">
-        We use your location once, to find the pool for your block. Pairing fee is{' '}
-        {formatCents(selected?.platformFeeCents ?? 99)} per split.
+        No permission prompt needed: we place you in a cell from your connection, which is accurate
+        to about a neighbourhood. Pairing fee is {formatCents(selected?.platformFeeCents ?? 99)} per
+        split.
       </p>
     </Shell>
   )
 }
 
-function Shell({ cell, children }: { cell: string | null; children: React.ReactNode }) {
+function Shell({
+  cell,
+  source,
+  children,
+}: {
+  cell: string | null
+  /** Which rung placed this socket, once the server has said. */
+  source: LocationSource | null
+  children: React.ReactNode
+}) {
   return (
     <Roll>
       <header>
@@ -219,9 +357,16 @@ function Shell({ cell, children }: { cell: string | null; children: React.ReactN
             {cell === null ? 'no cell' : `cell ${cell}`}
           </span>
         </div>
-        <p className="font-display text-[0.6rem] tracking-[0.22em] text-faded uppercase">
-          Protein settlement layer
-        </p>
+        <div className="flex items-baseline justify-between gap-2">
+          <p className="font-display text-[0.6rem] tracking-[0.22em] text-faded uppercase">
+            Protein settlement layer
+          </p>
+          {source !== null && (
+            <span className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
+              {describeLocationSource(source).label}
+            </span>
+          )}
+        </div>
       </header>
       <Perf />
       {children}

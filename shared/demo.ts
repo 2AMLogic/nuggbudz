@@ -1,0 +1,101 @@
+/**
+ * Demo pairing — the escape hatch that keeps a live demo alive.
+ *
+ * Pairing requires a signed-in account, which is right for production and fatal
+ * on a conference stage: Google sign-in needs configured credentials, a
+ * round-trip to Google, and a consent screen on a borrowed phone. When
+ * `ALLOW_DEMO_PAIRING` is set, the Worker instead mints a throwaway identity for
+ * an unauthenticated socket, so two phones can still pair.
+ *
+ * This is deliberately OFF by default and never set in `wrangler.jsonc` — it is
+ * passed at deploy time (`wrangler deploy --var ALLOW_DEMO_PAIRING:1`), so a
+ * checkout, a test run and CI all exercise the strict path and no `vite build`
+ * can bake an auth bypass into a production artifact by accident. This mirrors
+ * the reasoning 311alarm applies to its dev-OTP flag.
+ */
+
+/** Truthy spellings an operator might plausibly pass to a Worker var. */
+export function demoPairingEnabled(raw: string | undefined): boolean {
+  if (raw === undefined) return false
+  switch (raw.trim().toLowerCase()) {
+    case '1':
+    case 'true':
+    case 'yes':
+    case 'on':
+      return true
+    default:
+      return false
+  }
+}
+
+/** Longest display name a buddy card can show without wrapping badly. */
+const MAX_NAME = 40
+
+/** Space, the lowest printable code point. Anything below it is a control char. */
+const FIRST_PRINTABLE = 0x20
+const DELETE_CHAR = 0x7f
+
+/**
+ * Clean a demo-supplied name into something safe to show a stranger.
+ *
+ * An unauthenticated caller chooses this string, so it is untrusted input:
+ * control characters stripped, whitespace collapsed, length-capped, never empty.
+ */
+export function sanitizeDemoName(raw: string | null | undefined): string {
+  if (typeof raw !== 'string') return 'Guest'
+  // Whitespace first, control characters second. A newline or tab is whitespace
+  // that happens to sit below the printable range, so deleting it before this
+  // step would glue two words together ('Robb\nWalters' -> 'RobbWalters')
+  // instead of separating them.
+  const spaced = raw.replace(/\s/g, ' ')
+  const printable = Array.from(spaced)
+    .filter((ch) => {
+      const code = ch.codePointAt(0) ?? 0
+      if (code < FIRST_PRINTABLE || code === DELETE_CHAR) return false
+      // C1 control block (U+0080-U+009F) — not caught by \s or the C0/DEL check.
+      if (code >= 0x80 && code <= 0x9f) return false
+      // Unicode format characters (category Cf): zero-width space/joiner/
+      // non-joiner, BOM, bidi override/isolate marks. These are invisible and
+      // U+202E in particular can make a name render differently from its
+      // bytes, so they are stripped rather than displayed. No /g flag here —
+      // a stateful global regex reused across `.filter()` calls silently
+      // skips matches via `lastIndex`.
+      if (/\p{Cf}/u.test(ch)) return false
+      return true
+    })
+    .join('')
+  const cleaned = printable.replace(/ +/g, ' ').trim()
+  if (cleaned.length === 0) return 'Guest'
+  // Cap on code points, not UTF-16 code units — slicing by code unit can split
+  // a surrogate pair (e.g. an emoji) in two, leaving a lone surrogate that
+  // decodes to U+FFFD. Trim after capping so the cap itself can't leave a
+  // trailing space.
+  return Array.from(cleaned).slice(0, MAX_NAME).join('').trim()
+}
+
+/** The marker that makes a demo identity greppable, spelled once. */
+export const DEMO_USER_ID_PREFIX = 'demo:'
+
+/**
+ * A throwaway user id for a demo socket.
+ *
+ * Prefixed so a demo identity is legible as one at a glance — in the ledger
+ * gate, in logs, in a reputation count — and trivially greppable.
+ */
+export function demoUserId(unique: string): string {
+  return `${DEMO_USER_ID_PREFIX}${unique}`
+}
+
+/**
+ * True when this id was minted by demo pairing rather than a real sign-in.
+ *
+ * What this guarantees, precisely: an id carrying the prefix *is* a demo
+ * identity, so the ledger can exclude it. It says nothing about the ids it
+ * answers `false` for — `''` is not a demo id and is not a real account either.
+ * Deciding that an id is genuinely an account, which is what lets money be
+ * booked against it, is `classifyUserId` in `shared/identity.ts`; this predicate
+ * is only one of its three answers.
+ */
+export function isDemoUserId(userId: string): boolean {
+  return userId.startsWith(DEMO_USER_ID_PREFIX)
+}

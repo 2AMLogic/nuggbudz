@@ -8,36 +8,53 @@ Prioritized roadmap of upcoming work, maintained by the Guide role.
 
 Issues requiring immediate attention (`loom:urgent`).
 
-Both urgent issues are actively in build (see In Progress). Their rationale
-stays here until they land:
+- **#3**: Charge both halves through Stripe and take the pairing fee —
+  settlement is computed and displayed but no money moves. PR #19 is in the
+  doctor loop (`loom:changes-requested`); the last known lease on issue #11
+  had lapsed, so this needs the next sweep (or an attended pickup).
 
-- **#2**: Google OAuth sign-in — pairing is between anonymous sockets until this
-  lands, which blocks reputation, refunds and any real accountability.
-- **#3**: Charge both halves through Stripe and take the pairing fee — the
-  settlement is computed and displayed but no money moves.
+> #2 (Google sign-in) merged `05b9799`; #28 (McDonald's-only) merged
+> `e22229b`; #16, #5, #4, #6, #7's predecessor work, #9 and #10 all landed. See
+> WORK_LOG.md.
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-*All seeded backlog is now claimed; nothing unclaimed in `loom:issue`.*
+*All seeded backlog is claimed. New operator-filed items waiting on triage/
+curator: #36 (custom domain), #37 (wrangler `dev --var` bug), #48
+(`sanitizeDemoName` hardening), #14 (pairing-flow nonce).*
 
 ## In Progress
 
-Issues actively being worked (`loom:building`).
+Issues actively being worked (`loom:building`; PRs in `loom:reviewing` count as
+in flight).
 
-Backlog fan-out in flight 2026-09-27 — all nine seeded issues claimed by loom
-sweeps across three hosts (lease records on each issue).
+- **#3**: Stripe checkout handoff — PR #19, `loom:changes-requested`
+  (doctor loop; lease on #11 lapsed 2026-09-27 ~21:27Z).
+- **#7**: Stale queue expiry + unconfirmed-match alarm — PR #23, reconciled
+  onto post-#22 main by the fleet, `loom:review-requested`, CI green on
+  feature/issue-7 (`36360488913`); review pending.
+- **#34**: Pair without a location permission prompt (edge geo) — PR #43,
+  `loom:review-requested`, CI green on feature/issue-34 (`36360308132`); the
+  reconciliation absorbed the #49 unpinned deck and re-priced — review pending.
+- **#28**: (merged `e22229b` this session — offered-deal gate, see WORK_LOG)
+- **#16**: (merged `5050eaf` this session — demo pairing with the ledger
+  gate, see WORK_LOG)
 
-- **#2**: Google OAuth sign-in (urgent)
-- **#3**: Charge both halves through Stripe and take the pairing fee (urgent)
-- **#4**: Write settled splits to the D1 ledger
-- **#5**: Two-sided pickup confirmation handshake
-- **#6**: Map view of your cell
-- **#7**: Expire stale queue entries and unconfirmed matches
-- **#9**: Playwright two-browser pairing test
-- **#10**: Rate-limit the pool socket
-- **#11**: Pitch deck built with Anvil
+## Newly filed (this session)
+
+- **#36**: Provision the `nuggbudz.com` custom domain on the Worker (needs
+  operator zone access; wrangler.jsonc was deliberately stripped of the routes
+  until then — #24 decision).
+- **#37**: Wrangler 4.142 `dev --var` does not reach the runtime (`undefined`) —
+  reproducible; `.dev.vars` and (presumably) `deploy --var` are unaffected;
+  upstream report to file.
+- **#48**: Harden `sanitizeDemoName` — invisible-unicode strip + code-point-
+safe cap (operator's superseded Doctor fix on #24 contains the working
+  regexes; see that PR's comments).
+- **#14**: Single-use nonce on the pairing flow (curator target once it has
+  traffic context).
 
 ## Proposed
 

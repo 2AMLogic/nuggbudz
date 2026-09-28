@@ -11,10 +11,80 @@
  * this file multiplies, divides or rounds money.
  */
 
+import { isDemoUserId } from '../../shared/demo'
 import type { BuyerRole, Settlement } from '../../shared/economics'
 
 /** Stripe wants a currency; the whole catalogue is US retail. */
 export const PAYMENT_CURRENCY = 'usd'
+
+/**
+ * What this pool is allowed to do about money for one particular match.
+ *
+ * - `charge` — open two PaymentIntents and hold the pickup code until both clear.
+ * - `demo` — a demo pairing. No money, ever: these pairs are already excluded
+ *   from the D1 ledger (`worker/ledger.ts`), and charging a real card for a
+ *   throwaway `demo:` identity would be worse than booking one.
+ * - `uncharged` — an operator has explicitly said this server pairs for free.
+ * - `refuse` — payments are not configured and nobody said that was intentional.
+ *   Fail closed: no match, no code, no charge.
+ */
+export type PaymentDisposition = 'charge' | 'demo' | 'uncharged' | 'refuse'
+
+/** Whether a disposition means a pickup code may be released at match time. */
+export function codeAtMatchTime(disposition: PaymentDisposition): boolean {
+  return disposition === 'demo' || disposition === 'uncharged'
+}
+
+/**
+ * Decide how one match is paid for — the single decision both the Stripe call
+ * and the pickup-code release read, so the two can never disagree.
+ *
+ * The order of these branches is the security property:
+ *
+ * 1. **Demo first**, so a demo pair is excluded on a *fully configured*
+ *    production deploy too, not merely on a laptop with no secrets. This is the
+ *    one ordering that makes "demo pairs never reach Stripe" true rather than
+ *    accidentally true.
+ * 2. **Charge whenever Stripe is configured**, so the escape hatch below cannot
+ *    silently disable a working payment path.
+ * 3. **Uncharged only when the secrets are absent *and* an operator opted in** —
+ *    a conjunction, so an empty production secret is never indistinguishable
+ *    from intentional test mode.
+ * 4. **Refuse otherwise.** An unset secret must cost a match, not a box.
+ */
+export function paymentDisposition(input: {
+  stripeConfigured: boolean
+  unchargedAllowed: boolean
+  userIds: Record<BuyerRole, string>
+}): PaymentDisposition {
+  if (isDemoUserId(input.userIds.orderer) || isDemoUserId(input.userIds.receiver)) return 'demo'
+  switch (serverPaymentMode(input)) {
+    case 'live':
+      return 'charge'
+    case 'uncharged':
+      return 'uncharged'
+    default:
+      return 'refuse'
+  }
+}
+
+/**
+ * What this server can do about money at all, independent of any one match.
+ *
+ * Reported on `/api/health` so an end-to-end check can assert which side of the
+ * gate the server it is talking to actually sits on, rather than discovering it
+ * from the behaviour it was supposed to be testing. Sharing steps 2-4 with
+ * `paymentDisposition` above is the point: the mode a server *claims* and the
+ * decision it *makes* cannot drift apart.
+ */
+export function serverPaymentMode(input: {
+  stripeConfigured: boolean
+  unchargedAllowed: boolean
+}): 'live' | 'uncharged' | 'unconfigured' {
+  if (input.stripeConfigured) return 'live'
+  if (input.unchargedAllowed) return 'uncharged'
+  return 'unconfigured'
+}
 
 export type LegStatus = 'pending' | 'succeeded' | 'failed' | 'refunded'
 
@@ -82,12 +152,12 @@ export type PaymentEffect =
   | { kind: 'noop'; reason: 'unknown_leg' | 'already_final' | 'match_over' }
   /** This half is in; the other has not landed yet. */
   | { kind: 'pending' }
-  /** Both halves paid. Release the pickup code. */
-  | { kind: 'cleared'; pickupCode: string }
+  /** Both halves paid. Release the match's pickup code to the orderer. */
+  | { kind: 'cleared' }
   /**
    * A half will never be paid, so the match is dead. Refund every leg in
-   * `refund` (they were charged for a box that is not happening) and return
-   * both buyers to the queue.
+   * `refund` (they were charged for a box that is not happening) and take both
+   * buyers off this match.
    */
   | { kind: 'unwind'; failedRole: BuyerRole; refund: PaymentLeg[] }
 
@@ -168,9 +238,16 @@ export function retainedFeeCents(ledger: PaymentLedger): number {
   return collected === ledger.totalCollectedCents ? ledger.platformFeeCents : 0
 }
 
-/** The code the buyers show each other. Issued only once both halves clear. */
-export function pickupCode(matchId: string): string {
-  return matchId.replace(/-/g, '').slice(0, 6).toUpperCase()
+/**
+ * Has every half of this match actually been paid?
+ *
+ * The gate on releasing a pickup code and, through `handleConfirmPickup`, on
+ * reaching a D1 ledger row at all. Deliberately not `collectedCents === total`:
+ * a leg that succeeded and was then refunded leaves the arithmetic ambiguous,
+ * and the statuses are not.
+ */
+export function allLegsPaid(ledger: PaymentLedger): boolean {
+  return ledger.legs.length > 0 && ledger.legs.every((leg) => leg.status === 'succeeded')
 }
 
 /**
@@ -213,9 +290,7 @@ export function applyPaymentOutcome(
 
   if (result.outcome === 'succeeded') {
     const next = replaceLeg(ledger, index, { ...leg, status: 'succeeded' })
-    if (next.legs.every((l) => l.status === 'succeeded')) {
-      return { ledger: next, effect: { kind: 'cleared', pickupCode: pickupCode(next.matchId) } }
-    }
+    if (allLegsPaid(next)) return { ledger: next, effect: { kind: 'cleared' } }
     return { ledger: next, effect: { kind: 'pending' } }
   }
 

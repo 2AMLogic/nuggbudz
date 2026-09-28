@@ -34,8 +34,18 @@ test.beforeAll(() => {
   })
   execFileSync(
     'npx',
-    ['wrangler', 'kv', 'key', 'put', `session:${BUYER.sid}`, value, '--binding', 'SESSIONS', '--local'],
-    { stdio: 'pipe', env: WRANGLER_ENV }
+    [
+      'wrangler',
+      'kv',
+      'key',
+      'put',
+      `session:${BUYER.sid}`,
+      value,
+      '--binding',
+      'SESSIONS',
+      '--local',
+    ],
+    { stdio: 'pipe', env: WRANGLER_ENV },
   )
 })
 
@@ -82,11 +92,11 @@ test('the cell map renders real tiles, not a constant placeholder', async ({ bro
     await page.waitForTimeout(3_000)
 
     const decoded = await tiles.evaluateAll((imgs) =>
-      imgs.map((img) => (img as HTMLImageElement).naturalWidth)
+      imgs.map((img) => (img as HTMLImageElement).naturalWidth),
     )
     expect(
       decoded.filter((w) => w > 0).length,
-      'no tile image decoded — the basemap drew nothing'
+      'no tile image decoded — the basemap drew nothing',
     ).toBeGreaterThan(0)
 
     const sizes = [...tileSizes.values()]
@@ -95,7 +105,7 @@ test('the cell map renders real tiles, not a constant placeholder', async ({ bro
     expect(
       new Set(sizes).size,
       `every tile came back the same byte length (${sizes[0]}B across ${sizes.length} tiles) — ` +
-        'the signature of a constant placeholder image, not a basemap'
+        'the signature of a constant placeholder image, not a basemap',
     ).toBeGreaterThan(1)
   } finally {
     await context.close()

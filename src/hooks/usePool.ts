@@ -1,13 +1,7 @@
-import { MAX_CHAT_HISTORY } from '@shared/chat'
+import { isChatErrorCode, MAX_CHAT_HISTORY } from '@shared/chat'
 import type { BuyerRole } from '@shared/economics'
 import type { LocationSource } from '@shared/location'
-import type {
-  CellBuddy,
-  ChatRelayMessage,
-  MatchedMessage,
-  ProtocolErrorCode,
-  ServerMessage,
-} from '@shared/protocol'
+import type { CellBuddy, ChatRelayMessage, MatchedMessage, ServerMessage } from '@shared/protocol'
 import type { SauceSelection } from '@shared/sauces'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -27,26 +21,6 @@ export interface ChatLine extends ChatRelayMessage {
 
 /** Stages where the socket has done its job and a close is not an error. */
 const TERMINAL: readonly PoolStage[] = ['matched', 'settled', 'disputed']
-
-/**
- * Refusals that belong under the chat box rather than beside the pickup code.
- *
- * The two surfaces share one socket and therefore one `error` frame, so the code
- * is the only thing that says which control a refusal is about. Routing by code
- * keeps `bad_pickup_code` off the chat input — someone mistyping the code their
- * bud read out must not be told the *chat* refused it.
- *
- * `not_matched` is deliberately absent even though a chat send can earn it: it
- * means the match itself is over, which is a fact about the screen rather than
- * about the line you just typed, and the stage change that accompanies it moves
- * the buyer off this surface anyway.
- */
-const CHAT_ERROR_CODES: readonly ProtocolErrorCode[] = [
-  'chat_empty',
-  'chat_too_long',
-  'chat_rate_limited',
-  'buddy_offline',
-]
 
 export interface JoinRequest {
   dealId: string
@@ -376,7 +350,7 @@ export function usePool() {
             case 'error':
               // Two surfaces, one socket: the code decides which one hears about
               // it, so a mistyped pickup code is never reported as a chat problem.
-              return CHAT_ERROR_CODES.includes(message.code)
+              return isChatErrorCode(message.code)
                 ? { ...prev, chatError: message.message }
                 : { ...prev, error: message.message }
             default:

@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CHAT_ERROR_CODES,
   CHAT_FRAME_LIMIT,
   CHAT_RATE_LIMIT,
   CHAT_RATE_WINDOW_MS,
+  isChatErrorCode,
   MAX_CHAT_CHARS,
   reviewChatText,
 } from '../shared/chat'
 import { sanitizeDemoName } from '../shared/demo'
+import type { ProtocolErrorCode } from '../shared/protocol'
 import { slidingWindow } from '../shared/ratelimit'
 import { countCodePoints, sanitizeDisplayText } from '../shared/text'
 
@@ -177,5 +180,61 @@ describe('one sanitizer, two callers', () => {
   it('sanitizeDisplayText reports "nothing survived" rather than guessing', () => {
     expect(sanitizeDisplayText('​‮', 40)).toBe('')
     expect(sanitizeDisplayText(undefined, 40)).toBe('')
+  })
+})
+
+/**
+ * Which control on the matched screen a refusal belongs to.
+ *
+ * Typed as a total map over `ProtocolErrorCode`, which is the point: the two
+ * surfaces share one socket and one `error` frame, so adding a code without
+ * deciding where it renders is the bug this table prevents. A new code fails to
+ * compile here until it is classified, rather than silently appearing under the
+ * chat box — which is exactly how "wrong pickup code" once got reported as a chat
+ * problem.
+ */
+const SURFACE: Record<ProtocolErrorCode, 'chat' | 'elsewhere'> = {
+  bad_message: 'elsewhere',
+  unknown_deal: 'elsewhere',
+  already_waiting: 'elsewhere',
+  already_matched: 'elsewhere',
+  not_waiting: 'elsewhere',
+  // A chat send can earn this one, but it says the match is over — a fact about
+  // the whole screen, not about the line just typed.
+  not_matched: 'elsewhere',
+  unknown_sauce: 'elsewhere',
+  bad_pickup_code: 'elsewhere',
+  already_confirmed: 'elsewhere',
+  match_disputed: 'elsewhere',
+  chat_empty: 'chat',
+  chat_too_long: 'chat',
+  chat_rate_limited: 'chat',
+  buddy_offline: 'chat',
+}
+
+describe('error routing between the two controls of a match', () => {
+  it('classifies every protocol error code, and agrees with the table', () => {
+    for (const [code, surface] of Object.entries(SURFACE)) {
+      expect(isChatErrorCode(code), code).toBe(surface === 'chat')
+    }
+  })
+
+  it('routes the refusals a chat send can earn, and no others', () => {
+    // Pinned as a set so a code cannot be quietly dropped from the list: losing
+    // one would leave that refusal rendering on the pickup surface, where the
+    // matched screen does not look for it.
+    expect([...CHAT_ERROR_CODES].sort()).toEqual([
+      'buddy_offline',
+      'chat_empty',
+      'chat_rate_limited',
+      'chat_too_long',
+    ])
+  })
+
+  it('keeps the pickup refusals off the chat input', () => {
+    // The regression that motivated the split: both of these reached the chat
+    // box, styled as though the chat had refused them.
+    expect(isChatErrorCode('bad_pickup_code')).toBe(false)
+    expect(isChatErrorCode('already_confirmed')).toBe(false)
   })
 })

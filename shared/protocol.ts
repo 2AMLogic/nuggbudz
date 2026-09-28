@@ -1,4 +1,4 @@
-import { CHAT_FRAME_LIMIT } from './chat'
+import { CHAT_FRAME_LIMIT, type ChatErrorCode } from './chat'
 import type { BuyerRole, BuyerShare, Settlement } from './economics'
 import type { ExpiryWindows } from './expiry'
 import type { LocationSource } from './location'
@@ -268,6 +268,13 @@ export interface PongMessage {
   at: number
 }
 
+/**
+ * Everything the server will refuse a request with.
+ *
+ * The chat half comes from `CHAT_ERROR_CODES` rather than being spelled out
+ * again, because that list is also what routes a refusal to the right control on
+ * the matched screen. Adding a chat code in one place only is not possible.
+ */
 export type ProtocolErrorCode =
   | 'bad_message'
   | 'unknown_deal'
@@ -279,16 +286,7 @@ export type ProtocolErrorCode =
   | 'bad_pickup_code'
   | 'already_confirmed'
   | 'match_disputed'
-  /** Nothing printable survived sanitizing — an all-zero-width message, say. */
-  | 'chat_empty'
-  | 'chat_too_long'
-  | 'chat_rate_limited'
-  /**
-   * Still matched, but the buddy's socket is gone. The message is dropped and
-   * said to be dropped: a relay with no live recipient must never look like a
-   * queued one.
-   */
-  | 'buddy_offline'
+  | ChatErrorCode
 
 export interface ErrorMessage {
   type: 'error'

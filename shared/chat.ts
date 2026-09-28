@@ -49,6 +49,42 @@ export const CHAT_RATE_WINDOW_MS = 10_000
 export const MAX_CHAT_HISTORY = 50
 
 /**
+ * The refusals a buyer earns by *saying something*, as opposed to by anything
+ * else they do with their match.
+ *
+ * The matched screen has two controls sharing one socket — the chat input and the
+ * pickup confirmation — and therefore one `error` frame between them. This list
+ * is what tells a client which of the two a refusal is about, so it lives here
+ * rather than in the client: `ProtocolErrorCode` is built from it, which means a
+ * new chat refusal cannot be emitted by the server without also being routed on
+ * screen. The alternative, once shipped, put "wrong pickup code" under the chat
+ * box styled as a chat refusal.
+ *
+ * `not_matched` is not here even though a chat send can earn it: it says the
+ * match is over, which is a fact about the whole screen rather than about the
+ * line just typed.
+ */
+export const CHAT_ERROR_CODES = [
+  /** Nothing printable survived sanitizing — an all-zero-width message, say. */
+  'chat_empty',
+  'chat_too_long',
+  'chat_rate_limited',
+  /**
+   * Still matched, but the buddy's socket is gone. The message is dropped and
+   * said to be dropped: a relay with no live recipient must never look like a
+   * queued one.
+   */
+  'buddy_offline',
+] as const
+
+export type ChatErrorCode = (typeof CHAT_ERROR_CODES)[number]
+
+/** Whether a refusal belongs under the chat input rather than by the pickup code. */
+export function isChatErrorCode(code: string): code is ChatErrorCode {
+  return (CHAT_ERROR_CODES as readonly string[]).includes(code)
+}
+
+/**
  * The verdict on one untrusted message body.
  *
  * `too_long` is reported rather than truncated on purpose. Silently cutting a

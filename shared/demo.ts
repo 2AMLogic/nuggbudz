@@ -21,6 +21,13 @@
  * checkout, a test run and CI all exercise the strict path and no `vite build`
  * can bake an auth bypass into a production artifact by accident. This mirrors
  * the reasoning 311alarm applies to its dev-OTP flag.
+ *
+ * `wrangler dev --var` is a different lever and does not reliably work: on the
+ * currently pinned wrangler version (confirmed on 4.142.0, macOS arm64) it lists
+ * the binding in the startup table but the Worker sees this env var as
+ * `undefined` at runtime (#37). Not load-bearing here either way — local dev
+ * runs through `pnpm dev` (`vite dev`), not `wrangler dev` — so `.dev.vars` is
+ * the only mechanism to trust locally; see README.md's "Demo pairing" section.
  */
 import { parseCookies } from './auth'
 import { sanitizeDisplayText } from './text'

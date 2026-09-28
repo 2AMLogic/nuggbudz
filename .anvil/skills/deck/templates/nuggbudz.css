@@ -1,0 +1,592 @@
+/* nuggbudz.css — NuggBudz brand theme for anvil:deck
+ *
+ * Ported from .anvil/anvil/lib/marp/brand-theme-starter.css per the recipe in
+ * .anvil/anvil/lib/snippets/brand-theme-porting.md. Registered as a consumer
+ * override at .anvil/skills/deck/templates/nuggbudz.css; render with
+ * `--theme-set` pointing here (see the render line in the thread's
+ * _revision-log.md).
+ *
+ * The identity is 1996 workstation graphics, competently executed: a banded
+ * sky over a black-and-white checkerboard, a console bolted in front of it,
+ * chrome display type and phosphor-green readouts. The joke is treating a box
+ * of nuggets as seriously as 1996 treated a teapot, and a joke told carelessly
+ * is not funny — so no rainbow gradients, no starfields, no marquee.
+ *
+ * Every colour below is lifted verbatim from the app's own tokens in
+ * `src/styles/globals.css` (issue #121/#123). That is the point: if the deck's
+ * palette drifts from the app's, the deck stops being evidence that the
+ * product looks like this. When a slide needs something the app's stylesheet
+ * has no opinion about, the brand direction is extended here rather than a UI
+ * token bent into a job it was not designed for — the `--nb-*` namespace keeps
+ * those additions legible as deck-side decisions.
+ */
+
+/* @theme nuggbudz */
+
+@import "default";
+
+/* The app loads these two families from Google Fonts at the same axes; the
+ * deck asks for the same file so the rendered PDF and the running product set
+ * type identically. Fallbacks are real: a render host with no network still
+ * produces a legible deck, just not a branded one. */
+@import url("https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap");
+
+/* @anvil-capacity
+   top_padding_px: 64
+   bottom_padding_px: 64
+   capacity_units: 12.6
+*/
+/*
+ * Why the block exists (issue #1150): the `slide-content-overflow` pre-flight
+ * lint is calibrated against the SHIPPED anvil-deck geometry — 56px vertical
+ * padding, 26px/1.45 body type, 13.0 line units of budget. This theme keeps
+ * the body metrics identical (26px × 1.45 ≈ the same 40px line advance, so
+ * `body_line_height_px` is unchanged and deliberately not restated) but spends
+ * 8px more padding top and bottom on the brand rule and the footer strip. That
+ * is 16px less safe area — 0.4 line units — so the budget is declared at 12.6
+ * rather than left to silently miscalibrate. `_class: ask` padding is 88px
+ * against this theme's 64px base, the same 24px-per-side delta the shipped
+ * theme's 80-against-56 has, so `ask_class_capacity_penalty_units` keeps its
+ * shipped value and is likewise not restated. A lint that keeps reporting
+ * about the wrong geometry is a check that cannot fail for the thing it names.
+ */
+
+:root {
+  /* ---- Lifted verbatim from src/styles/globals.css ---------------------- */
+
+  /* The sky, banded. The steps are the point — an 8-bit ramp, not a blend. */
+  --nb-void: #0c0726;
+  --nb-sky: #190f4c;
+  --nb-horizon: #a01d66;
+
+  /* The console. `panel` is the surface everything sits on; `chrome` is type. */
+  --nb-panel: #241a5e;
+  --nb-chrome: #e8ecf7;
+  --nb-steel: #8e9ac0;
+  --nb-rule: #453a86;
+
+  /* The phosphor tube the readouts are printed on. */
+  --nb-tube: #080520;
+  --nb-phosphor: #4dffa6;
+  --nb-phosphor-dim: #43c98c;
+
+  /* The product, and the only warm thing on the screen. */
+  --nb-nugget: #ffb02e;
+  /* Refusals and savings. Hot pink rather than red: it belongs to the sky. */
+  --nb-ketchup: #ff4f79;
+
+  /* ---- Deck-side extensions of the direction --------------------------- */
+
+  /* The banded sky itself, in the same eight steps the app's canvas uses.
+   * globals.css paints this on `body::before`; a Marp slide has no such layer,
+   * so it is a token here and applied per slide class. */
+  --nb-sky-bands: linear-gradient(
+    180deg,
+    var(--nb-void) 0 26%,
+    var(--nb-sky) 26% 44%,
+    #22105f 44% 57%,
+    #30116d 57% 68%,
+    #451273 68% 78%,
+    #5f1573 78% 86%,
+    #7d1870 86% 93%,
+    var(--nb-horizon) 93% 100%
+  );
+
+  /* A content slide is the console, not the sky: a near-flat field with the
+   * horizon only hinted at the bottom edge, so tables and body copy sit on
+   * something quiet. */
+  /* The steps sit below the content area on purpose: a hard band edge is the
+   * right idiom for a sky and the wrong one for a line of body copy to sit
+   * across, and a slide filled to capacity reaches roughly three quarters of
+   * the way down. */
+  --nb-console: linear-gradient(
+    180deg,
+    var(--nb-void) 0 78%,
+    #120b33 78% 90%,
+    var(--nb-sky) 90% 100%
+  );
+
+  --nb-display: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --nb-body: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --nb-mono: "Space Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* ------------------------------------------------------------------ */
+/* Base slide chrome                                                   */
+/*                                                                     */
+/* Body metrics are the shipped theme's on purpose (see @anvil-capacity */
+/* above): 26px at 1.45 is what the overflow model is calibrated to,    */
+/* and the brand is carried by colour and type, not by resizing text.   */
+/* ------------------------------------------------------------------ */
+section {
+  font-family: var(--nb-body);
+  font-size: 26px;
+  line-height: 1.45;
+  font-variation-settings: "wdth" 100;
+  color: var(--nb-chrome);
+  background: var(--nb-console);
+  padding: 64px 72px;
+}
+
+/* The brand rule: a hard magenta hairline at the top of every slide, the one
+ * piece of chrome that survives on every class. Absolutely positioned so it
+ * costs no vertical flow and the capacity contract above stays true. */
+section::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  background: linear-gradient(90deg, var(--nb-horizon), var(--nb-nugget));
+}
+
+/* Headings — condensed, heavy, chrome. The display face is the same variable
+ * Archivo the app fills with a silver ramp; a Marp heading cannot carry the
+ * ramp through the foreignObject PDF path, so it carries the weight and the
+ * width axis instead. */
+section h1 {
+  font-family: var(--nb-display);
+  font-size: 56px;
+  font-weight: 800;
+  font-variation-settings: "wdth" 80;
+  letter-spacing: -0.5px;
+  color: var(--nb-chrome);
+  margin: 0 0 24px 0;
+  line-height: 1.15;
+}
+
+section h2 {
+  font-family: var(--nb-display);
+  font-size: 40px;
+  font-weight: 700;
+  font-variation-settings: "wdth" 85;
+  color: var(--nb-chrome);
+  margin: 0 0 28px 0;
+  line-height: 1.2;
+  border-bottom: 3px solid var(--nb-nugget);
+  padding-bottom: 12px;
+  display: inline-block;
+}
+
+section h3 {
+  font-family: var(--nb-display);
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--nb-steel);
+  margin: 16px 0 8px 0;
+}
+
+section p {
+  margin: 0 0 16px 0;
+}
+
+/* Amber is the product colour and it is the emphasis colour; nothing else on
+ * a content slide is warm. */
+section strong {
+  color: var(--nb-nugget);
+  font-weight: 700;
+}
+
+section em {
+  color: var(--nb-steel);
+  font-style: italic;
+}
+
+section a {
+  color: var(--nb-phosphor);
+  text-decoration: none;
+  border-bottom: 1px solid var(--nb-rule);
+}
+
+section ul,
+section ol {
+  margin: 16px 0;
+  padding-left: 28px;
+}
+
+section li {
+  margin: 8px 0;
+}
+
+section li::marker {
+  color: var(--nb-horizon);
+}
+
+/* Tables — a readout, so figures set in the mono face and no zebra striping. */
+section table {
+  border-collapse: collapse;
+  margin: 16px 0;
+  font-size: 22px;
+}
+
+section table th {
+  background: var(--nb-panel);
+  color: var(--nb-chrome);
+  font-family: var(--nb-display);
+  font-weight: 700;
+  font-variation-settings: "wdth" 85;
+  letter-spacing: 0.3px;
+  padding: 10px 16px;
+  border-bottom: 3px solid var(--nb-nugget);
+  text-align: left;
+}
+
+section table td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--nb-rule);
+  vertical-align: top;
+}
+
+/* Right-aligned money columns read as a till roll when they are monospaced,
+ * which is exactly what they are. */
+section table td[align="right"],
+section table th[align="right"] {
+  font-family: var(--nb-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Defeat the imported Marp default theme's row shading. It has to be a blanket
+ * reset across tr / tbody / both nth-child parities, not the single `even` rule
+ * anvil-deck.css gets away with: on a dark theme the default's near-white row
+ * fill is not merely chartjunk, it paints chrome-on-white and the row vanishes.
+ * Verified in the rendered PDF — the first cut of this theme lost every odd row
+ * on five slides. */
+section table tr,
+section table tbody,
+section table tbody tr,
+section table tbody tr:nth-child(odd),
+section table tbody tr:nth-child(even),
+section table tbody tr:nth-child(odd) td,
+section table tbody tr:nth-child(even) td {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+/* Code and inline literals are phosphor on the tube — the app's readout
+ * treatment, one for one. */
+section code {
+  font-family: var(--nb-mono);
+  font-size: 0.86em;
+  background: var(--nb-tube);
+  color: var(--nb-phosphor);
+  padding: 2px 6px;
+  border: 1px solid var(--nb-rule);
+  border-radius: 2px;
+}
+
+section pre {
+  background: var(--nb-tube);
+  border: 1px solid var(--nb-rule);
+}
+
+section pre code {
+  border: none;
+  background: transparent;
+}
+
+/* Images — no plate, no shadow. Every figure in this deck is authored on a
+ * transparent or dark ground so it sits on the slide rather than on a white
+ * card punched through it. */
+section img {
+  max-width: 100%;
+  /* 60vh, not the shipped theme's 75vh: this theme spends 8px more padding top
+   * and bottom and carries a footer strip, and at 75vh a full-width figure ran
+   * over both the italic supporting line and the footer. */
+  max-height: 60vh;
+  object-fit: contain;
+  display: block;
+  margin: 16px auto;
+}
+
+/* Pagination — small, steel, monospaced. */
+section::after {
+  font-family: var(--nb-mono);
+  font-size: 14px;
+  color: var(--nb-steel);
+  font-weight: 400;
+}
+
+/* ------------------------------------------------------------------ */
+/* SLOT: title slide — `<!-- _class: title -->`                        */
+/* The full banded sky, because the title is the one slide that is all */
+/* world and no console.                                               */
+/* ------------------------------------------------------------------ */
+section.title {
+  background: var(--nb-sky-bands);
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 88px 100px;
+}
+
+section.title h1 {
+  font-size: 88px;
+  font-weight: 800;
+  font-variation-settings: "wdth" 75;
+  letter-spacing: -1.5px;
+  color: var(--nb-chrome);
+  /* The app's display type is a silver fill on a hard offset shadow, outlined
+   * thinly in the sky's darkest band. The fill does not survive Marp's
+   * foreignObject path; the offset and the outline do, and they are what the
+   * eye reads as chrome. */
+  text-shadow:
+    3px 3px 0 var(--nb-horizon),
+    6px 6px 0 var(--nb-void);
+  -webkit-text-stroke: 0.5px var(--nb-void);
+  margin: 0 0 20px 0;
+  line-height: 1.02;
+}
+
+section.title h2 {
+  font-size: 32px;
+  font-weight: 500;
+  font-variation-settings: "wdth" 95;
+  border: none;
+  padding: 0;
+  margin: 0 0 56px 0;
+  color: var(--nb-chrome);
+  display: block;
+}
+
+section.title em {
+  font-family: var(--nb-mono);
+  font-size: 20px;
+  font-style: normal;
+  color: var(--nb-steel);
+}
+
+/* ------------------------------------------------------------------ */
+/* SLOT: section divider — `<!-- _class: section -->`                  */
+/* ------------------------------------------------------------------ */
+section.section,
+section.divider {
+  background: var(--nb-sky-bands);
+  color: var(--nb-chrome);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+section.section h1,
+section.divider h1 {
+  font-size: 64px;
+  font-weight: 800;
+  font-variation-settings: "wdth" 78;
+  color: var(--nb-chrome);
+  text-shadow:
+    3px 3px 0 var(--nb-horizon),
+    6px 6px 0 var(--nb-void);
+  margin: 0;
+}
+
+section.section::after,
+section.divider::after {
+  color: rgba(232, 236, 247, 0.7);
+}
+
+/* ------------------------------------------------------------------ */
+/* SLOT: ask slide — `<!-- _class: ask -->`                            */
+/* The horizon band, full bleed. 88px vertical padding against the     */
+/* 64px base is the same 24px-per-side delta the shipped theme has     */
+/* (80 against 56), so the lint's shipped ask penalty stays correct.   */
+/* ------------------------------------------------------------------ */
+section.ask {
+  background: linear-gradient(180deg, var(--nb-sky) 0 30%, #6d1670 30% 66%, var(--nb-horizon) 66% 100%);
+  color: #ffffff;
+  padding: 88px 100px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+section.ask h1 {
+  color: #ffffff;
+  font-size: 60px;
+  font-weight: 800;
+  font-variation-settings: "wdth" 78;
+  text-shadow: 3px 3px 0 rgba(12, 7, 38, 0.55);
+  margin: 0 0 32px 0;
+}
+
+section.ask h2 {
+  color: #ffffff;
+  border-bottom: 3px solid rgba(255, 255, 255, 0.45);
+  font-size: 32px;
+  margin-bottom: 36px;
+}
+
+section.ask strong {
+  color: var(--nb-nugget);
+  font-weight: 800;
+}
+
+section.ask em {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+section.ask a {
+  color: #ffffff;
+  border-bottom-color: rgba(255, 255, 255, 0.5);
+}
+
+section.ask ul {
+  margin: 24px 0;
+}
+
+section.ask li {
+  margin: 14px 0;
+  font-size: 28px;
+}
+
+section.ask::after {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+section.ask table th,
+section.ask table td {
+  background: transparent;
+  background-color: transparent;
+  color: #ffffff;
+}
+
+section.ask table th {
+  border-bottom-color: rgba(255, 255, 255, 0.45);
+}
+
+section.ask table td {
+  border-bottom-color: rgba(255, 255, 255, 0.25);
+}
+
+section.ask table tr,
+section.ask table tbody,
+section.ask table tbody tr:nth-child(odd),
+section.ask table tbody tr:nth-child(even) {
+  background: transparent;
+  background-color: transparent;
+}
+
+/* ------------------------------------------------------------------ */
+/* SLOT: appendix — `<!-- _class: appendix -->`                        */
+/* The audit slide, so it is the phosphor tube rather than the world.  */
+/* ------------------------------------------------------------------ */
+section.appendix {
+  background: var(--nb-tube);
+}
+
+section.appendix h2 {
+  color: var(--nb-phosphor-dim);
+  border-bottom: 3px solid var(--nb-phosphor-dim);
+}
+
+section.appendix strong {
+  color: var(--nb-phosphor);
+}
+
+section.appendix code {
+  color: var(--nb-phosphor);
+}
+
+section.appendix::before {
+  content: "Appendix";
+  position: absolute;
+  top: 22px;
+  right: 32px;
+  height: auto;
+  left: auto;
+  background: none;
+  font-family: var(--nb-mono);
+  font-size: 14px;
+  color: var(--nb-phosphor-dim);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+
+/* ------------------------------------------------------------------ */
+/* SLOT: callout box — `<div class="callout"> ... </div>`              */
+/* Class-based, never inline `style="display: ..."`: Marp's            */
+/* foreignObject PDF path silently drops those (anvil issue #128).     */
+/* ------------------------------------------------------------------ */
+section .callout {
+  background: var(--nb-panel);
+  border-left: 6px solid var(--nb-phosphor);
+  border-radius: 2px;
+  padding: 18px 24px;
+  margin: 16px 0;
+}
+
+section .callout strong {
+  color: var(--nb-phosphor);
+}
+
+/* ------------------------------------------------------------------ */
+/* SLOT: footer / confidentiality strip                                */
+/* Text comes from the deck frontmatter `footer:` directive.           */
+/* ------------------------------------------------------------------ */
+section footer {
+  font-family: var(--nb-mono);
+  color: var(--nb-steel);
+  font-size: 14px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+/* --- Stock layout classes (mirrored from anvil-deck.css) ----------------- */
+
+section .row {
+  display: flex;
+  gap: 2em;
+  align-items: center;
+}
+
+section .row > * {
+  flex: 1;
+  min-width: 0;
+}
+
+section .split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2em;
+  align-items: center;
+}
+
+/* A generated image that fills the slide edge to edge, used by the imagery
+ * slides. `bleed` sits inside the padded flow rather than escaping it, so the
+ * capacity model still sees an ordinary image block. */
+section .bleed img {
+  width: 100%;
+  max-height: 62vh;
+  object-fit: cover;
+  margin: 0 auto 12px auto;
+}
+
+/* Concept-render attribution. Every generated image on a slide carries one of
+ * these; the fabrication-attribution contract in 2am/docs/image-generation.md
+ * is not waivable, and an attribution nobody can read is not an attribution. */
+section .attrib {
+  font-family: var(--nb-mono);
+  font-size: 14px;
+  letter-spacing: 0.3px;
+  color: var(--nb-steel);
+  margin: 0;
+}
+
+/* Over a full-bleed image the attribution has to survive whatever is behind it.
+ * An attribution nobody can read is not an attribution, and this one is the
+ * fabrication-attribution contract discharging itself. */
+section.title .attrib,
+section.section .attrib,
+section.ask .attrib {
+  color: rgba(232, 236, 247, 0.92);
+  text-shadow:
+    0 1px 2px var(--nb-void),
+    0 0 8px var(--nb-void);
+}
+
+section.section .attrib,
+section.divider .attrib {
+  font-size: 15px;
+}

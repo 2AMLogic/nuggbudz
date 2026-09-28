@@ -1,0 +1,32 @@
+%% Shard names and distances are computed with the repo's own
+%% geohash()/distanceMeters() from shared/geo.ts, not invented. This figure
+%% reflects the configuration landing in #82/#89 (POOL_CELL_PRECISION 3,
+%% MATCH_RADIUS_METERS 3219 -- two miles), which replaces the geohash cell
+%% with a coarse shard and makes the radius the only thing that decides who
+%% can pair:
+%%   37.7955,-122.3937 -> shard 9q8   37.7969,-122.3921 -> shard 9q8 (210 m apart)
+%%   37.8080,-122.4177 -> shard 9q8 (2.5 km from A -- inside the 2-mile radius)
+%%   37.8280,-122.4450 -> shard 9q8 (5.8 km from A -- same shard, outside the
+%%     2-mile radius, so this buyer stays queued alone)
+%% Rendered by mmdc with -c figures/src/mermaid-theme.json -b transparent. That
+%% theme is this thread's own, in the NuggBudz palette, and it is where the
+%% anvil-accent / anvil-muted / anvil-warning node classes get their colours
+%% from; anvil's shipped mermaid theme is navy-on-white, which on the dark
+%% `nuggbudz` slide would be a white card punched into the sky.
+flowchart LR
+    A["Phone A<br/>37.7955, -122.3937"]:::client -->|"wss /api/pool/ws"| W
+    B["Phone B<br/>210 m from A"]:::client -->|"wss"| W
+    C["Phone C<br/>2.5 km from A<br/>inside the 2-mi radius"]:::client -->|"wss"| W
+    PD["Phone D<br/>5.8 km from A<br/>same shard, outside the radius"]:::anvil-warning -->|"wss"| W
+
+    W["Cloudflare Worker (Hono)<br/>resolves shard + identity<br/>before the upgrade"]:::anvil-muted
+
+    W -->|"idFromName('9q8')"| P1
+
+    subgraph shard["One Durable Object per shard (precision-3 geohash, ~156 km) -- the shard is not the matching market"]
+        P1["NuggPool 9q8<br/>A + B + C: within 2 mi of each other, pair here<br/>D: 5.8 km away, stays queued alone<br/>one event at a time"]:::anvil-accent
+    end
+
+    P1 -->|"settled split"| LEDGER[("D1 ledger")]
+
+    classDef client fill:#080520,stroke:#8e9ac0,stroke-width:2px,color:#e8ecf7

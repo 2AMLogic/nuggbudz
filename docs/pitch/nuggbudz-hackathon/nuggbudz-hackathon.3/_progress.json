@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "thread": "nuggbudz-hackathon",
+  "phases": {
+    "revise": {
+      "state": "done",
+      "started": "2026-09-28T19:15:00Z",
+      "completed": "2026-09-28T19:52:00Z"
+    },
+    "imagegen": {
+      "state": "done",
+      "started": "2026-09-28T19:35:00Z",
+      "completed": "2026-09-28T19:44:00Z",
+      "dispatched": 3,
+      "skipped_unchanged": 3,
+      "failed": 0
+    },
+    "figures": {
+      "state": "done",
+      "started": "2026-09-28T19:44:00Z",
+      "completed": "2026-09-28T19:48:00Z"
+    }
+  },
+  "metadata": {
+    "iteration": 3,
+    "max_iterations": 4,
+    "iteration_cap_rationale": null,
+    "imagery_policy": "generative-eligible",
+    "imagery_style": "nugg-1996-composite",
+    "theme": "nuggbudz",
+    "outline_honoured": "nuggbudz-hackathon.0.outline/outline.md",
+    "scored_review": "nuggbudz-hackathon.2.review",
+    "scored_review_rationale": "`.3` changed the theme and the imagery and left every claim, figure and slide argument where `.2` put them, so `.2`'s 40/49 verdict still describes this artifact's argument. A fresh critic pass is owed the next time the content moves."
+  }
+}

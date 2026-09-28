@@ -1,0 +1,19 @@
+{
+  "tool": "imagine 0.1.0",
+  "provider": "gemini",
+  "model": "gemini-3.1-flash-image",
+  "alias": "nano-banana",
+  "prompt": "A composite of two layers, and the contrast between them is the point. The ground is a real photograph: available light, ordinary surfaces, a plain generic setting with no signage, no branding and no recognisable storefront. Sitting on that photographic plate is an unmistakably synthetic 1996 workstation render — a 3D Studio Max r4 render at 320x240 upscaled with visible pixels, flat shaded, hard faceted polygon edges, no smoothing, no antialiasing, one blown-out specular hotspot per object, banded eight-step gradients rather than blends. Palette: deep indigo through violet to hot magenta in the synthetic layer, one warm amber object, an untinted black and white checkerboard, phosphor green for any readout. The render layer never pretends to be photographic and the photograph is never retouched to look rendered; the two meet at a hard seam. A supermarket-sized faceted amber polygon nugget sitting alone in the middle of a real, empty tarmac car park at dusk: wet asphalt, painted bay lines, one sodium lamp flaring at the edge of the frame. Behind it, standing where the real sky would be, a banded indigo to magenta gradient panel with hard visible steps, like a backdrop flat propped up on the tarmac. A black and white checkerboard plane spreads out from under the nugget across the asphalt and stops at a hard straight seam. Wide, low camera, the nugget small in a large empty frame. 16:9 widescreen composition suitable for a slide, with the centre kept uncluttered. No text, no lettering, no numerals, no watermarks, no logos, no brand marks or trade dress of any kind, no recognisable real-world storefront, no identifiable faces.",
+  "refs": [],
+  "aspect_ratio": "16:9",
+  "size": null,
+  "sha256": "edbe7f20b9159e3ed3ab61bb929b227a3fe143fe69760a95115a61cd1b422b00",
+  "created": "2026-09-28T12:35:18-0700",
+  "slot": "divider-spread",
+  "thread": "nuggbudz-hackathon",
+  "version_dir": "nuggbudz-hackathon.3",
+  "style": "nugg-1996-composite",
+  "steps": null,
+  "backend": "scripts.anvil_imagery_backend:Backend",
+  "png_sha256": "9905c102986b3f71af370314b7160472624b25fc2005d490de886ef4e0b17541"
+}

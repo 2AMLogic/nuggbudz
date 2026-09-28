@@ -1,0 +1,22 @@
+{
+  "_comment": "NuggBudz mermaid theme for the .3 deck. Palette: src/styles/globals.css, the same tokens .anvil/skills/deck/templates/nuggbudz.css carries in :root. This replaces .anvil/anvil/lib/figures/mermaid-theme.json on the mmdc -c line for this thread only — anvil's shipped theme is navy-on-white, which is a white hole punched in a dark slide. Render with -b transparent so the diagram sits on the slide rather than on a card. The four anvil-* class names are kept so the .mmd source barely changes; only their colours move.",
+  "theme": "base",
+  "themeCSS": ".anvil-accent > rect, .anvil-accent > polygon { fill: #241a5e !important; stroke: #ffb02e !important; stroke-width: 2px !important; } .anvil-accent span, .anvil-accent .nodeLabel { color: #e8ecf7 !important; fill: #e8ecf7 !important; } .anvil-muted > rect, .anvil-muted > polygon { fill: #190f4c !important; stroke: #8e9ac0 !important; } .anvil-muted span, .anvil-muted .nodeLabel { color: #e8ecf7 !important; fill: #e8ecf7 !important; } .anvil-warning > rect, .anvil-warning > polygon { fill: #a01d66 !important; stroke: #ff4f79 !important; } .anvil-warning span, .anvil-warning .nodeLabel { color: #ffffff !important; fill: #ffffff !important; } .anvil-success > rect, .anvil-success > polygon { fill: #080520 !important; stroke: #4dffa6 !important; } .anvil-success span, .anvil-success .nodeLabel { color: #4dffa6 !important; fill: #4dffa6 !important; } .edgeLabel, .edgeLabel p, .edgeLabel span, .edgeLabel .labelBkg { color: #e8ecf7 !important; } .edgeLabel, .edgeLabel p { background-color: #080520 !important; } .cluster > rect { fill: #120b33 !important; stroke: #453a86 !important; } .cluster span, .cluster .nodeLabel { color: #8e9ac0 !important; fill: #8e9ac0 !important; }",
+  "themeVariables": {
+    "primaryColor": "#241a5e",
+    "primaryTextColor": "#e8ecf7",
+    "primaryBorderColor": "#453a86",
+    "lineColor": "#8e9ac0",
+    "secondaryColor": "#120b33",
+    "secondaryTextColor": "#e8ecf7",
+    "secondaryBorderColor": "#453a86",
+    "tertiaryColor": "#080520",
+    "tertiaryTextColor": "#8e9ac0",
+    "tertiaryBorderColor": "#453a86",
+    "textColor": "#e8ecf7",
+    "fontFamily": "Archivo, Helvetica Neue, Helvetica, Arial, sans-serif",
+    "fontSize": "18px",
+    "padding": 12,
+    "background": "transparent"
+  }
+}

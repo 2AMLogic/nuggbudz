@@ -130,3 +130,32 @@ describe('pitch deck figures', () => {
     ).toEqual([])
   })
 })
+
+describe('the orphan scan', () => {
+  it('ignores a Marp background split width, which is layout and not a claim', () => {
+    // `![bg right:34%]` is how a slide asks for a 34%-wide background panel. The
+    // viewer never reads it and no catalogue could produce it, so scanning it
+    // reports a percentage that cannot be traced and cannot be fixed — the deck
+    // renders correctly and the build goes red anyway. #124 hit this for real.
+    const slide = {
+      name: 'fixture.md',
+      text: '![bg right:34%](assets/generated/hero.png)\n\n## A slide\n',
+    }
+
+    expect(auditDeck(slide, [], ledger).orphans).toEqual([])
+  })
+
+  it('still reads a figure caption, so a number cannot hide in an alt-string', () => {
+    // The exemption is all-or-nothing on purpose: only an alt made *entirely* of
+    // Marp keywords is skipped. Prose in an alt is still prose.
+    const slide = {
+      name: 'fixture.md',
+      text: '![Margins improved 34% year on year](figures/x.png)\n\nMargin was 34%.\n',
+    }
+
+    expect(auditDeck(slide, [], ledger).orphans.map((orphan) => orphan.literal)).toEqual([
+      '34%',
+      '34%',
+    ])
+  })
+})

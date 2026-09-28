@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "deck": {
+    "imagegen": {
+      "backend": "scripts.anvil_imagery_backend:Backend",
+      "default_policy": "deterministic-only"
+    }
+  }
+}

@@ -14,14 +14,34 @@ docs/pitch/
     nuggbudz-hackathon.0.outline/            narrative spine (read-only once written)
     nuggbudz-hackathon.1/                    first draft (immutable)
     nuggbudz-hackathon.1.{review,narrative,market,design,economics}/
-    nuggbudz-hackathon.2/                    current deck: deck.md, speaker-notes.md, deck.pdf
+    nuggbudz-hackathon.2/                    superseded deck (immutable)
     nuggbudz-hackathon.2.{review,narrative,market,design,economics,audit}/
+    nuggbudz-hackathon.3/                    current deck: deck.md, speaker-notes.md, deck.pdf
+      assets/generated/                      generative imagery + one .json sidecar each
+      assets/_prompts.json                   the prompt journal deck-imagegen writes
 ```
 
-Start at `nuggbudz-hackathon.2/deck.pdf` for the slides,
-`nuggbudz-hackathon.2/speaker-notes.md` for the talk track and the demo fallback
-script, and `nuggbudz-hackathon.2.review/verdict.md` for the honest assessment
-of where it is weak.
+Start at `nuggbudz-hackathon.3/deck.pdf` for the slides,
+`nuggbudz-hackathon.3/speaker-notes.md` for the talk track, the demo fallback
+script and the imagery prompts, and `nuggbudz-hackathon.2.review/verdict.md` for
+the honest assessment of where the argument is weak — `.3` changed the deck's
+look, not its claims.
+
+## Every generated image is a concept render, and says so
+
+`.3` is the first version with generative imagery. Six images, all composites in
+the same register: an obviously synthetic flat-shaded 1996-workstation render
+sitting on an ordinary photographic plate. **None of them depicts a real
+merchant's product, restaurant, staff or trade dress** — every plate is a
+generic counter, car park, pavement, table or bench with no signage — and every
+slide that carries one says "concept render" on the slide itself. There are no
+generated photographs of people.
+
+Each `assets/generated/<slot>.png` sits beside a `<slot>.png.json` sidecar
+carrying the full prompt, the provider and model, the aspect ratio, and both the
+provider's hash and the committed file's. **The pair is one artifact**: move
+both, delete both. `assets/_prompts.json` is anvil's own journal of the same run
+and is what makes a re-run free when nothing changed.
 
 ## Every figure is derived from the code
 
@@ -59,27 +79,46 @@ the deck's own test failed on the stale count until the slide was corrected.
 
 ## Regenerating the artifacts
 
-From the version directory (`docs/pitch/nuggbudz-hackathon/nuggbudz-hackathon.2`):
+Generative imagery runs from the **repo root**, because it reads
+`.anvil/config.json` and the adapter at `scripts/anvil_imagery_backend.py`:
 
 ```bash
-# Chart (matplotlib, anvil palette). Data comes from the committed CSV, which is
-# itself generated from shared/deals.ts by scripts/deck-ledger.ts.
-uv run --project ../../../../.anvil --with matplotlib python figures/src/per-nugget.py
+# Generate every <!-- anvil-imagegen: <slot> --> slot in the latest deck.md, and
+# write a .json sidecar beside each PNG. Idempotent: a slot whose prompt, style
+# and steps are unchanged costs no backend call. Needs the `imagine` CLI on PATH
+# and a provider credential — run `imagine doctor` first on any failure.
+PYTHONPATH=.anvil python3 scripts/deck-imagegen.py nuggbudz-hackathon
+```
 
-# Architecture diagram (mermaid -> PNG; inline mermaid does NOT render in Marp PDF)
+Everything else runs from the version directory
+(`docs/pitch/nuggbudz-hackathon/nuggbudz-hackathon.3`):
+
+```bash
+# Chart (matplotlib, NuggBudz palette, transparent so it sits on the dark slide).
+# Data comes from the committed CSV, itself generated from shared/deals.ts by
+# scripts/deck-ledger.ts.
+python3 figures/src/per-nugget.py
+
+# Architecture diagram (mermaid -> PNG; inline mermaid does NOT render in Marp
+# PDF). The theme is this thread's own — anvil's shipped one is navy-on-white.
 mmdc --input figures/src/architecture.mmd --output figures/architecture.png \
-     -c ../../../../.anvil/anvil/lib/figures/mermaid-theme.json \
-     --width 1800 --height 1000 --backgroundColor white
+     -c figures/src/mermaid-theme.json --width 2200 --backgroundColor transparent
 
-# Slides
+# Slides. --theme-set is load-bearing: `nuggbudz` is a consumer override and is
+# not in the pinned themeSet. --no-stdin is load-bearing too — without it marp
+# blocks forever waiting on stdin when it is invoked from a script.
 marp deck.md --pdf --html \
   --config-file ../../../../.anvil/anvil/lib/marp/config.yml \
-  --theme-set ../../../../.anvil/skills/deck/assets/anvil-deck.css \
+  --theme-set ../../../../.anvil/skills/deck/templates/nuggbudz.css \
   --allow-local-files --no-stdin --output deck.pdf
 
-# Deterministic overflow pre-flight (what deck-review gates on)
-uv run --project ../../../../.anvil python -c \
-  "from anvil.lib.marp_lint import lint_deck; print(lint_deck('deck.md').to_summary())"
+# Deterministic overflow pre-flight (what deck-review gates on). Pass the theme's
+# own geometry: the lint's default budget is calibrated against the SHIPPED
+# theme's padding, and a ported theme that does not declare its own
+# @anvil-capacity block gets linted against numbers that are not its own.
+PYTHONPATH=../../../../.anvil python3 -c \
+  "from anvil.lib.marp_lint import lint_deck, geometry_from_theme_contract as g; \
+   print(lint_deck('deck.md', geometry=g('../../../../.anvil/skills/deck/templates/nuggbudz.css').geometry).to_summary())"
 ```
 
 A handout with the speaker notes below each slide needs `pdfjam`, which is not
@@ -87,8 +126,10 @@ installed on the authoring host; the PDF above is the shipped artifact.
 
 ## State of the thread
 
-`REVISED` at `.2`, 40/49 with no critical flags, deliberately **not** advanced to
-`READY`. The nine missing points are market sizing (3) and team credentials (2) —
+`REVISED` at `.3`. The scored review is `.2`'s — 40/49 with no critical flags,
+deliberately **not** advanced to `READY` — and it still stands, because `.3`
+changed the theme and the imagery and left every claim, figure and slide
+argument where `.2` put them. The nine missing points are market sizing (3) and team credentials (2) —
 which this artifact declines to fabricate — plus four points gated on evidence a
 pilot would produce. `nuggbudz-hackathon.2.review/verdict.md` records the call
 and what a fundraising version of the deck would need instead.

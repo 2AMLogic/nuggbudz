@@ -1,0 +1,19 @@
+{
+  "tool": "imagine 0.1.0",
+  "provider": "gemini",
+  "model": "gemini-3.1-flash-image",
+  "alias": "nano-banana",
+  "prompt": "A composite of two layers, and the contrast between them is the point. The ground is a real photograph: available light, ordinary surfaces, a plain generic setting with no signage, no branding and no recognisable storefront. Sitting on that photographic plate is an unmistakably synthetic 1996 workstation render — a 3D Studio Max r4 render at 320x240 upscaled with visible pixels, flat shaded, hard faceted polygon edges, no smoothing, no antialiasing, one blown-out specular hotspot per object, banded eight-step gradients rather than blends. Palette: deep indigo through violet to hot magenta in the synthetic layer, one warm amber object, an untinted black and white checkerboard, phosphor green for any readout. The render layer never pretends to be photographic and the photograph is never retouched to look rendered; the two meet at a hard seam. A plain brown paper takeaway bag standing closed on a real wooden park bench at dusk, photographed in available light, with no printing or branding anywhere on the bag. Hovering just above the bag, obviously synthetic, a single faceted amber polygon nugget, flat shaded, hard edges, one blown out specular, throwing a hard amber cast onto the top of the bag that nothing in the real scene could have produced. A small patch of black and white checkerboard sits under the bag and stops at a hard straight seam at the edge of the slats. There is no rectangular panel, no screen, no monitor, no backdrop flat and no floating frame anywhere in the picture: the synthetic object sits directly on the real surface and the photograph fills the whole frame behind it. The bag and the nugget sit together just right of centre, large in the frame, so the picture survives a tall crop taken through them. 16:9 widescreen composition suitable for a slide, with the centre kept uncluttered. No text, no lettering, no numerals, no watermarks, no logos, no brand marks or trade dress of any kind, no recognisable real-world storefront, no identifiable faces.",
+  "refs": [],
+  "aspect_ratio": "16:9",
+  "size": null,
+  "sha256": "6f8d023ad848028d2efa66427540e25a39391db6f114857a8a96f62dd7c06f98",
+  "created": "2026-09-28T12:37:15-0700",
+  "slot": "ask-bench",
+  "thread": "nuggbudz-hackathon",
+  "version_dir": "nuggbudz-hackathon.3",
+  "style": "nugg-1996-composite",
+  "steps": null,
+  "backend": "scripts.anvil_imagery_backend:Backend",
+  "png_sha256": "5bc90f8ecfdfab4ae1fe1d08a09bd726b6bbf254a7c3fcf699d928b10a024a83"
+}

@@ -338,3 +338,61 @@ parser.
   diagrams).
 - Epic #130 — first-class generative-imagery support for `anvil:deck`.
 - Issue #133 — this preset library.
+
+---
+
+## Consumer presets — NuggBudz
+
+Added per "Authoring a new preset (consumer override)" above. The shipped six
+stay exactly as they are; this section is additive, and `deck-imagegen` is
+pointed at this file with `presets_path=` so the consumer key resolves.
+
+### `nugg-1996-composite`
+
+**Intent**: The NuggBudz house style — an obviously-synthetic 1996 workstation
+render sitting on an obviously-real photographic plate, because the tension
+between the two halves is the identity and neither half alone is.
+
+**Prefix**:
+
+> A composite of two layers, and the contrast between them is the point. The
+> ground is a real photograph: available light, ordinary surfaces, a plain
+> generic setting with no signage, no branding and no recognisable storefront.
+> Sitting on that photographic plate is an unmistakably synthetic 1996
+> workstation render — a 3D Studio Max r4 render at 320x240 upscaled with
+> visible pixels, flat shaded, hard faceted polygon edges, no smoothing, no
+> antialiasing, one blown-out specular hotspot per object, banded eight-step
+> gradients rather than blends. Palette: deep indigo through violet to hot
+> magenta in the synthetic layer, one warm amber object, an untinted black and
+> white checkerboard, phosphor green for any readout. The render layer never
+> pretends to be photographic and the photograph is never retouched to look
+> rendered; the two meet at a hard seam.
+
+**Suffix**:
+
+> 16:9 widescreen composition suitable for a slide, with the centre kept
+> uncluttered. No text, no lettering, no numerals, no watermarks, no logos, no
+> brand marks or trade dress of any kind, no recognisable real-world
+> storefront, no identifiable faces.
+
+**Worked example**:
+
+- **Slide prompt**: `A faceted amber polygon nugget the size of a fist resting
+  on a scuffed stainless steel counter in an anonymous quick-service kitchen,
+  the checkerboard plane running out of the render and dying into the real
+  counter surface.`
+- **Final composed prompt**: the prefix above, then that sentence, then the
+  suffix above — composed by `deck-imagegen` per § "Composition rules".
+
+**Why the prompt names the software and the resolution.** Both Gemini and Flux
+answer "a low-poly nugget" with a photograph. Naming *3D Studio Max r4,
+320x240, no antialiasing, flat shaded, no smoothing* is what actually moves the
+model into the register; the calibration render this preset is written against
+was produced that way.
+
+**Why the guardrail is in the suffix and not left to the prompt author.** Every
+image in this deck is about splitting a real merchant's real product, so a
+photoreal render carrying that merchant's trade dress is a trademark and
+misrepresentation hazard. Putting "no brand marks or trade dress, no
+recognisable storefront, no identifiable faces" in the shared suffix makes it
+structural rather than something each slide has to remember.

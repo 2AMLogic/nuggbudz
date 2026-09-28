@@ -530,10 +530,43 @@
 }
 
 /*
- * The radius map. The container is a console inset; the tiles keep exactly the
- * desaturation they had, because the one thing a map owes a person standing in
- * the street is legibility — and because OSM's unkeyed tiles are the only ones
- * this app will ever load (a keyed provider answers 200 with a watermark, #59).
+ * The radius map. The container is a console inset, and the filter's whole job
+ * is to make a paper-white basemap belong inside one. OSM's standard tiles are
+ * cream land under white roads; a cream rectangle in the middle of the indigo
+ * console reads as a hole punched in the screen rather than as the market you
+ * are standing in. The chain before this one only *warmed* that rectangle,
+ * because it was tuned for the cream-and-ink receipt palette #123 deleted.
+ *
+ * Read left to right, each step against the palette tokens above:
+ *
+ *  - `grayscale(1)` is load-bearing and comes first. It drops the basemap's own
+ *    hues — pink motorways, green parks, blue water — so they cannot compete
+ *    with the three colours that mean something here (nugget, phosphor,
+ *    ketchup), and it leaves one ramp for everything after it to move.
+ *  - `invert(1)` turns the ramp over, which is the only way this basemap gets
+ *    darker without the street network going dark with it: the land drops away
+ *    and the road *casings* and label ink come up pale. The casings are what
+ *    draw the grid at this zoom — a residential road's white fill never had
+ *    contrast against cream land either (1.0:1 before, 1.3:1 now).
+ *  - `sepia(1) hue-rotate(190deg) saturate(2)` tints the inverted ramp back onto
+ *    the console. Everything lands on hue ~227°, which is `--color-steel`
+ *    (226°) — so pale streets read as steel and the map is of a piece with the
+ *    chrome around it rather than a neutral grey inlay.
+ *  - `contrast(0.85) brightness(1.2)` lifts the inverted black point. Without
+ *    it the land bottoms out into `--color-tube` and the inset looks empty; with
+ *    it the land settles within 1.07:1 of `--color-panel`'s luminance, so the
+ *    map reads as a lit surface *on* the console (it was 15:1 off it before).
+ *
+ * Darker is more legible here, which is the counter-intuitive part: the old
+ * chain clipped the cream land and the white roads to the same #ffffff, so the
+ * brightest structure on the tile was gone. Push OSM's own colours through both
+ * chains and the contrast ratios go the right way — casing against land 1.7:1 →
+ * 2.7:1, motorway 2.2:1 → 4.0:1, label 12.9:1 → 14.2:1. What clips now is the
+ * core of a label glyph, which is where the headroom should go.
+ *
+ * Unchanged, and not negotiable: OSM's unkeyed tiles are the only ones this app
+ * will ever load, because a keyed provider answers 200 with a watermark (#59),
+ * and `e2e/map-tiles.spec.ts` is what notices if that ever happens again.
  */
 .leaflet-container {
   background: var(--color-tube);
@@ -541,7 +574,8 @@
 }
 
 .cell-map-tiles {
-  filter: grayscale(1) contrast(1.05) brightness(1.04) sepia(0.06);
+  filter: grayscale(1) invert(1) sepia(1) hue-rotate(190deg) saturate(2) contrast(0.85)
+    brightness(1.2);
 }
 
 /* `dragging: false` etc. already keeps the map from grabbing page scroll on

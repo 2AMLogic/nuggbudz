@@ -69,7 +69,7 @@ export function PickupQr({ value }: { value: string }) {
       height={span}
       role="img"
       aria-label="Your pickup code as a QR code, for your bud to scan"
-      className="mx-auto block border-2 border-hairline"
+      className="mx-auto block border-2 border-rule"
       // One CSS pixel per device pixel of the backing store, capped at the roll's
       // width on a narrow screen. Sized here rather than in a class because the
       // figure is derived from the symbol, not chosen.

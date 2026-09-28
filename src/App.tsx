@@ -6,6 +6,7 @@ import { saucesForMerchant } from '@shared/sauces'
 import { useEffect, useState } from 'react'
 import { HandoffCard } from './components/HandoffCard'
 import { RadiusMap } from './components/RadiusMap'
+import { RenderConsole } from './components/RenderConsole'
 import { Line, Perf, Roll } from './components/Roll'
 import { SaucePicker } from './components/SaucePicker'
 import { SettlementReceipt } from './components/SettlementReceipt'
@@ -168,7 +169,13 @@ export function App() {
     (pool.stage === 'matched' || pool.stage === 'settled' || pool.stage === 'disputed')
   ) {
     return (
-      <Shell radiusMeters={pool.radiusMeters} source={pool.locationSource}>
+      <Shell
+        radiusMeters={pool.radiusMeters}
+        source={pool.locationSource}
+        render="resolved"
+        buyers={pool.waiting}
+        queuedAhead={pool.queuedAhead}
+      >
         <SettlementReceipt
           match={pool.match}
           payment={pool.payment}
@@ -210,15 +217,27 @@ export function App() {
   if (pool.stage === 'connecting' || pool.stage === 'waiting') {
     const within = pool.radiusMeters === null ? null : formatMiles(pool.radiusMeters)
     return (
-      <Shell radiusMeters={pool.radiusMeters} source={pool.locationSource}>
+      <Shell
+        radiusMeters={pool.radiusMeters}
+        source={pool.locationSource}
+        render="searching"
+        buyers={pool.waiting}
+        queuedAhead={pool.queuedAhead}
+      >
         <section aria-live="polite">
-          <p className="font-display text-[0.65rem] tracking-[0.2em] text-faded uppercase">
+          <p className="tag">
             {pool.stage === 'connecting' ? 'Joining the pool' : 'Looking for a bud'}
           </p>
-          <h2 className="caret mt-1 font-display text-2xl font-bold">
-            {pool.stage === 'connecting' || within === null
-              ? 'Standing in line'
-              : `${pool.waiting} within ${within}`}
+          {/* The caret is a phosphor cursor, not part of the chrome fill: a
+              block glyph rendered through the display gradient reads as a
+              printing artefact rather than as a terminal waiting. */}
+          <h2 className="mt-1 text-[2rem]">
+            <span className="display">
+              {pool.stage === 'connecting' || within === null
+                ? 'Standing in line'
+                : `${pool.waiting} within ${within}`}
+            </span>
+            <span className="caret text-phosphor" aria-hidden="true" />
           </h2>
 
           {/* Drawn on every location rung, including the two that never involved
@@ -234,7 +253,7 @@ export function App() {
                 buddies={pool.buddies}
                 centreLabel={placement.label}
               />
-              <p className="mt-1 font-body text-xs leading-snug text-faded">{placement.detail}</p>
+              <p className="mt-1 font-body text-xs leading-snug text-steel">{placement.detail}</p>
             </>
           )}
 
@@ -244,24 +263,20 @@ export function App() {
           <Line
             label="Your half"
             value={formatCents(selected?.settlement.shares[1]?.payCents ?? 0)}
+            emphasis="total"
           />
-          <Line label="Ahead of you" value={String(pool.queuedAhead)} />
 
           {pool.notice !== null && (
             <p className="mt-4 font-body text-sm text-ketchup">{pool.notice}</p>
           )}
 
-          <p className="mt-4 font-body text-sm leading-snug text-faded">
+          <p className="mt-4 font-body text-sm leading-snug text-steel">
             {within === null
               ? 'You are paired the moment someone nearby wants the same box. Keep this open.'
               : `You are paired the moment someone within ${within} wants the same box. Keep this open.`}
           </p>
 
-          <button
-            type="button"
-            onClick={pool.leave}
-            className="mt-7 w-full border-2 border-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px"
-          >
+          <button type="button" onClick={pool.leave} className="btn btn-outline mt-7">
             Leave the queue
           </button>
         </section>
@@ -290,21 +305,19 @@ export function App() {
               type="button"
               onClick={() => setDealId(deal.id)}
               aria-pressed={active}
-              className={`border-2 px-4 py-3 text-left transition-colors ${
-                active ? 'border-ink bg-nugget/20' : 'border-hairline'
-              }`}
+              className="chip"
             >
               <span className="flex items-baseline justify-between gap-2">
-                <span className="font-display text-[0.7rem] tracking-[0.12em] uppercase">
+                <span className="font-mono text-[0.7rem] tracking-[0.12em] text-chrome uppercase">
                   {deal.merchant}
                 </span>
-                <span className="font-display text-base font-bold tabular-nums">
+                <span className="font-mono text-base font-bold text-nugget tabular-nums">
                   {formatCents(half.payCents)}
                 </span>
               </span>
               <span className="mt-1 flex items-baseline justify-between gap-2">
-                <span className="font-body text-sm text-faded">{deal.label}</span>
-                <span className="font-display text-[0.65rem] tracking-[0.1em] text-ketchup uppercase">
+                <span className="font-body text-sm text-steel">{deal.label}</span>
+                <span className="font-mono text-[0.65rem] tracking-[0.1em] text-ketchup uppercase">
                   save {formatCents(half.savingsCents)}
                 </span>
               </span>
@@ -328,13 +341,11 @@ export function App() {
       <Perf label="Who are you" />
 
       {session.pending ? (
-        <p className="font-body text-sm text-faded">Checking your sign-in…</p>
+        <p className="font-body text-sm text-steel">Checking your sign-in…</p>
       ) : session.user === null && demoPairing === true ? (
         <>
           <label className="block">
-            <span className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
-              First name your bud will look for
-            </span>
+            <span className="tag">First name your bud will look for</span>
             <input
               value={demoName}
               onChange={(event) => {
@@ -347,38 +358,34 @@ export function App() {
               }}
               maxLength={40}
               placeholder="e.g. Alex"
-              className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg focus:outline-none"
+              className="slot mt-2 text-lg"
             />
           </label>
-          <p className="mt-3 font-body text-sm leading-snug text-faded">
+          <p className="mt-3 font-body text-sm leading-snug text-steel">
             Demo mode: pairing without accounts. You will run the whole handoff and get a receipt,
             but the split is never booked to the ledger, and your bud only sees this name.
           </p>
         </>
       ) : session.user === null ? (
         <>
-          <p className="font-body text-sm leading-snug text-faded">
+          <p className="font-body text-sm leading-snug text-steel">
             Sign in so your bud knows who they are meeting, and so a split can be settled
             afterwards.
           </p>
-          <button
-            type="button"
-            onClick={session.signIn}
-            className="mt-4 w-full border-2 border-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px"
-          >
+          <button type="button" onClick={session.signIn} className="btn btn-outline mt-4">
             Sign in with Google
           </button>
         </>
       ) : (
         <div className="flex items-baseline justify-between gap-2">
-          <span className="font-display text-lg">{session.user.displayName}</span>
+          <span className="font-mono text-lg text-chrome">{session.user.displayName}</span>
           <button
             type="button"
             onClick={() => {
               pool.leave()
               void session.signOut()
             }}
-            className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase underline"
+            className="btn-plain w-auto"
           >
             Sign out
           </button>
@@ -386,16 +393,11 @@ export function App() {
       )}
 
       {coords.notice !== null && (
-        <p className="mt-4 font-body text-sm text-faded">{coords.notice}</p>
+        <p className="mt-4 font-body text-sm text-steel">{coords.notice}</p>
       )}
       {pool.error !== null && <p className="mt-4 font-body text-sm text-ketchup">{pool.error}</p>}
 
-      <button
-        type="button"
-        disabled={!canStart}
-        onClick={start}
-        className="mt-6 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px disabled:opacity-35"
-      >
+      <button type="button" disabled={!canStart} onClick={start} className="btn btn-chrome mt-6">
         Find a bud
       </button>
 
@@ -406,17 +408,17 @@ export function App() {
           type="button"
           disabled={coords.pending}
           onClick={() => void coords.requestPrecise()}
-          className="mt-3 w-full border-2 border-hairline px-4 py-3 font-display text-[0.7rem] font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px disabled:opacity-35"
+          className="btn btn-outline mt-3 py-3 text-[0.7rem]"
         >
           {coords.pending ? 'Asking your device…' : 'Use my exact location'}
         </button>
       ) : (
-        <p className="mt-3 font-body text-sm text-faded">
+        <p className="mt-3 font-body text-sm text-steel">
           Exact location on, so the walk to your bud is measured properly.
         </p>
       )}
 
-      <p className="mt-3 font-body text-xs leading-snug text-faded">
+      <p className="mt-3 font-body text-xs leading-snug text-steel">
         No permission prompt needed: we place you from your connection, which is accurate to about a
         neighbourhood. Pairing fee is {formatCents(selected?.platformFeeCents ?? 99)} per split.
       </p>
@@ -427,37 +429,63 @@ export function App() {
 function Shell({
   radiusMeters,
   source,
+  render = 'none',
+  buyers = 0,
+  queuedAhead = 0,
   children,
 }: {
   /** The market in force, as the server reported it; null before `welcome`. */
   radiusMeters: number | null
   /** Which rung placed this socket, once the server has said. */
   source: LocationSource | null
+  /**
+   * Whether the render is running, and what it is doing.
+   *
+   * It lives here rather than inside a screen so that pairing does not unmount
+   * it: the canvas keeps its frame counter across the move from the queue to
+   * the receipt, which is what lets the turn decelerate into a pose instead of
+   * being replaced by a different picture.
+   */
+  render?: 'none' | 'searching' | 'resolved'
+  /** Buyers waiting inside your radius, for the readout. */
+  buyers?: number
+  queuedAhead?: number
   children: React.ReactNode
 }) {
   return (
     <Roll>
       <header>
-        <div className="flex items-baseline justify-between gap-2">
-          <h1 className="font-display text-xl font-bold tracking-[0.08em]">NUGGBUDZ</h1>
+        <div className="flex items-baseline justify-between gap-3">
+          <h1 className="display text-[2.05rem] tracking-[0.01em]">NUGGBUDZ</h1>
           {/* The shard used to be printed here. It is not a thing a hungry
               person has a model for, and it stopped being what decides a match;
               the radius is both. */}
-          <span className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
+          <span className="tag shrink-0">
             {radiusMeters === null ? 'not placed yet' : `within ${formatMiles(radiusMeters)}`}
           </span>
         </div>
-        <div className="flex items-baseline justify-between gap-2">
-          <p className="font-display text-[0.6rem] tracking-[0.22em] text-faded uppercase">
-            Protein settlement layer
-          </p>
+        {/* Two badges that are each too long to share a 256px line with the
+            other. Wrapping is the honest answer: the second drops to its own
+            line and stays right-aligned rather than being truncated. */}
+        <div className="mt-1 flex flex-wrap items-baseline gap-x-3">
+          <p className="tag">Protein settlement layer</p>
           {source !== null && (
-            <span className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
-              {describeLocationSource(source).label}
-            </span>
+            <span className="tag ml-auto">{describeLocationSource(source).label}</span>
           )}
         </div>
       </header>
+
+      {render !== 'none' && (
+        <div className="mt-4">
+          <RenderConsole
+            resolved={render === 'resolved'}
+            buyers={buyers}
+            queuedAhead={queuedAhead}
+            radiusMeters={radiusMeters}
+          />
+        </div>
+      )}
+
       <Perf />
       {children}
     </Roll>

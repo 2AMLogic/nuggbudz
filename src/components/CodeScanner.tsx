@@ -245,30 +245,20 @@ export function CodeScanner({ onScan }: { onScan: (code: string) => void }) {
         ref={videoRef}
         muted
         playsInline
-        className={
-          live ? 'block aspect-square w-full border-2 border-ink bg-ink object-cover' : 'hidden'
-        }
+        className={live ? 'inset block aspect-square w-full object-cover' : 'hidden'}
       />
 
       {live ? (
-        <button
-          type="button"
-          onClick={cancel}
-          className="mt-2 w-full border-2 border-ink px-4 py-3 font-display text-[0.7rem] font-bold tracking-[0.15em] uppercase"
-        >
+        <button type="button" onClick={cancel} className="btn btn-outline mt-2 py-3 text-[0.7rem]">
           Stop the camera
         </button>
       ) : (
-        <button
-          type="button"
-          onClick={start}
-          className="w-full border-2 border-ink px-4 py-3 font-display text-[0.7rem] font-bold tracking-[0.15em] uppercase"
-        >
+        <button type="button" onClick={start} className="btn btn-outline py-3 text-[0.7rem]">
           Scan their code
         </button>
       )}
 
-      <p className="mt-2 font-body text-sm leading-snug text-faded" aria-live="polite">
+      <p className="mt-2 font-body text-sm leading-snug text-steel" aria-live="polite">
         {phase.kind === 'starting'
           ? 'Opening the camera.'
           : phase.kind === 'scanning'

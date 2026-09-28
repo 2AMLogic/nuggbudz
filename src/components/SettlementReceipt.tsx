@@ -15,10 +15,16 @@ import { PickupQr } from './PickupQr'
 import { Line, Perf } from './Roll'
 
 /**
- * The signature screen: the match arrives as a receipt that prints itself.
+ * The match arrives as a receipt that prints itself.
  *
  * Every figure here comes off the settlement the server computed, so the split
  * shown to both buddies is the same split, down to the cent.
+ *
+ * It is the one thing on screen that is not part of the rendered world, and it
+ * is deliberately the one thing made of paper: a dot-matrix printout on fanfold
+ * stock, tractor holes down both edges, ink that does not quite register. The
+ * `printout` class redefines the palette tokens for everything below it, so the
+ * same `text-steel` that is a cool grey on the console is pencil grey here.
  */
 export function SettlementReceipt({
   match,
@@ -97,27 +103,21 @@ export function SettlementReceipt({
       : `${buddy.name} orders the box. Go meet them.`
 
   return (
-    <section aria-live="polite">
-      <p
-        className="printed font-display text-[0.65rem] tracking-[0.2em] text-faded uppercase"
-        style={{ animationDelay: '0ms' }}
-      >
+    <section className="printout" aria-live="polite">
+      <p className="printed tag" style={{ animationDelay: '0ms' }}>
         Matched
       </p>
-      <h2
-        className="printed mt-1 font-display text-2xl font-bold leading-tight"
-        style={{ animationDelay: '80ms' }}
-      >
+      <h2 className="printed display mt-1 text-[2rem]" style={{ animationDelay: '80ms' }}>
         {buddy.name}
       </h2>
       <p
-        className="printed font-display text-[0.7rem] tracking-[0.12em] text-faded uppercase"
+        className="printed font-mono text-[0.7rem] tracking-[0.12em] text-steel uppercase"
         style={{ animationDelay: '140ms' }}
       >
         {formatDistance(buddy.distanceMeters)} · {standing.label}
       </p>
       <p
-        className="printed mt-1 font-body text-xs leading-snug text-faded"
+        className="printed mt-1 font-body text-xs leading-snug text-steel"
         style={{ animationDelay: '170ms' }}
       >
         {standing.detail}
@@ -206,11 +206,7 @@ export function SettlementReceipt({
             {instruction}
           </p>
           <PaymentPanel payment={payment} />
-          <button
-            type="button"
-            onClick={onDone}
-            className="mt-4 w-full font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase underline"
-          >
+          <button type="button" onClick={onDone} className="btn-plain mt-4">
             Leave this match
           </button>
         </>
@@ -230,21 +226,17 @@ export function SettlementReceipt({
           {match.pickupCode !== null && (
             <div className="printed mt-5" style={{ animationDelay: '760ms' }}>
               <PickupQr value={match.pickupCode} />
-              <p className="mt-3 font-display text-lg font-bold tracking-[0.35em]">
+              <p className="mt-3 font-mono text-lg font-bold tracking-[0.35em] text-chrome">
                 {match.pickupCode}
               </p>
-              <p className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
-                Let your bud scan this, or read it out
-              </p>
+              <p className="tag">Let your bud scan this, or read it out</p>
             </div>
           )}
 
           {role === 'receiver' && !iConfirmed && (
             <>
               <label className="mt-5 block">
-                <span className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
-                  The code on {buddy.name}'s receipt
-                </span>
+                <span className="tag">The code on {buddy.name}'s receipt</span>
                 <input
                   value={typedCode}
                   onChange={(event) => setTypedCode(event.target.value.toUpperCase())}
@@ -253,7 +245,7 @@ export function SettlementReceipt({
                   autoCorrect="off"
                   spellCheck={false}
                   placeholder="------"
-                  className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg tracking-[0.35em] focus:outline-none"
+                  className="slot mt-2 text-lg tracking-[0.35em]"
                 />
               </label>
               {/* The accelerator, beside the field rather than instead of it: a
@@ -283,7 +275,7 @@ export function SettlementReceipt({
           )}
 
           {iConfirmed ? (
-            <p className="mt-7 font-body text-sm leading-snug text-faded" aria-live="polite">
+            <p className="mt-7 font-body text-sm leading-snug text-steel" aria-live="polite">
               You confirmed. Waiting on {waitingOn === null ? 'your bud' : buddy.name} — nothing
               settles until you both do.
             </p>
@@ -292,17 +284,13 @@ export function SettlementReceipt({
               type="button"
               onClick={() => onConfirm(role === 'receiver' ? typedCode : undefined)}
               disabled={role === 'receiver' && typedCode.trim().length === 0}
-              className={`${PRIMARY} disabled:opacity-35`}
+              className={PRIMARY}
             >
               {role === 'orderer' ? 'Handed it over' : 'Got the box'}
             </button>
           )}
 
-          <button
-            type="button"
-            onClick={onDone}
-            className="mt-4 w-full font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase underline"
-          >
+          <button type="button" onClick={onDone} className="btn-plain mt-4">
             Leave this match
           </button>
         </>
@@ -311,5 +299,4 @@ export function SettlementReceipt({
   )
 }
 
-const PRIMARY =
-  'mt-7 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px'
+const PRIMARY = 'btn btn-chrome mt-7'

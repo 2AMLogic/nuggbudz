@@ -1,25 +1,66 @@
 @import "tailwindcss";
 
-@theme {
-  --font-display: "Space Mono", ui-monospace, "SFMono-Regular", monospace;
-  --font-body: "Archivo", system-ui, -apple-system, sans-serif;
+/*
+ * 1996 workstation graphics, competently executed.
+ *
+ * The world is a banded sky over a black-and-white checkerboard, and the
+ * interface is a console bolted in front of it. Every colour here is a token so
+ * the one screen that is *not* part of that world — the settlement receipt,
+ * which is a dot-matrix printout — can redefine the same names inside
+ * `.printout` and flip its whole subtree to paper in one place.
+ *
+ * The register to hold: an SGI demo reel, not a Geocities page. Flat facets,
+ * banded ramps, engraved bevels and chrome type are the vocabulary; rainbow
+ * gradients, starfields and marquee text are not. The joke is treating a $7.99
+ * box of nuggets as seriously as 1996 treated a teapot, and a joke told
+ * carelessly is not funny.
+ */
 
-  /* Thermal paper and printer ink. The whole interface is a till roll. */
-  --color-paper: #faf8f5;
-  --color-ink: #17150f;
-  --color-nugget: #e8a33d;
-  --color-ketchup: #d93a2b;
-  --color-faded: #8c877b;
-  --color-hairline: #d8d2c6;
+@theme {
+  /* Archivo is variable on both axes, so one file covers a heavy condensed
+     display face and a plain body face. Space Mono stays, doing what it is
+     actually good at: terminal readouts and figures. */
+  --font-display: "Archivo", system-ui, -apple-system, sans-serif;
+  --font-body: "Archivo", system-ui, -apple-system, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  /* The sky, banded. The steps are the point — an 8-bit ramp, not a blend. */
+  --color-void: #0c0726;
+  --color-sky: #190f4c;
+  --color-horizon: #a01d66;
+
+  /* The console. `panel` is the surface everything sits on; `chrome` is type. */
+  --color-panel: #241a5e;
+  --color-chrome: #e8ecf7;
+  --color-steel: #8e9ac0;
+  --color-rule: #453a86;
+
+  /* The phosphor tube the readouts are printed on. */
+  --color-tube: #080520;
+  --color-phosphor: #4dffa6;
+  --color-phosphor-dim: #43c98c;
+
+  /* The product, and the only warm thing on the screen. */
+  --color-nugget: #ffb02e;
+  /* Refusals and savings. Hot pink rather than red: it belongs to the sky. */
+  --color-ketchup: #ff4f79;
 }
 
-/* Carbon copy. Same roll, printed in reverse. */
+/*
+ * A CRT does not become paper when the lights come on, so dark mode is not a
+ * second design here — it is the same monitor with the brightness pulled down,
+ * which is what the lights coming *off* actually does to one.
+ */
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-paper: #14120d;
-    --color-ink: #f2ece0;
-    --color-faded: #857f71;
-    --color-hairline: #332e24;
+    --color-void: #070418;
+    --color-sky: #110a35;
+    --color-horizon: #78164e;
+    --color-panel: #150d3a;
+    --color-chrome: #dfe5f5;
+    --color-steel: #838fb6;
+    --color-rule: #332a68;
+    --color-tube: #05030f;
   }
 }
 
@@ -30,16 +71,35 @@
 
   body {
     margin: 0;
-    background-color: var(--color-paper);
-    color: var(--color-ink);
+    background-color: var(--color-void);
+    color: var(--color-chrome);
     font-family: var(--font-body);
-    /* Faint fibre so the paper is paper and not just a light background. */
-    background-image: radial-gradient(var(--color-hairline) 0.5px, transparent 0.5px);
-    background-size: 7px 7px;
+    font-optical-sizing: auto;
+  }
+
+  /* The sky, fixed behind everything, in the same eight steps the canvas uses.
+     A layer rather than `background-attachment: fixed`, which iOS Safari has
+     never got right. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background-image: linear-gradient(
+      180deg,
+      var(--color-void) 0 26%,
+      var(--color-sky) 26% 44%,
+      #22105f 44% 57%,
+      #30116d 57% 68%,
+      #451273 68% 78%,
+      #5f1573 78% 86%,
+      #7d1870 86% 93%,
+      var(--color-horizon) 93% 100%
+    );
   }
 
   :focus-visible {
-    outline: 3px solid var(--color-nugget);
+    outline: 2px solid var(--color-phosphor);
     outline-offset: 2px;
   }
 
@@ -48,13 +108,388 @@
   }
 }
 
-/* A line of punched holes: the receipt's own divider. */
-.perf {
-  height: 0;
-  border-top: 2px dotted var(--color-hairline);
+@layer components {
+  /*
+   * Display type: heavy condensed grotesque, filled with a silver ramp, dropped
+   * on a hard offset shadow and outlined thinly in the sky's darkest band.
+   *
+   * The ramp is banded like everything else, and the outline is 0.5px on
+   * purpose — enough to separate the chrome from whatever is behind it, thin
+   * enough that a phone-sized heading does not fill in.
+   */
+  .display {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-stretch: 66%;
+    letter-spacing: 0.01em;
+    line-height: 1.02;
+    color: var(--color-chrome);
+    /*
+     * Keyline and drop shadow are `filter`, not `text-shadow`.
+     *
+     * This is the one non-obvious thing in the file, and it was measured rather
+     * than guessed. `text-shadow` paints *after* the fill, and a
+     * `background-clip: text` fill is a background — so a solid 2px offset
+     * shadow lands a navy copy of the glyph over all but the top two pixels of
+     * its own chrome, and the wordmark comes out almost black. `filter` runs on
+     * the element after it is painted, so the shadow falls behind the metal
+     * where it belongs. `-webkit-text-stroke` is no use either: it is centred
+     * on the outline, so at heading sizes it eats most of a condensed stem.
+     *
+     * Four 0.7px offsets make the keyline (each filter applies to the result of
+     * the last, so they compound into a ring), and the fifth is the hard drop.
+     */
+    filter: drop-shadow(0.7px 0 0 #0b0630) drop-shadow(-0.7px 0 0 #0b0630)
+      drop-shadow(0 0.7px 0 #0b0630) drop-shadow(0 -0.7px 0 #0b0630) drop-shadow(0 2px 0 #0b0630);
+  }
+
+  @supports (background-clip: text) or (-webkit-background-clip: text) {
+    .display {
+      background-image: linear-gradient(
+        180deg,
+        #ffffff 0 30%,
+        #c9d4ef 30% 46%,
+        #ffffff 46% 78%,
+        #aab8dc 78% 100%
+      );
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+  }
+
+  /* Small mono type: labels, units, anything that is really data. */
+  .tag {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-steel);
+  }
+
+  /* The console the whole interface is bolted to: one bevel, no ornament. */
+  .console-shell {
+    background-color: var(--color-panel);
+    border: 1px solid #0a0528;
+    box-shadow:
+      inset 1px 1px 0 rgba(222, 232, 255, 0.16),
+      inset -1px -1px 0 rgba(0, 0, 0, 0.55),
+      0 18px 38px -24px #000;
+  }
+
+  /* The signature: a render in progress, with the queue's real state under it. */
+  .console {
+    border: 1px solid #0a0528;
+    background-color: var(--color-tube);
+    box-shadow:
+      inset 1px 1px 0 rgba(222, 232, 255, 0.12),
+      0 2px 0 rgba(0, 0, 0, 0.45);
+  }
+
+  /* 192x128 of backing store, upscaled with the pixels left alone. What a phone
+     shows is the render, not a photograph of one. */
+  .render-frame {
+    display: block;
+    width: 100%;
+    height: auto;
+    image-rendering: pixelated;
+    border-bottom: 1px solid #0a0528;
+  }
+
+  .readout {
+    margin: 0;
+    padding: 0.5rem 0.7rem 0.55rem;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .readout-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .readout-row + .readout-row {
+    margin-top: 0.2rem;
+  }
+
+  .readout dt {
+    color: var(--color-phosphor-dim);
+  }
+
+  .readout dt::before {
+    content: "> ";
+  }
+
+  .readout dd {
+    margin: 0;
+    color: var(--color-phosphor);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* An engraved groove, the way every panel of this era divided itself. */
+  .perf {
+    height: 0;
+    border-top: 1px solid rgba(0, 0, 0, 0.55);
+    border-bottom: 1px solid rgba(222, 232, 255, 0.14);
+  }
+
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 0.9rem 1rem;
+    border: 1px solid #08041f;
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    text-align: center;
+    cursor: pointer;
+  }
+
+  .btn:disabled {
+    cursor: default;
+    opacity: 0.35;
+  }
+
+  /* Brushed metal, lit from above, with the seam a real bezel has. */
+  .btn-chrome {
+    color: #100a30;
+    background-image: linear-gradient(
+      180deg,
+      #ffffff 0 14%,
+      #dbe2f4 14% 48%,
+      #9fabcd 48% 52%,
+      #cfd8ef 52% 86%,
+      #a8b3d4 86% 100%
+    );
+    box-shadow:
+      inset 1px 1px 0 #ffffff,
+      inset -1px -1px 0 #5c6690,
+      0 2px 0 rgba(6, 3, 24, 0.55);
+  }
+
+  .btn-chrome:active:not(:disabled) {
+    transform: translateY(2px);
+    box-shadow:
+      inset 1px 1px 0 #7b86ad,
+      inset -1px -1px 0 #eff3fc;
+  }
+
+  .btn-outline {
+    color: var(--color-chrome);
+    background-color: rgba(232, 236, 247, 0.06);
+    box-shadow:
+      inset 1px 1px 0 rgba(222, 232, 255, 0.2),
+      inset -1px -1px 0 rgba(0, 0, 0, 0.5),
+      0 2px 0 rgba(6, 3, 24, 0.45);
+  }
+
+  .btn-outline:active:not(:disabled) {
+    transform: translateY(2px);
+    box-shadow:
+      inset 1px 1px 0 rgba(0, 0, 0, 0.5),
+      inset -1px -1px 0 rgba(222, 232, 255, 0.2);
+  }
+
+  /* A quiet text action — leaving a match, signing out. */
+  .btn-plain {
+    display: block;
+    width: 100%;
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--color-steel);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  /* A pickable option: deal, sauce. Engraved until chosen, then lit in gold. */
+  .chip {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.6rem 0.75rem;
+    background-color: rgba(8, 5, 32, 0.45);
+    border: 1px solid #0a0528;
+    box-shadow:
+      inset 1px 1px 0 rgba(222, 232, 255, 0.1),
+      inset -1px -1px 0 rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+  }
+
+  .chip[aria-pressed="true"] {
+    background-color: color-mix(in srgb, var(--color-nugget) 16%, rgba(8, 5, 32, 0.45));
+    box-shadow:
+      inset 0 0 0 1px var(--color-nugget),
+      inset 1px 1px 0 rgba(255, 255, 255, 0.12);
+  }
+
+  /* A field is a recessed slot, not a floating underline. */
+  .slot {
+    width: 100%;
+    background-color: var(--color-tube);
+    border: 1px solid #0a0528;
+    box-shadow: inset 1px 1px 0 rgba(0, 0, 0, 0.6);
+    color: var(--color-phosphor);
+    font-family: var(--font-mono);
+    padding: 0.6rem 0.65rem;
+  }
+
+  .slot::placeholder {
+    color: color-mix(in srgb, var(--color-phosphor-dim) 55%, transparent);
+  }
+
+  /* A framed inset: the map, the chat transcript, the viewfinder. */
+  .inset {
+    background-color: var(--color-tube);
+    border: 1px solid #0a0528;
+    box-shadow:
+      inset 1px 1px 0 rgba(0, 0, 0, 0.6),
+      0 1px 0 rgba(222, 232, 255, 0.12);
+  }
+
+  /*
+   * The settlement receipt, and the one place paper survives.
+   *
+   * Re-skinned from a thermal till roll to a dot-matrix printout: fanfold
+   * stock with a faint bar every sixth line, sprocket holes punched down both
+   * edges inside a perforation, and ink that does not quite register. It
+   * redefines the palette tokens rather than restyling its contents, so every
+   * `text-steel` and `border-rule` inside it flips to paper in one place.
+   */
+  .printout {
+    --color-panel: #f1f1ee;
+    --color-chrome: #241f1a;
+    --color-steel: #6b6459;
+    --color-rule: #c7c1b2;
+    --color-nugget: #8a5c0b;
+    --color-ketchup: #a8321f;
+    --color-phosphor: #2f6b45;
+    --color-phosphor-dim: #4c7a5e;
+    --color-tube: #f8f8f5;
+
+    position: relative;
+    /* Fed edge to edge through the machine: cancels the console's own gutter so
+       the sheet is as wide as the slot, which is also what keeps the QR at full
+       size on a 320px screen. */
+    margin-inline: -1rem;
+    /* Clears the sprocket strip (1.1rem) with room to spare, and still leaves
+       241px of column on a 320px phone — wider than the QR's 232px symbol, so
+       the pickup code is never downscaled on the narrowest screen. */
+    padding: 1rem 1.45rem;
+    color: var(--color-chrome);
+    background-color: var(--color-panel);
+    background-image: repeating-linear-gradient(
+      180deg,
+      transparent 0 1.6rem,
+      rgba(104, 134, 108, 0.07) 1.6rem 3.2rem
+    );
+    box-shadow: 0 14px 30px -18px #000;
+    /* Two passes of a nine-pin head never land on top of each other. */
+    text-shadow: 0.4px 0.4px 0 rgba(36, 31, 26, 0.32);
+  }
+
+  .printout::before,
+  .printout::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1.1rem;
+    background-image: radial-gradient(
+      circle at 50% 0.42rem,
+      #1a1046 0 0.15rem,
+      rgba(0, 0, 0, 0.18) 0.15rem 0.2rem,
+      transparent 0.21rem
+    );
+    background-size: 100% 0.84rem;
+  }
+
+  .printout::before {
+    left: 0;
+    border-right: 1px dashed var(--color-rule);
+  }
+
+  .printout::after {
+    right: 0;
+    border-left: 1px dashed var(--color-rule);
+  }
+
+  /* On paper a divider is a perforation again, not an engraved groove. */
+  .printout .perf {
+    border-top: 1px dotted var(--color-rule);
+    border-bottom: none;
+  }
+
+  /* Chrome and phosphor belong to the console. On paper, ink. */
+  /* Chrome belongs to the console. On paper a heading is struck ink, twice. */
+  .printout .display {
+    background-image: none;
+    color: var(--color-chrome);
+    filter: none;
+    text-shadow: 0.6px 0.6px 0 rgba(36, 31, 26, 0.4);
+  }
+
+  .printout .btn-chrome {
+    color: var(--color-panel);
+    background-image: none;
+    background-color: var(--color-chrome);
+    border-color: var(--color-chrome);
+    box-shadow: 2px 2px 0 var(--color-rule);
+  }
+
+  .printout .btn-chrome:active:not(:disabled) {
+    transform: translateY(2px);
+    box-shadow: 0 0 0 var(--color-rule);
+  }
+
+  .printout .btn-outline {
+    color: var(--color-chrome);
+    background-color: transparent;
+    border-color: var(--color-chrome);
+    box-shadow: 2px 2px 0 var(--color-rule);
+  }
+
+  .printout .btn-outline:active:not(:disabled) {
+    transform: translateY(2px);
+    box-shadow: 0 0 0 var(--color-rule);
+  }
+
+  .printout .slot {
+    background-color: rgba(255, 255, 255, 0.55);
+    border-color: var(--color-rule);
+    box-shadow: inset 1px 1px 0 rgba(36, 31, 26, 0.12);
+    color: var(--color-chrome);
+  }
+
+  .printout .slot::placeholder {
+    color: var(--color-steel);
+  }
+
+  .printout .inset {
+    border-color: var(--color-rule);
+    box-shadow: inset 1px 1px 0 rgba(36, 31, 26, 0.1);
+  }
+
+  .printout .chip {
+    background-color: rgba(255, 255, 255, 0.5);
+    border-color: var(--color-rule);
+    box-shadow: 1px 1px 0 var(--color-rule);
+  }
+
+  .printout .btn-plain {
+    color: var(--color-steel);
+  }
 }
 
-/* Each printed line drops in, top to bottom, like a thermal head passing. */
+/* Each printed line drops in, top to bottom, like a print head passing. */
 @keyframes print-line {
   from {
     opacity: 0;
@@ -90,12 +525,13 @@
 }
 
 /*
- * The radius map: same till-roll palette as the rest of the app, not a stock
- * map widget. The tile layer is desaturated in CSS rather than swapped for a
- * custom tile source, so it stays a drop-in Leaflet basemap.
+ * The radius map. The container is a console inset; the tiles keep exactly the
+ * desaturation they had, because the one thing a map owes a person standing in
+ * the street is legibility — and because OSM's unkeyed tiles are the only ones
+ * this app will ever load (a keyed provider answers 200 with a watermark, #59).
  */
 .leaflet-container {
-  background: var(--color-paper);
+  background: var(--color-tube);
   font-family: var(--font-body);
 }
 

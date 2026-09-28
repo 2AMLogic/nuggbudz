@@ -133,9 +133,9 @@ The zone has to be on the same Cloudflare account as the Worker.
 ```bash
 wrangler secret put GOOGLE_CLIENT_ID              # once per environment
 wrangler secret put GOOGLE_CLIENT_SECRET
-wrangler secret put STRIPE_SECRET_KEY             # payments; see below
+wrangler secret put STRIPE_SECRET_KEY              # payments; see below
 wrangler secret put STRIPE_WEBHOOK_SECRET
-VITE_STRIPE_PUBLISHABLE_KEY=pk_live_… pnpm run deploy   # `pnpm deploy` is a pnpm builtin
+VITE_STRIPE_PUBLISHABLE_KEY=pk_live_… pnpm run deploy   # sign-in only — see "Demo pairing"
 wrangler d1 migrations apply nuggbudz --remote
 ```
 
@@ -166,7 +166,9 @@ curl -s https://nuggbudz.com/api/health     # { "payments": "live" | "uncharged"
 ```
 
 `unconfigured` on a public URL means pairing is broken, not free. `live` is the
-only mode that takes money.
+only mode that takes money. Both deploy scripts print this back off the deployed
+Worker's own `/api/health` when they finish — see `scripts/post-deploy-mode.mjs`
+— so an unset secret announces itself rather than waiting to be noticed.
 
 Local development and the two test lanes that drive pairing end to end need a
 zero-money path, and it is an **explicit opt-in**, checked *in addition to* the
@@ -212,22 +214,32 @@ tried to charge would fail the job rather than quietly succeed.
 
 Pairing requires a signed-in account. That is right for production and fatal on
 a stage: without the two secrets above, sign-in answers 503 and the pool socket
-answers 401, so **nobody can pair at all**. The escape hatch is a deploy-time
-var:
+answers 401, so **nobody can pair at all**. There are two deploy scripts, and
+they leave production in two different modes — pick the one you mean:
 
 ```bash
-pnpm exec vite build && wrangler deploy --var ALLOW_DEMO_PAIRING:1
+pnpm run deploy         # strict: sign-in required, matches production
+pnpm run deploy:demo    # stage: vite build && wrangler deploy --var ALLOW_DEMO_PAIRING:1
 ```
 
-With it set, an unauthenticated socket is given a throwaway `demo:<uuid>`
-identity and pairs under a name the caller types; the UI says on screen that it
-is pairing without accounts. The caller may propose a *display name* but never a
-user id — the id is minted server-side, so two tabs cannot claim one identity.
+`pnpm run deploy` (plain) leaves the site **sign-in-only** — the same 401 for
+every unauthenticated pool socket described above. It is not a "safe default
+that also happens to allow demo pairing"; use `deploy:demo` when a stage needs
+the escape hatch. Both scripts run the same `vite build && wrangler deploy`
+underneath and then print the mode the deployment actually ended up in, read
+back from the deployed Worker's own `/api/health` — never from which script you
+ran — so a config drift or a stale cached build cannot pass silently.
 
-**It is deliberately absent from `wrangler.jsonc`.** Passing it only at deploy
-time means a checkout, `pnpm test`, `pnpm smoke` and CI all keep exercising the
-strict authenticated path, and no `vite build` can bake an auth bypass into a
-production artifact. Verify whichever mode a server is in:
+With demo pairing on, an unauthenticated socket is given a throwaway
+`demo:<uuid>` identity and pairs under a name the caller types; the UI says on
+screen that it is pairing without accounts. The caller may propose a *display
+name* but never a user id — the id is minted server-side, so two tabs cannot
+claim one identity.
+
+**`ALLOW_DEMO_PAIRING` is deliberately absent from `wrangler.jsonc`.** Passing
+it only at deploy time means a checkout, `pnpm test`, `pnpm smoke` and CI all
+keep exercising the strict authenticated path, and no `vite build` can bake an
+auth bypass into a production artifact. Verify whichever mode a server is in:
 
 ```bash
 BASE=http://localhost:5199 node scripts/demo-pairing-check.mjs

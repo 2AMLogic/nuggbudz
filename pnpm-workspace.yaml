@@ -1,17 +1,36 @@
 # Repository-level pnpm settings. This project has no workspace, so this file
 # is purely pnpm's settings home (pnpm >= 10.16 reads settings from here).
 #
-# Two default pnpm security policies break a fresh `pnpm install
-# --frozen-lockfile` of this repo while protecting nothing here:
+# It has to answer two pnpm majors at once: CI pins pnpm 10 (`version: 10` on
+# every `pnpm/action-setup@v4` step in .github/workflows/ci.yml) while a
+# developer's own pnpm is usually 11, and the two spell these settings
+# differently. Both spellings are declared on purpose — each major reads the
+# key it knows and ignores the other (#61).
 #
-# - minimumReleaseAge: the lockfile IS the audit (CI installs frozen against
-#   it), so rejecting packages on registry publish age only breaks clones
-#   after any single package is republished — see #50
-#   (ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION).
-# - allowBuilds: esbuild and workerd run postinstall builds that the lockfile
-#   already pins; without this list pnpm skips them and exits
-#   ERR_PNPM_IGNORED_BUILDS, taking wrangler and vitest down with it.
+# Build scripts (#50). esbuild and workerd run postinstall builds that the
+# lockfile already pins. With neither key below, pnpm skips them: pnpm 11 exits
+# ERR_PNPM_IGNORED_BUILDS, and pnpm 10 — the one CI runs — only prints
+# "Ignored build scripts", which is the quieter, worse half. CI stayed green
+# with those builds silently skipped, so the next dependency whose postinstall
+# actually matters would break nothing until it reached a user.
+#   allowBuilds           is the pnpm 11 spelling
+#   onlyBuiltDependencies is the pnpm 10 spelling
 allowBuilds:
   esbuild: true
   workerd: true
-minimumReleaseAge: 0
+onlyBuiltDependencies:
+  - esbuild
+  - workerd
+# Release-age cooldown (#50). pnpm 11 refuses any package published within the
+# last 24h; pnpm 10 does not enforce a cooldown at all, so this only ever
+# governs a local pnpm 11 install and never CI. The blanket
+# `minimumReleaseAge: 0` that used to sit here waived it for every package and
+# every future `pnpm add`, which is much wider than the problem it was added
+# for: this repo deliberately tracks Cloudflare's toolchain at the bleeding
+# edge, and a wrangler/miniflare release is often hours old when it lands in
+# the lockfile. Naming those three keeps the cooldown — and the supply-chain
+# window it exists to close — on everything else.
+minimumReleaseAgeExclude:
+  - '@cloudflare/vite-plugin'
+  - miniflare
+  - wrangler

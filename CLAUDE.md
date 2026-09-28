@@ -42,6 +42,21 @@ state.
   the pairing rule has to be testable without a Workers runtime.
 - **Anything off a WebSocket is hostile.** Validate through
   `parseClientMessage` rather than casting.
+- **A wire version is an appended changelog entry, never a typed number.**
+  `PROTOCOL_VERSION` is derived from the last entry of `PROTOCOL_HISTORY` in
+  `shared/protocol.ts`; bump it by appending there, and never renumber a landed
+  entry. Twice in one night two branches typed the *same* number for incompatible
+  message sets (#91) and `git` reported no conflict either time — it cannot, since
+  both sides write the same literal — and `vitest`, `tsc` and `biome` were all
+  happy, because one integer everybody agrees on is exactly what they check for.
+  Appending conflicts on purpose: two branches put a different line in the same
+  place. `test/protocol-merge.test.ts` runs that two-branch merge for real in a
+  throwaway repo, with the old bare literal changed on both branches in the same
+  merge as a positive control that still comes out clean, and
+  `test/protocol.test.ts` replays the changelog against `PROTOCOL_MESSAGE_TYPES`
+  so a mis-resolved conflict is caught on the merged tree too. The entries are
+  also the only record of *what* changed in version N, which is what both
+  collisions had to be reconstructed from.
 - **Deck figures are derived, never typed.** Every money amount on a slide in
   `docs/pitch/` comes from `scripts/deck-ledger.ts`, which reads the catalogue
   and the settlement functions. Reprice a deal and `pnpm test` goes red until

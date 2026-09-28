@@ -6,38 +6,128 @@ import type { LocationSource } from './location'
 import { normalizePickupCode } from './pickup'
 import { SAUCES_PER_SELECTION, type SauceSelection } from './sauces'
 
+/** Every message `type` this wire carries, in either direction. */
+export type ProtocolMessageType = ClientMessage['type'] | ServerMessage['type']
+
+/** What one wire version changed, and why a client from the one before it cannot cope. */
+export interface ProtocolVersionNote {
+  readonly version: number
+  /** Why a client speaking the previous version cannot be assumed to speak this one. */
+  readonly summary: string
+  /** Message types this version introduced. */
+  readonly added: readonly ProtocolMessageType[]
+  /** Message types whose shape or meaning changed under an unchanged `type`. */
+  readonly changed: readonly ProtocolMessageType[]
+  /**
+   * Message types this version withdrew. Plain strings rather than
+   * `ProtocolMessageType`, because a withdrawn type is by definition no longer in
+   * the union: the name has to outlive the type it refers to.
+   */
+  readonly removed?: readonly string[]
+}
+
 /**
- * Wire protocol version. Bump on any breaking message change.
+ * Every version of this wire, oldest first, and what each one changed.
  *
- * Two changes independently claimed **5** on separate branches — chat on `main`,
- * and money in front of the pickup code — so that merge took **6** rather than
- * either of them: a client speaking one of the two 5s cannot be assumed to speak
- * the other, and a version number that two incompatible wires both answer to is
- * worse than no version number at all. This merge is **7** for the same reason:
- * the radius work below also landed on 6 independently.
+ * **A bump is an appended entry here, never an edited number.** `PROTOCOL_VERSION`
+ * below is derived from the last entry, so there is no literal to retype — and
+ * that is the whole reason for the shape. Twice in one night two branches
+ * independently claimed the same number for incompatible message sets (chat and
+ * money both wrote `5`; money's merge and the radius work both wrote `6`), and
+ * `git` reported no conflict either time, because two sides writing the *same
+ * literal* merge cleanly by construction. `vitest`, `tsc` and `biome` were all
+ * happy: one integer everybody agrees on is exactly what they are checking for.
+ * Appending cannot merge silently — two branches put a different line in the same
+ * place, which is a conflict a human has to resolve — and the list is also the
+ * answer to "what changed in version N", which both collisions could only be
+ * diagnosed by reconstructing from two diffs. `test/protocol-merge.test.ts`
+ * demonstrates both halves of that on a throwaway clone rather than asserting it.
  *
- * 5 (chat) added the two-party relay between matched buddies, and with it the
- * `ChatErrorCode` arm of `ProtocolErrorCode` below.
+ * Append at the bottom, numbered one past the current last. Never renumber a
+ * landed entry, and never reach for a literal instead.
  *
- * 5 (money) put payment in front of the pickup code: `matched` no longer carries
- * one even for the orderer while a match is being charged, and the code arrives
- * later on `payment_cleared`. A client from before it would sit on a null code
- * with no idea it was waiting for two cards to clear.
- *
- * 6 (money) also stops a teardown claiming a refund it did not get:
- * `payment_failed`, `match_expired` and `pickup_disputed` all carry `heldCents` —
- * money collected and *not* handed back. An older client would silently show
- * nothing where a buyer is owed real money, which is exactly the misreport it
- * exists to end.
- *
- * 7 (radius) makes the market a distance rather than a shard: `welcome` now
- * carries `position` and `radiusMeters`, and a client from before it has no
- * centre for its map and no idea how far "nearby" is. `waiting` counts and the
- * `buddies` roster changed meaning with it — radius-scoped, not shard-scoped —
- * which is a change in what the same field means and so a version bump even
- * though the shape survived.
+ * Entries before 5 were reconstructed from `git log` when this list was
+ * introduced (issue #91), so the `added` sets are mechanical but the summaries are
+ * not contemporaneous notes. Two of those versions are the same defect this shape
+ * closes, visible only now that the history is written down: three unrelated
+ * changes each reached 4 separately, and the expiry messages arrived under 3 with
+ * no bump at all.
  */
-export const PROTOCOL_VERSION = 7
+export const PROTOCOL_HISTORY: readonly [ProtocolVersionNote, ...ProtocolVersionNote[]] = [
+  {
+    version: 1,
+    summary: 'The first wire: join a pool, wait, be paired with one buddy, cancel or be left.',
+    added: [
+      'join',
+      'cancel',
+      'ping',
+      'welcome',
+      'waiting',
+      'matched',
+      'buddy_left',
+      'pong',
+      'error',
+    ],
+    changed: [],
+  },
+  {
+    version: 2,
+    summary:
+      'Identity moved to the session: `join` lost its `name` — one on the wire is now ignored — and `welcome` carries the authenticated `user` instead.',
+    added: [],
+    changed: ['join', 'welcome'],
+  },
+  {
+    version: 3,
+    summary:
+      'Two-sided pickup confirmation, so a split settles only when both buddies confirm the handoff — and, under the same number rather than a bump of its own, the liveness sweep that drops a stale queue entry or an unconfirmed match.',
+    added: [
+      'confirm_pickup',
+      'pickup_confirmed',
+      'pickup_complete',
+      'pickup_disputed',
+      'queue_expiring',
+      'queue_expired',
+      'match_expired',
+    ],
+    changed: [],
+  },
+  {
+    version: 4,
+    summary:
+      'Three changes reached this number separately: `join` coordinates became optional because the server resolves a location itself, `welcome` gained `locationSource` so a buyer on the demo origin is never told it is where they are, and a sauce pair rides out on `join` and back on `matched`.',
+    added: [],
+    changed: ['join', 'welcome', 'matched'],
+  },
+  {
+    version: 5,
+    summary:
+      'Nuggchat: a two-party relay between matched buddies, stored nowhere, and with it the chat arm of `ProtocolErrorCode` that routes a refusal to the right control on screen.',
+    added: ['chat', 'chat_message'],
+    changed: ['error'],
+  },
+  {
+    version: 6,
+    summary:
+      'Money in front of the pickup code: `matched` no longer carries one while a match is being charged and it arrives on `payment_cleared` instead, and every teardown now says what became of the charge — `heldCents` is money collected and *not* handed back, which an older client would show as nothing at all.',
+    added: ['payment_required', 'payment_cleared', 'payment_failed'],
+    changed: ['matched', 'error', 'match_expired', 'pickup_disputed'],
+  },
+  {
+    version: 7,
+    summary:
+      'The market became a distance rather than a shard: `welcome` carries `position` and `radiusMeters`, without which a client has no centre for its map and no idea how far "nearby" is, and `waiting` counts and the `buddies` roster are scoped to that radius rather than to the cell — the same fields meaning something else.',
+    added: [],
+    changed: ['welcome', 'waiting'],
+  },
+]
+
+/**
+ * Wire protocol version — the newest entry above, never a literal.
+ *
+ * Bump on any breaking message change, by appending to `PROTOCOL_HISTORY`.
+ */
+export const PROTOCOL_VERSION = PROTOCOL_HISTORY[PROTOCOL_HISTORY.length - 1].version
 
 /**
  * Take a seat in the pool.
@@ -457,6 +547,45 @@ export type ServerMessage =
   | ChatRelayMessage
   | PongMessage
   | ErrorMessage
+
+/**
+ * Every message type on the wire, as data rather than only as a type.
+ *
+ * Keyed by the union so the two cannot drift apart: a message added to
+ * `ClientMessage` or `ServerMessage` without a key here fails to compile, and a
+ * key naming a message that does not exist fails too. It is data because
+ * `PROTOCOL_HISTORY` claims which types each version introduced, and a claim about
+ * the message set is only worth making if something can check it against the
+ * actual message set — see `test/protocol.test.ts`.
+ */
+const MESSAGE_TYPE_KEYS: Record<ProtocolMessageType, true> = {
+  join: true,
+  cancel: true,
+  ping: true,
+  confirm_pickup: true,
+  chat: true,
+  welcome: true,
+  waiting: true,
+  matched: true,
+  payment_required: true,
+  payment_cleared: true,
+  payment_failed: true,
+  buddy_left: true,
+  pickup_confirmed: true,
+  pickup_complete: true,
+  pickup_disputed: true,
+  queue_expiring: true,
+  queue_expired: true,
+  match_expired: true,
+  chat_message: true,
+  pong: true,
+  error: true,
+}
+
+/** The keys above, as a list. The cast is `Object.keys` losing the key type. */
+export const PROTOCOL_MESSAGE_TYPES = Object.keys(
+  MESSAGE_TYPE_KEYS,
+) as readonly ProtocolMessageType[]
 
 /**
  * Narrow an untrusted socket payload to a ClientMessage.

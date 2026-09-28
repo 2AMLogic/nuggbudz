@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { CHAT_FRAME_LIMIT } from '../shared/chat'
-import { PROTOCOL_VERSION, parseClientMessage } from '../shared/protocol'
+import {
+  PROTOCOL_HISTORY,
+  PROTOCOL_MESSAGE_TYPES,
+  PROTOCOL_VERSION,
+  parseClientMessage,
+} from '../shared/protocol'
 
 describe('parseClientMessage', () => {
   it('accepts a well-formed join', () => {
@@ -199,6 +204,74 @@ describe('PROTOCOL_VERSION', () => {
   it('is bumped past the version that had no chat', () => {
     // Chat added client and server message types, so a client and server that
     // disagree about this number disagree about the message set.
+    //
+    // Deliberately a bound and not an equality: a bump must not be a test edit.
     expect(PROTOCOL_VERSION).toBeGreaterThan(4)
+  })
+
+  it('is the end of the changelog rather than a number of its own', () => {
+    // Also not a pinned equality. The assertion is about where the number comes
+    // from: appending to PROTOCOL_HISTORY is the only way to bump it, which is
+    // what makes two branches bumping it a textual conflict instead of a silent
+    // agreement on one integer (issue #91, demonstrated in protocol-merge.test.ts).
+    expect(PROTOCOL_VERSION).toBe(PROTOCOL_HISTORY[PROTOCOL_HISTORY.length - 1].version)
+  })
+})
+
+describe('PROTOCOL_HISTORY', () => {
+  it('numbers every version exactly once, ascending by one from 1', () => {
+    // The defect itself: two wires both called N. A merge that resolved the
+    // append conflict by keeping both entries — the mistake a hurried resolution
+    // makes — fails here instead of shipping two message sets under one number.
+    expect(PROTOCOL_HISTORY.map((note) => note.version)).toEqual(
+      PROTOCOL_HISTORY.map((_, index) => index + 1),
+    )
+  })
+
+  it('says what changed in every version', () => {
+    // Both collisions were only diagnosable by reconstructing this from two
+    // diffs, so an entry that records a bump without saying what it was for is
+    // not an entry.
+    for (const note of PROTOCOL_HISTORY) {
+      expect(note.summary.trim().length, `version ${note.version} summary`).toBeGreaterThan(20)
+      const touched = note.added.length + note.changed.length + (note.removed?.length ?? 0)
+      expect(touched, `version ${note.version} touches no message`).toBeGreaterThan(0)
+    }
+  })
+
+  it('accounts for every message type on the wire, and invents none', () => {
+    // The half that catches a mis-resolved conflict on the merged tree rather
+    // than at merge time: replaying the changelog has to reproduce the live
+    // message set exactly. A merge that dropped one side's appended entry keeps
+    // that side's message types, and they turn up here unaccounted for.
+    const replayed = new Set<string>()
+    for (const note of PROTOCOL_HISTORY) {
+      for (const type of note.added) replayed.add(type)
+      for (const type of note.removed ?? []) replayed.delete(type)
+    }
+    expect([...replayed].sort()).toEqual([...PROTOCOL_MESSAGE_TYPES].sort())
+  })
+
+  it('introduces each message type in one version only', () => {
+    const seen = new Set<string>()
+    for (const note of PROTOCOL_HISTORY) {
+      for (const type of note.added) {
+        expect(seen.has(type), `${type} introduced twice, again in version ${note.version}`).toBe(
+          false,
+        )
+        seen.add(type)
+      }
+    }
+  })
+
+  it('never reports a version changing a message that did not exist yet', () => {
+    const present = new Set<string>()
+    for (const note of PROTOCOL_HISTORY) {
+      for (const type of note.added) present.add(type)
+      for (const type of note.changed) {
+        expect(present.has(type), `version ${note.version} changed absent ${type}`).toBe(true)
+      }
+      for (const type of note.removed ?? []) present.delete(type)
+    }
   })
 })

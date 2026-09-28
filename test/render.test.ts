@@ -2,9 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   backgroundFrame,
   buildNugget,
-  CHECKER_DARK,
   CHECKER_HAZE,
-  CHECKER_LIGHT,
   cross,
   DEPTH,
   FRAME_HEIGHT,
@@ -14,7 +12,6 @@ import {
   nuggetFrame,
   project,
   rampIndex,
-  SKY_BANDS,
   SPECULAR,
   SPECULAR_EDGE,
   sub,
@@ -31,6 +28,23 @@ import {
  */
 
 const MESH = buildNugget()
+
+/**
+ * A six-digit hex fill as its three channels.
+ *
+ * The sky and board assertions ask about *hue* and *step size*, which is only
+ * answerable in numbers. Comparing the fill strings to the constants that drew
+ * them restates the implementation instead of constraining it.
+ */
+function channels(fill: string): [number, number, number] {
+  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(fill)
+  if (match === null) throw new Error(`not a six-digit hex fill: ${fill}`)
+  return [
+    Number.parseInt(match[1], 16),
+    Number.parseInt(match[2], 16),
+    Number.parseInt(match[3], 16),
+  ]
+}
 
 describe('the nugget mesh', () => {
   it('is the same mesh every time it is built', () => {
@@ -126,19 +140,65 @@ describe('shading', () => {
 
 describe('the world behind it', () => {
   const background = backgroundFrame()
+  const horizon = horizonY()
 
-  it('bands the sky in hard steps rather than a gradient', () => {
-    const sky = background.slice(0, SKY_BANDS.length)
-    expect(sky.map((polygon) => polygon.fill)).toEqual([...SKY_BANDS])
-    // Every band is a full-width rectangle stacked down to the horizon.
+  /**
+   * Sky and board are told apart by the horizon, not by `SKY_BANDS.length`.
+   * Slicing the output with the same constant that produced it makes a test
+   * that moves whenever the constant does — which is how a 64-step gradient
+   * once passed here (#128).
+   */
+  const sky = background.filter((polygon) => polygon.points.every((point) => point.y <= horizon))
+  const board = background.filter((polygon) => polygon.points.some((point) => point.y > horizon))
+
+  /** Twice today's eight. The property is "few", not any particular count. */
+  const MAX_SKY_BANDS = 16
+  /** Summed per-channel step between neighbours. Today's smallest is 38; a
+   * 64-step ramp across the same two endpoints moves about four. */
+  const MIN_BAND_STEP = 24
+  /** A band you can see. Sixty-four of them over a 59-pixel sky are one each. */
+  const MIN_BAND_PIXELS = 2
+
+  it('bands the sky in a few hard steps rather than a gradient', () => {
+    const fills = sky.map((polygon) => polygon.fill)
+    expect(new Set(fills).size).toBeGreaterThan(1)
+    expect(sky.length).toBeLessThanOrEqual(MAX_SKY_BANDS)
+
+    for (let index = 1; index < fills.length; index++) {
+      const before = channels(fills[index - 1])
+      const after = channels(fills[index])
+      const step = before.reduce((sum, value, channel) => sum + Math.abs(value - after[channel]), 0)
+      expect(step).toBeGreaterThanOrEqual(MIN_BAND_STEP)
+    }
+
+    // Every band is a full-width slab thick enough to read as a step, stacked
+    // down to the horizon.
     expect(sky[0].points[0]).toEqual({ x: 0, y: 0 })
-    expect(sky[sky.length - 1].points[2].y).toBeCloseTo(horizonY(), 5)
+    for (const band of sky) {
+      const xs = band.points.map((point) => point.x)
+      const ys = band.points.map((point) => point.y)
+      expect(Math.min(...xs)).toBe(0)
+      expect(Math.max(...xs)).toBe(FRAME_WIDTH)
+      expect(Math.max(...ys) - Math.min(...ys)).toBeGreaterThanOrEqual(MIN_BAND_PIXELS)
+    }
+    expect(sky[sky.length - 1].points[2].y).toBeCloseTo(horizon, 5)
   })
 
-  it('draws the board in black and white and nothing else', () => {
-    const board = background.slice(SKY_BANDS.length)
-    const fills = new Set(board.map((polygon) => polygon.fill))
-    expect([...fills].sort()).toEqual([CHECKER_DARK, CHECKER_LIGHT, CHECKER_HAZE].sort())
+  it('draws the board neutral — pure black and white, and no hue anywhere', () => {
+    const fills = [...new Set(board.map((polygon) => polygon.fill))]
+    expect(fills.length).toBeGreaterThan(1)
+
+    for (const fill of fills) {
+      const [r, g, b] = channels(fill)
+      // Equal channels is what "no hue" means. Hex equality against the
+      // constants that drew the board could never have said it.
+      expect([fill, r === g && g === b]).toEqual([fill, true])
+    }
+
+    // And the two ends are the ends: a checkerboard of two greys is a lie.
+    const levels = fills.map((fill) => channels(fill)[0])
+    expect(Math.min(...levels)).toBe(0x00)
+    expect(Math.max(...levels)).toBe(0xff)
   })
 
   it('runs the board off the bottom of the frame', () => {

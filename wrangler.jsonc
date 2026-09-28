@@ -14,9 +14,10 @@
     "run_worker_first": ["/api/*"]
   },
   "observability": { "enabled": true },
-  // One Durable Object per geohash cell. The cell IS the matching market:
-  // all pairing for a neighbourhood happens inside a single-threaded object,
+  // One Durable Object per geohash cell. The cell is the *shard*, not the
+  // market: all pairing for a region happens inside a single-threaded object,
   // which is what makes "two buyers claim the same box" impossible by design.
+  // Who may pair with whom is then decided by MATCH_RADIUS_METERS below.
   "durable_objects": {
     "bindings": [{ "name": "NUGG_POOL", "class_name": "NuggPool" }]
   },
@@ -31,18 +32,27 @@
   ],
   "kv_namespaces": [{ "binding": "SESSIONS", "id": "747a8578350046df8d8c3c0f80851828" }],
   "vars": {
-    // Geohash precision 6 ≈ 1.2km x 0.6km cell. Pairing also enforces
-    // MATCH_RADIUS_METERS inside the cell so cell-edge buddies aren't matched
-    // across an unwalkable distance.
-    "POOL_CELL_PRECISION": "6",
-    "MATCH_RADIUS_METERS": "800",
+    // The market is the radius; the cell is only the shard it is evaluated in.
+    // 3219 m is two miles, and this is the one place that number is written:
+    // `shared/geo.ts` derives the same default from METERS_PER_MILE, the client
+    // is told the figure in `welcome`, and nothing on screen carries its own.
+    //
+    // Precision 3 (~156 km) so a 2-mile circle sits comfortably inside one
+    // shard: at precision 6 the cell (1.2 km) is smaller than the circle's
+    // 6.4 km diameter, so the grid — not the walk — would still decide who can
+    // pair. Coarse is the safe direction: one object stays authoritative over
+    // every candidate it might pair, with no cross-object locking. If per-shard
+    // contention ever becomes real, this is the knob to turn first, and the
+    // follow-up is neighbour-aware sharding.
+    "POOL_CELL_PRECISION": "3",
+    "MATCH_RADIUS_METERS": "3219",
     // Pool socket abuse limits (#10).
-    // Concurrent sockets one signed-in account may hold open in one cell. Keyed
+    // Concurrent sockets one signed-in account may hold open in one shard. Keyed
     // on the account, not the IP, so buyers behind one carrier NAT never share
     // it. An honest buyer needs one socket, or two while a reconnect overlaps.
     "POOL_MAX_SOCKETS_PER_CELL": "3",
     // Upgrade attempts one client IP (per /64 on IPv6) may make per sliding
-    // window, across all cells. Sized for a venue NAT: two phones on one Wi-Fi,
+    // window, across all shards. Sized for a venue NAT: two phones on one Wi-Fi,
     // each reconnecting a few times, must never trip it. Each allowed attempt
     // costs one KV write (the free tier allows 1,000 per day).
     "POOL_UPGRADE_LIMIT": "30",

@@ -7,13 +7,57 @@ export interface LatLng {
 }
 
 /**
+ * Metres in a statute mile, exactly.
+ *
+ * Distances are metres everywhere in code, the same way money is cents: miles
+ * exist only where a person reads one. This is the single conversion, so no
+ * caller has to pick its own rounding.
+ */
+export const METERS_PER_MILE = 1609.344
+
+const FEET_PER_METER = 3.280839895
+
+/**
+ * How far apart two buyers may be and still be paired, by default.
+ *
+ * Two miles: for one box of nuggets a person will walk further than the 800 m
+ * this used to be, and the walk — not a grid line — is the only thing that
+ * should decide whether a split is practical. Derived from `METERS_PER_MILE`
+ * rather than written out so the metre value lives in exactly one place: the
+ * deployed number is `MATCH_RADIUS_METERS` in `wrangler.jsonc`, and this is
+ * what a runtime with no var set falls back to.
+ */
+export const DEFAULT_MATCH_RADIUS_METERS = Math.round(2 * METERS_PER_MILE)
+
+/**
+ * Geohash precision for the shard key, by default.
+ *
+ * Coarse on purpose, and the number matters. The cell is no longer the market —
+ * `DEFAULT_MATCH_RADIUS_METERS` is — so the cell's only remaining job is to
+ * contain every candidate a buyer at its centre could pair with. At precision 6
+ * the cell (~1.2 km) is *smaller* than the 6.4 km diameter of that radius, so
+ * the grid would still be the real constraint; precision 5 (~4.9 km) is smaller
+ * too; precision 4 (~39 x 19.5 km) contains it, but over half of that box lies
+ * within 3.2 km of an edge, so a majority of buyers would have part of their
+ * circle clipped. Precision 3 (~156 km) reduces that to a small minority.
+ *
+ * That trades contention for correctness, and it is the safe direction to trade:
+ * coarsening keeps one Durable Object authoritative over every candidate it
+ * might pair, which is what makes double-pairing impossible without locking.
+ * The alternative — fine cells plus a fan-out to the eight neighbours — needs
+ * cross-object coordination and gives that invariant up.
+ */
+export const DEFAULT_POOL_CELL_PRECISION = 3
+
+/**
  * Encode a coordinate as a geohash of the given precision.
  *
  * NuggBudz uses the geohash purely as a shard key: every buyer whose location
- * encodes to the same cell lands in the same Durable Object and therefore the
- * same matching market. Precision 6 is roughly a 1.2km x 0.6km box.
+ * encodes to the same cell lands in the same Durable Object, and matching inside
+ * it is decided by distance. See `DEFAULT_POOL_CELL_PRECISION` for why the shard
+ * is deliberately much larger than the market it has to contain.
  */
-export function geohash(lat: number, lng: number, precision = 6): string {
+export function geohash(lat: number, lng: number, precision = DEFAULT_POOL_CELL_PRECISION): string {
   if (!Number.isFinite(lat) || lat < -90 || lat > 90) throw new RangeError(`bad latitude: ${lat}`)
   if (!Number.isFinite(lng) || lng < -180 || lng > 180)
     throw new RangeError(`bad longitude: ${lng}`)
@@ -75,9 +119,10 @@ export interface BoundingBox {
  *
  * The exact inverse of `geohash`'s bit-interleaving loop: same even/odd bit
  * order, same binary-search halving, just reading bits out of each base32
- * character instead of deciding them. A client that only has the cell string
- * (never a buyer's raw coordinate) uses this to draw the cell it is standing
- * in, which is the whole point of shipping a hash instead of a point.
+ * character instead of deciding them. Nothing on screen draws this any more —
+ * the shard is not a shape a buyer has a model for, and the map draws the match
+ * radius instead — but the inverse is what lets a test assert which shard a
+ * coordinate landed in without reimplementing the encoder.
  */
 export function decodeCell(hash: string): BoundingBox {
   if (hash.length === 0) throw new RangeError('geohash must not be empty')
@@ -118,7 +163,7 @@ const METERS_PER_DEGREE_LAT = 111_320
  * This is the only place a waiting buyer's location leaves the server: the
  * Durable Object calls this before broadcasting a roster to anyone who is not
  * yet matched to that buyer, so an unmatched buyer never sees where anyone
- * else is actually standing — only which rough patch of the cell they are in.
+ * else is actually standing — only which rough patch of ground they are on.
  */
 export function snapToGrid(point: LatLng, meters = 75): LatLng {
   if (!Number.isFinite(meters) || meters <= 0) {
@@ -152,8 +197,42 @@ export function distanceMeters(a: LatLng, b: LatLng): number {
   return 2 * EARTH_RADIUS_METERS * Math.asin(Math.min(1, Math.sqrt(h)))
 }
 
-/** A distance rendered for a buddy card, e.g. '120 m away' or '1.3 km away'. */
+/**
+ * Where a distance stops being read in feet and starts being read in miles.
+ *
+ * A tenth of a mile. Below it "0.1 mi" is the only thing miles can say and a
+ * person crossing a car park wants a number that changes; above it, feet stop
+ * meaning anything to somebody deciding whether to walk.
+ */
+const FEET_CUTOVER_METERS = METERS_PER_MILE / 10
+
+/**
+ * A distance rendered for a buddy card, e.g. '250 ft away' or '1.3 mi away'.
+ *
+ * The one place a distance is formatted, so the units are decided once. Feet and
+ * miles because the radius is quoted in miles on screen and a buddy card that
+ * answered in kilometres would be a second system to translate between. Metres
+ * stay canonical everywhere else — this function is the boundary.
+ */
 export function formatDistance(meters: number): string {
-  if (meters < 1000) return `${Math.round(meters)} m away`
-  return `${(meters / 1000).toFixed(1)} km away`
+  if (meters < FEET_CUTOVER_METERS) {
+    // To the nearest ten feet, and never zero: "0 ft away" reads as an error
+    // rather than as two people standing together.
+    const feet = Math.max(10, Math.round((meters * FEET_PER_METER) / 10) * 10)
+    return `${feet} ft away`
+  }
+  return `${(meters / METERS_PER_MILE).toFixed(1)} mi away`
+}
+
+/**
+ * A radius named the way it is offered to a buyer, e.g. '2 mi'.
+ *
+ * Trailing zeroes trimmed, because '2 mi' is the promise and '2.0 mi' reads like
+ * a measurement. Derived from whatever the server sent, so re-pricing the radius
+ * changes the copy with it and no screen carries its own idea of how far.
+ */
+export function formatMiles(meters: number): string {
+  const miles = meters / METERS_PER_MILE
+  const rounded = miles >= 1 ? Math.round(miles * 10) / 10 : Math.round(miles * 100) / 100
+  return `${rounded} mi`
 }

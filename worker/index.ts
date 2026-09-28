@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { ACTIVE_DEALS, findDeal, isDealOffered } from '../shared/deals'
 import { demoPairingEnabled, demoUserId, sanitizeDemoName } from '../shared/demo'
 import { analyzeSpread, settle } from '../shared/economics'
-import { geohash } from '../shared/geo'
+import { DEFAULT_POOL_CELL_PRECISION, geohash } from '../shared/geo'
 import {
   coordsSupplied,
   DEMO_ORIGIN,
@@ -140,7 +140,15 @@ app.get('/api/pool/ws', async (c) => {
   // that would make it throw — a RangeError inside an upgrade would reach the
   // buyer as a socket that just breaks.
   const fix = resolveLocation(clientCoords, edgeCoords(c.req.raw), DEMO_ORIGIN)
-  const cell = geohash(fix.lat, fix.lng, intVar(c.env.POOL_CELL_PRECISION, 6))
+  // The shard, not the market: it only has to be coarse enough to contain every
+  // buyer a socket at `fix` could be matched with, so that one Durable Object
+  // stays authoritative over the whole decision. Matching inside it is by
+  // distance (`MATCH_RADIUS_METERS`).
+  const cell = geohash(
+    fix.lat,
+    fix.lng,
+    intVar(c.env.POOL_CELL_PRECISION, DEFAULT_POOL_CELL_PRECISION),
+  )
   const stub = c.env.NUGG_POOL.get(c.env.NUGG_POOL.idFromName(cell))
 
   // `set` replaces any same-named parameter the caller supplied, so these all

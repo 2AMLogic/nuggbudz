@@ -431,6 +431,8 @@ export class NuggPool extends DurableObject<Env> {
     // an id would be two candidates the matcher cannot tell apart.
     this.setState(ws, { ...identityOf(held.state), connId, status: 'matched', matchId, role })
 
+    const standings = await this.standingsFor([buddy.state.userId])
+
     this.send(ws, {
       type: 'matched',
       matchId,
@@ -441,6 +443,7 @@ export class NuggPool extends DurableObject<Env> {
         name: buddy.state.name,
         distanceMeters: record.distanceMeters,
         sauces: buddy.state.sauces,
+        standing: standings.get(buddy.state.userId) ?? 'new',
       },
       // The same single side, on every socket that side holds. A receiver's
       // second tab gets null here exactly as their first one did — the code

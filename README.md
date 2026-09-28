@@ -348,6 +348,21 @@ It reads `/api/health` and asserts the matching half: flag off ⇒ an
 unauthenticated upgrade is refused 401; flag on ⇒ two unauthenticated clients
 pair with each other, with `demo:` identities and the same $4.49 split.
 
+**`wrangler dev --var ALLOW_DEMO_PAIRING=on` is a different lever from the one
+above, and it does not reliably work — don't reach for it.** On the currently
+pinned wrangler version (confirmed on 4.142.0, macOS arm64), `wrangler dev
+--var` lists the binding in its startup table but the Worker sees
+`env.ALLOW_DEMO_PAIRING` as `undefined` at runtime (#37). It was never
+load-bearing here anyway: local dev runs through `pnpm dev` (`vite dev`), not
+`wrangler dev`, and CI's `demo-check` job already sets the flag through
+`.dev.vars` for exactly this reason. `.dev.vars` (gitignored, read by `pnpm
+dev`) is the only mechanism to trust locally. Whether `wrangler deploy --var`
+— the mechanism `deploy:demo` actually uses against production — has the same
+defect is **not yet confirmed either way**; verify it on the next real deploy
+by reading `scripts/post-deploy-mode.mjs`'s banner (or `curl
+<deploy-url>/api/health`) immediately after running `pnpm run deploy:demo`,
+rather than assuming either outcome.
+
 D1 and KV bindings are already provisioned in `wrangler.jsonc`. `/api/*` is
 pinned to `run_worker_first`, because otherwise the SPA fallback answers the API
 with `index.html` in production while `vite dev` works fine.

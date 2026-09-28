@@ -1,4 +1,4 @@
-import { isPickupCode, normalizePickupCode } from '@shared/pickup'
+import { pickupCodeFromScan } from '@shared/handoff'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 /**
@@ -62,6 +62,11 @@ function describeCameraFailure(error: unknown): string {
  * to the input the receiver would otherwise have typed into, and nothing is sent
  * to the server until they tap. A scan that settled money the instant a camera
  * caught a reflection would be a worse product, not a slicker one.
+ *
+ * **Both payload forms, because the receiver must not have to care.**
+ * `pickupCodeFromScan` takes a bare code or a handoff link and yields the same
+ * six characters, so a receipt printed by an older client and one printed by
+ * this one scan identically.
  */
 export function CodeScanner({ onScan }: { onScan: (code: string) => void }) {
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
@@ -69,8 +74,12 @@ export function CodeScanner({ onScan }: { onScan: (code: string) => void }) {
   const streamRef = useRef<MediaStream | null>(null)
   const frameRef = useRef<number | null>(null)
   const scratchRef = useRef<HTMLCanvasElement | null>(null)
+  /** Trips the in-flight `start`'s `cancelled` flag; see `start` below. */
+  const cancelRef = useRef<(() => void) | null>(null)
 
   const stop = useCallback(() => {
+    cancelRef.current?.()
+    cancelRef.current = null
     if (frameRef.current !== null) {
       cancelAnimationFrame(frameRef.current)
       frameRef.current = null
@@ -89,6 +98,18 @@ export function CodeScanner({ onScan }: { onScan: (code: string) => void }) {
   useEffect(() => stop, [stop])
 
   const start = useCallback(async () => {
+    // Set by the cleanup below if this component goes away mid-`await`. Every
+    // `await` in here is a point at which the receipt can be replaced — a match
+    // settles, is disputed, or the buyer walks away — and `stop()` would then
+    // run *before* the rest of this function resumed and armed a frame loop on
+    // an unmounted element. The camera was still handed back, so the privacy
+    // invariant held, but the loop rescheduled itself forever against a video
+    // that would never have a frame. Checked after each await instead.
+    let cancelled = false
+    cancelRef.current = () => {
+      cancelled = true
+    }
+
     // Annotated wider than the DOM lib types it: on an insecure origin, and in
     // some in-app browsers, `mediaDevices` is simply absent.
     const camera: MediaDevices | undefined = navigator.mediaDevices
@@ -112,12 +133,14 @@ export function CodeScanner({ onScan }: { onScan: (code: string) => void }) {
     try {
       decodeQr = (await import('jsqr')).default
     } catch {
+      if (cancelled) return
       setPhase({
         kind: 'refused',
         why: 'Could not load the scanner. Read the code off their receipt and type it instead.',
       })
       return
     }
+    if (cancelled) return
 
     let stream: MediaStream
     try {
@@ -125,7 +148,15 @@ export function CodeScanner({ onScan }: { onScan: (code: string) => void }) {
       // A device with only one camera ignores the hint rather than failing.
       stream = await camera.getUserMedia({ video: { facingMode: 'environment' } })
     } catch (error) {
+      if (cancelled) return
       setPhase({ kind: 'refused', why: describeCameraFailure(error) })
+      return
+    }
+    if (cancelled) {
+      // Gone while the permission prompt was open. Hand the camera back here as
+      // well as below: `stop()` has already run and has no reference to this
+      // stream, so nothing else ever would.
+      for (const track of stream.getTracks()) track.stop()
       return
     }
 
@@ -146,6 +177,14 @@ export function CodeScanner({ onScan }: { onScan: (code: string) => void }) {
     } catch {
       // Some browsers resolve the stream but refuse to start playback. The frame
       // loop below reads `readyState`, so it simply waits rather than throwing.
+    }
+    // The narrow one this flag exists for: unmounting *during* `play()` ran
+    // `stop()`, which released the tracks and cancelled nothing, because there
+    // was no frame loop yet. Arming one here would leave it rescheduling against
+    // `readyState 0` for the life of the page.
+    if (cancelled) {
+      stop()
+      return
     }
     setPhase({ kind: 'scanning' })
 
@@ -175,11 +214,11 @@ export function CodeScanner({ onScan }: { onScan: (code: string) => void }) {
       })
       if (found === null) return
 
-      const code = normalizePickupCode(found.data)
-      // Anything else in frame — a merchant's promo QR, a wifi card taped to the
-      // counter — is not a pickup code. Keep looking rather than filling the
-      // field with it.
-      if (!isPickupCode(code)) return
+      // A bare code or a handoff link, indifferently. Anything else in frame — a
+      // merchant's promo QR, a wifi card taped to the counter — is neither, so
+      // keep looking rather than filling the field with it.
+      const code = pickupCodeFromScan(found.data)
+      if (code === null) return
 
       stop()
       setPhase({ kind: 'scanned' })

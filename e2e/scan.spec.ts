@@ -104,6 +104,20 @@ const SCENARIOS = {
       at: 'e2eUnmountB',
     },
   },
+  noChunk: {
+    orderer: {
+      sid: sessionId('e2e-nochnk-a'),
+      userId: accountId(9),
+      name: 'Vera',
+      at: 'e2eNoChunkA',
+    },
+    receiver: {
+      sid: sessionId('e2e-nochnk-b'),
+      userId: accountId(10),
+      name: 'Hugo',
+      at: 'e2eNoChunkB',
+    },
+  },
 } as const
 
 type Buyer = { sid: string; userId: string; name: string; at: string }
@@ -563,5 +577,41 @@ test('the camera stream is stopped when the receipt holding it goes away', async
       .not.toContain('live')
   } finally {
     await Promise.all(contexts.map((each) => each.close().catch(() => {})))
+  }
+})
+
+test('a decoder chunk that will not load is reported, and typing still settles', async ({
+  browser,
+}) => {
+  // The one camera-failure branch nothing covered. `CodeScanner` fetches `jsqr`
+  // on the tap rather than with the app — 55 kB nobody looking at a nugget deal
+  // should download — which means a flaky network, an ad blocker or a stale
+  // service worker can leave the receiver tapping a button that silently does
+  // nothing. Aborting the chunk at the network is exactly that, and what it has
+  // to produce is a refusal in the same register as a denied camera: say what
+  // happened, and point at the path that still works.
+  const pair = SCENARIOS.noChunk
+  const { contexts, orderer, receiver, code } = await pairUp(browser, pair)
+
+  try {
+    await receiver.route(/jsqr/i, (route) => route.abort())
+
+    await receiver.getByRole('button', { name: /scan their code/i }).click()
+    await expect(receiver.getByText(/could not load the scanner/i)).toBeVisible()
+    // Not a dead end, and it says so in the same words every other refusal does.
+    await expect(receiver.getByText(/type it/i).first()).toBeVisible()
+    // And no viewfinder was opened to fail in: the chunk is fetched before
+    // `getUserMedia`, on purpose, so a decoder that cannot load never becomes a
+    // permission prompt the buyer answers for nothing.
+    await expect(receiver.getByRole('button', { name: /stop the camera/i })).toHaveCount(0)
+    await expect(receiver.locator('video')).toBeHidden()
+
+    await receiver.getByPlaceholder('------').fill(code)
+    await receiver.getByRole('button', { name: /got the box/i }).click()
+    await expect(receiver.getByText(/waiting on/i)).toBeVisible()
+    await orderer.getByRole('button', { name: /handed it over/i }).click()
+    await expect(receiver.getByText(/both of you confirmed the handoff/i)).toBeVisible()
+  } finally {
+    await Promise.all(contexts.map((context) => context.close().catch(() => {})))
   }
 })

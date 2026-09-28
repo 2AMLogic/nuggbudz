@@ -89,6 +89,13 @@ const BUYERS = {
   // makes the roster's radius scoping visible.
   kim: { sid: sessionId('smoke-kim'), userId: accountId(5), name: 'Kim' },
   lee: { sid: sessionId('smoke-lee'), userId: accountId(6), name: 'Lee' },
+  // Moss matches Kim and then walks away, which requeues Kim beside Nell —
+  // since #101 that is the only way two buyers end up queued inside one radius,
+  // because a second socket of one identity is refused rather than seated.
+  moss: { sid: sessionId('smoke-moss'), userId: accountId(34), name: 'Moss' },
+  nell: { sid: sessionId('smoke-nell'), userId: accountId(35), name: 'Nell' },
+  // Holds a real pickup code and is not in that match. Never joins.
+  bystander: { sid: sessionId('smoke-bystnd'), userId: accountId(36), name: 'Bystander' },
   // Signed in only to be signed out again.
   doomed: { sid: sessionId('smoke-doomed'), userId: accountId(7), name: 'Doomed' },
   // The pickup handshake pair, and the pair that never finishes one.
@@ -687,6 +694,21 @@ check(
   JSON.stringify(welcomeA.pickupTimeoutMs),
 )
 
+// Structural, and now asserted (#101). Each side of every pair in this file
+// carries its own session cookie, so each is its own identity — and since a
+// second socket of *one* identity is refused rather than queued, a harness that
+// ever started sharing a cookie jar between two sides would stop pairing
+// entirely rather than failing somewhere subtle. Say so here, once, rather than
+// leaving it to be inferred from a pairing that happens to work.
+const welcomeB = await b.expect('welcome')
+check(
+  'the two sides of a pair are two identities',
+  welcomeA.user?.id !== welcomeB.user?.id &&
+    welcomeA.user?.id === BUYERS.robb.userId &&
+    welcomeB.user?.id === BUYERS.dana.userId,
+  `${welcomeA.user?.id} / ${welcomeB.user?.id}`,
+)
+
 a.join()
 const waitingA = await a.expect('waiting')
 check(
@@ -793,6 +815,31 @@ check(
   orderer.matchId === receiver.matchId && orderer.role === 'orderer',
   `${orderer.role}/${receiver.role}`,
 )
+
+// --- holding the code is not being the receiver (#101) ---
+// The handoff QR carries a link now, which a bystander can photograph across the
+// table and open. What stops them is not that the code is secret — it never was,
+// from anyone standing next to you — it is that `confirm_pickup` arrives on an
+// authenticated socket and the server checks who that is. So: a third account,
+// in this pair's own market and therefore in their own Durable Object, holding
+// the *real* code, and refused.
+const bystander = open(BUYERS.bystander, FIXTURE_COORDS.bystander.lat, FIXTURE_COORDS.bystander.lng)
+await bystander.opened
+await bystander.expect('welcome')
+bystander.confirm(orderer.pickupCode)
+const outsider = await bystander.expectError()
+check(
+  'a socket holding the real code settles nothing when it is not in that match',
+  outsider.code === 'not_matched',
+  outsider.code,
+)
+check(
+  'and the match itself is untouched by the attempt',
+  (await g.settles('pickup_confirmed')) === false &&
+    (await h.settles('pickup_confirmed')) === false,
+  JSON.stringify([...g.inbox, ...h.inbox].map((m) => m.type)),
+)
+bystander.ws.close()
 
 // A receiver who never met their bud cannot talk their way through.
 h.confirm('ZZZZZZ')
@@ -1277,7 +1324,7 @@ check(
 check('a refused gated join never queues the buyer', (await c.settles('waiting')) === false)
 
 // --- the map roster is radius-scoped ---
-// Two claims, and #82 made the second one the load-bearing half.
+// Three claims here, and #101 changed how the third one has to be staged.
 //
 // 1. Everyone already queued nearby has to hear about a roster change, not just
 //    the socket that caused it: a newcomer must push a fresh 'waiting' to every
@@ -1287,15 +1334,24 @@ check('a refused gated join never queues the buyer', (await c.settles('waiting')
 //    is ~156 km across now, so a shard-wide roster would put strangers two
 //    counties away on the map and leak where they are standing. `lee` stands
 //    exactly three miles from `kim` — one mile past the two-mile radius — and
-//    must appear to neither of them, while both stay queued.
+//    must appear to nobody here, while everybody stays queued.
+// 3. A second socket of one identity is **refused**, with a message saying which
+//    tab you are already in. Before #101 it was quietly queued beside the first
+//    and never matched, which is how this scenario used to get two mutually
+//    unmatchable buyers into one radius. Demo identity is per browser now, so a
+//    second tab is an ordinary accident rather than an edge case, and silence
+//    would read as a queue that simply never matches.
 //
-// Kim opens the two sockets that *can* see each other, because with one deal
-// offered an account is the only remaining thing that stops a pair matching:
-// `handleJoin` never matches a buyer with themselves, so two tabs stay queued
-// side by side and each one is a dot on the other's map.
+// That third change is why `moss` and `nell` exist. With one deal offered and
+// self-matching refused at the door, the *only* way two buyers are queued inside
+// one radius without being each other's candidates is a requeue: `moss` matches
+// `kim`, `nell` queues alone while those two are matched, then `moss` walks away
+// and `kim` is put back — beside `nell`, with no fresh `findMatch` between them.
 const KIM_AT = FIXTURE_COORDS.kim
 const KIM_TAB_AT = FIXTURE_COORDS.kimTab
 const LEE_AT = FIXTURE_COORDS.lee
+const MOSS_AT = FIXTURE_COORDS.moss
+const NELL_AT = FIXTURE_COORDS.nell
 
 const kim = open(BUYERS.kim, KIM_AT.lat, KIM_AT.lng)
 await kim.opened
@@ -1342,24 +1398,68 @@ check(
 )
 check('the buyer outside the radius stays queued', (await kim.settles('matched')) === false)
 
-// Now a second tab of Kim's own account, inside the radius. Never matched — an
-// account is not two buyers — so it stays queued as a roster entry.
-const kimWaitingBefore = kim.inbox.filter((m) => m.type === 'waiting').length
+// --- a second tab is one buyer, and is told so (#101) ---
+// Kim's own account, a second socket, 40 m away and well inside the radius.
 const kimTab = open(BUYERS.kim, KIM_TAB_AT.lat, KIM_TAB_AT.lng)
 await kimTab.opened
 await kimTab.expect('welcome')
 kimTab.join()
-const tabWaiting = await kimTab.expect('waiting')
+const secondTab = await kimTab.expectError()
 check(
-  'a second tab of one account is queued beside the first, never matched with it',
-  tabWaiting.waiting === 2 && (await kimTab.settles('matched')) === false,
-  JSON.stringify(tabWaiting),
+  'a second tab of one identity is refused, not queued beside the first',
+  secondTab.code === 'already_waiting',
+  secondTab.code,
 )
 check(
-  'a buyer inside the radius does appear on the roster',
-  tabWaiting.buddies.length === 1,
-  JSON.stringify(tabWaiting.buddies),
+  'and the refusal says which tab you are already in',
+  /another tab or window/i.test(secondTab.message ?? ''),
+  secondTab.message,
 )
+check(
+  'a refused second tab takes no seat at all',
+  (await kimTab.settles('waiting')) === false && (await kimTab.settles('matched')) === false,
+  JSON.stringify(kimTab.inbox.map((m) => m.type)),
+)
+
+// --- a newcomer refreshes the roster for everyone already queued ---
+const kimWaitingBefore = kim.inbox.filter((m) => m.type === 'waiting').length
+const moss = open(BUYERS.moss, MOSS_AT.lat, MOSS_AT.lng)
+await moss.opened
+await moss.expect('welcome')
+moss.join()
+const [kimMatched, mossMatched] = await Promise.all([kim.expect('matched'), moss.expect('matched')])
+check(
+  'a different account inside the radius does match',
+  kimMatched.matchId === mossMatched.matchId,
+  `${kimMatched.matchId} / ${mossMatched.matchId}`,
+)
+
+// The other half of the #101 refusal: matched, not merely waiting.
+kimTab.join()
+const tabWhileMatched = await kimTab.expectError()
+check(
+  'a second tab is refused while the first is in a match, and says so',
+  tabWhileMatched.code === 'already_matched' &&
+    /another tab or window/i.test(tabWhileMatched.message ?? ''),
+  `${tabWhileMatched.code}: ${tabWhileMatched.message}`,
+)
+
+// Queued alone while kim and moss are matched, so nothing pairs with nell.
+const nell = open(BUYERS.nell, NELL_AT.lat, NELL_AT.lng)
+await nell.opened
+await nell.expect('welcome')
+nell.join()
+const nellAlone = await nell.expect('waiting')
+check(
+  'a buyer who joins while everyone nearby is matched waits alone',
+  nellAlone.waiting === 1 && nellAlone.buddies.length === 0,
+  JSON.stringify(nellAlone),
+)
+
+// Moss walks away. Kim is requeued — beside nell, with no findMatch between
+// them — and everybody queued nearby is told.
+moss.ws.close()
+await kim.expect('buddy_left')
 
 const broadcastSeen = await (async () => {
   for (let i = 0; i < 40; i++) {
@@ -1369,22 +1469,22 @@ const broadcastSeen = await (async () => {
   return false
 })()
 check(
-  'a buyer already queued gets a fresh roster broadcast when someone new joins nearby',
+  'a requeued buyer and the buyer who was waiting both get a fresh roster',
   broadcastSeen,
   `${kimWaitingBefore} -> ${kim.inbox.filter((m) => m.type === 'waiting').length}`,
 )
 
 const latestForKim = kim.inbox.filter((m) => m.type === 'waiting').at(-1)
 check(
-  'the broadcast roster carries a position for the newcomer',
+  'the broadcast roster carries a position for the other queued buyer',
   latestForKim.buddies.some(
-    (pos) => Math.abs(pos.lat - KIM_TAB_AT.lat) < 0.01 && Math.abs(pos.lng - KIM_TAB_AT.lng) < 0.01,
+    (pos) => Math.abs(pos.lat - NELL_AT.lat) < 0.01 && Math.abs(pos.lng - NELL_AT.lng) < 0.01,
   ),
   JSON.stringify(latestForKim.buddies),
 )
 check(
   'the broadcast never carries an exact coordinate for anyone else',
-  latestForKim.buddies.every((pos) => pos.lat !== KIM_TAB_AT.lat || pos.lng !== KIM_TAB_AT.lng),
+  latestForKim.buddies.every((pos) => pos.lat !== NELL_AT.lat || pos.lng !== NELL_AT.lng),
   JSON.stringify(latestForKim.buddies),
 )
 check(
@@ -1818,7 +1918,7 @@ check(
 
 for (const s of [chatA, chatB, chatC, chatD, chatE, chatDis2, chatLeft2]) s.ws.close()
 
-for (const s of [b, far, c, g, h, j, k, l, kim, kimTab, lee]) s.ws.close()
+for (const s of [b, far, c, g, h, j, k, l, kim, kimTab, lee, nell]) s.ws.close()
 
 // --- sauces off a socket ---
 // Seattle, nowhere near any pair above, so these two can only match

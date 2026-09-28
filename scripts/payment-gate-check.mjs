@@ -243,6 +243,25 @@ const hosted =
   FAKE_STRIPE_SERVE === null ? null : await startFakeStripe({ port: Number(FAKE_STRIPE_SERVE) })
 if (hosted !== null) log(`hosting the fake Stripe API on port ${FAKE_STRIPE_SERVE}\n`)
 
+/**
+ * Both sides of a pair are two identities, asserted rather than assumed (#101).
+ *
+ * Each socket here carries its own session cookie, which is what makes them two
+ * buyers — and since a second socket of *one* identity is now refused rather
+ * than quietly queued, a harness that ever shared a cookie jar between two sides
+ * would stop pairing outright. This is the check that would name that, instead
+ * of leaving it to a pairing timeout.
+ */
+async function checkDistinctIdentities(one, two) {
+  const [a, b] = await Promise.all([one.expect('welcome'), two.expect('welcome')])
+  check(
+    'the two sides of this pair are two identities',
+    a.user?.id !== undefined && a.user?.id !== b.user?.id,
+    `${a.user?.id} / ${b.user?.id}`,
+  )
+  return [a, b]
+}
+
 const health = await fetch(`${BASE}/api/health`).then((r) => r.json())
 const mode = health.payments
 log(`server reports payments=${mode} (protocol ${health.protocol})\n`)
@@ -304,7 +323,7 @@ if (mode === 'unconfigured') {
   const pia = open(BUYERS.pia, HERE)
   const quin = open(BUYERS.quin, NEARBY)
   await Promise.all([pia.opened, quin.opened])
-  await Promise.all([pia.expect('welcome'), quin.expect('welcome')])
+  await checkDistinctIdentities(pia, quin)
   pia.join()
   // A real gap between the two joins, so the second is decided against a queue
   // the first is already sitting in. Firing them together leaves the outcome up
@@ -341,7 +360,7 @@ if (mode === 'unconfigured') {
   const pia = open(BUYERS.pia, HERE)
   const quin = open(BUYERS.quin, NEARBY)
   await Promise.all([pia.opened, quin.opened])
-  await Promise.all([pia.expect('welcome'), quin.expect('welcome')])
+  await checkDistinctIdentities(pia, quin)
   pia.join()
   await pia.expect('waiting')
   quin.join()
@@ -368,7 +387,7 @@ if (mode === 'unconfigured') {
   const pia = open(BUYERS.pia, HERE)
   const quin = open(BUYERS.quin, NEARBY)
   await Promise.all([pia.opened, quin.opened])
-  await Promise.all([pia.expect('welcome'), quin.expect('welcome')])
+  await checkDistinctIdentities(pia, quin)
   pia.join()
   await pia.expect('waiting')
   quin.join()
@@ -496,7 +515,7 @@ if (mode === 'unconfigured') {
   const rex = open(BUYERS.rex, HERE)
   const tam = open(BUYERS.tam, NEARBY)
   await Promise.all([rex.opened, tam.opened])
-  await Promise.all([rex.expect('welcome'), tam.expect('welcome')])
+  await checkDistinctIdentities(rex, tam)
   rex.join()
   await rex.expect('waiting')
   tam.join()
@@ -549,7 +568,7 @@ if (mode === 'unconfigured') {
     const una = open(BUYERS.una, HERE)
     const vic = open(BUYERS.vic, NEARBY)
     await Promise.all([una.opened, vic.opened])
-    await Promise.all([una.expect('welcome'), vic.expect('welcome')])
+    await checkDistinctIdentities(una, vic)
     una.join()
     await una.expect('waiting')
     vic.join()
@@ -615,7 +634,7 @@ if (mode === 'unconfigured') {
     const wes = open(BUYERS.wes, HERE)
     const zed = open(BUYERS.zed, NEARBY)
     await Promise.all([wes.opened, zed.opened])
-    await Promise.all([wes.expect('welcome'), zed.expect('welcome')])
+    await checkDistinctIdentities(wes, zed)
     wes.join()
     await wes.expect('waiting')
     zed.join()

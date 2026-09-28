@@ -113,20 +113,40 @@ state.
   times out into a dispute, and completing the handshake is the only thing that
   writes a row to the D1 ledger.
 - **The QR is a faster way to do what the protocol already requires, not a new
-  channel.** `PickupQr` encodes the pickup code **and nothing else** — no match
-  id, no user id, no session token, no URL — because a symbol held up in a queue
-  is public to everyone standing behind you; `shared/qr.ts` refuses to encode
-  anything that is not a pickup code, so no call site can widen the payload
-  later. A scan (`CodeScanner`) fills the same field a receiver would have typed
-  into and `confirm_pickup` validates it unchanged, which is why scanning needed
-  no protocol change and no `PROTOCOL_VERSION` bump. It never auto-confirms: the
-  handshake is deliberate on both sides by design. One decode path on both
-  phones — a pure-JS decoder, because `BarcodeDetector` does not exist on iOS
-  Safari and a fallback is the untested path precisely when it runs. Typing stays
-  on equal footing: a denied camera, no camera or bad light must still complete a
-  handoff, and `e2e/scan.spec.ts` proves all of that with a *real camera* reading
-  the orderer's *real* rendered canvas, because a decoder with a green unit test
-  and no wiring to `confirm_pickup` is this repo's fifth defect of one shape.
+  channel.** It carries a **handoff link** for the pickup code — `/h/<code>`,
+  built by `shared/handoff.ts` — and nothing else: no match id, no user id, no
+  session token. `pickupQrMatrix` takes a *code and an origin* rather than a
+  string, so no call site can widen the payload later. It is a link rather than
+  the bare code (#92 said otherwise, #101 overruled it) because a phone's own
+  camera app is the only scanner a borrowed handset has, and because the payload
+  was never the thing protecting the handoff: a symbol held up in a queue is
+  public to everyone behind you, and **the code always was too.** What protects
+  it is that `confirm_pickup` arrives on an authenticated socket and the server
+  checks that socket is the receiver of that match. **Opening the link confirms
+  nothing** — it hands the code to the session that opened it, which still taps.
+  A scan (`CodeScanner`, which accepts a bare code or a link indifferently) fills
+  the same field a receiver would have typed into and `confirm_pickup` validates
+  it unchanged, which is why none of this needed a protocol change or a
+  `PROTOCOL_VERSION` bump. One decode path on both phones — a pure-JS decoder,
+  because `BarcodeDetector` does not exist on iOS Safari and a fallback is the
+  untested path precisely when it runs. Typing stays on equal footing: a denied
+  camera, an aborted decoder chunk, no camera or bad light must still complete a
+  handoff. `e2e/scan.spec.ts` proves the in-app path with a *real camera* reading
+  the orderer's *real* rendered canvas, and `e2e/handoff.spec.ts` the link path,
+  because a decoder with a green unit test and no wiring to `confirm_pickup` is
+  this repo's fifth defect of one shape. **No physical phone and no native camera
+  app has run any of it** — that is #98, and a green Chromium suite must not be
+  read as if it had.
+- **A demo identity is sticky per browser, and that is what costs the
+  single-device demo.** `/api/health` sets a cookie, `worker/index.ts` reads it
+  at upgrade, and two tabs of one browser are therefore one buyer. It has to be:
+  the camera app opens the handoff link in a *new tab*, which is a new socket,
+  and a per-socket id would arrive at the handoff as a stranger. The accepted
+  cost (#101, the operator's call) is that the self-match guard now fires in
+  ordinary use — so it names the tab you are already in rather than failing
+  generically — and **pairing needs two devices.** `worker/pool.ts` adopts a
+  second socket of one identity into a *released* handoff and no earlier, and a
+  disconnect only tears a match down when the last socket on that side goes.
 - **Money clears before the handshake starts, and the gate fails closed.**
   `paymentDisposition` in `worker/lib/payments.ts` decides once per match
   whether it is charged, is a demo pair, is deliberately uncharged, or cannot

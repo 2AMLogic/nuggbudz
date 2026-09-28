@@ -154,7 +154,13 @@ function heldSuffix(heldCents: number): string {
   return ` ${formatCents(heldCents)} could not be refunded automatically and is being held — flagged for a human.`
 }
 
-function socketUrl({ lat, lng, demoName }: JoinRequest): string {
+/**
+ * What the upgrade itself needs: where you are, and what to call you in demo
+ * mode. Which box you want is a message, not a connection parameter.
+ */
+export type SocketRequest = Pick<JoinRequest, 'lat' | 'lng' | 'demoName'>
+
+function socketUrl({ lat, lng, demoName }: SocketRequest): string {
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
   const params = new URLSearchParams()
   // Sent only on the opt-in precise path. With no coordinates the server falls
@@ -226,8 +232,17 @@ export function usePool() {
     setState(INITIAL)
   }, [close])
 
-  const join = useCallback(
-    (request: JoinRequest) => {
+  /**
+   * Open the socket. `queue` says whether to ask for a seat once it is up.
+   *
+   * The two callers want the same connection for different reasons: `join` wants
+   * a place in the queue, and `attach` (#101) wants only to be seen — a phone
+   * that just opened a handoff link needs to find out whether the server already
+   * knows it as half of a live match. The server answers that at upgrade time,
+   * before any client message, so `attach` sends nothing at all.
+   */
+  const connect = useCallback(
+    (request: SocketRequest, seat: JoinRequest | null) => {
       close()
       // No optimistic position here: `welcome` carries the one the server
       // actually used, which is the only one the radius on the map is true for.
@@ -237,15 +252,16 @@ export function usePool() {
       socketRef.current = socket
 
       socket.onopen = () => {
+        if (seat === null) return
         // Coordinates are omitted unless the buyer opted into precise location:
         // the socket already carries a server-resolved one. Sauces are omitted
         // until a pair is complete — half a choice is not a selection.
-        const payload: Record<string, unknown> = { type: 'join', dealId: request.dealId }
-        if (request.lat !== undefined && request.lng !== undefined) {
-          payload.lat = request.lat
-          payload.lng = request.lng
+        const payload: Record<string, unknown> = { type: 'join', dealId: seat.dealId }
+        if (seat.lat !== undefined && seat.lng !== undefined) {
+          payload.lat = seat.lat
+          payload.lng = seat.lng
         }
-        if (request.sauces !== undefined) payload.sauces = request.sauces
+        if (seat.sauces !== undefined) payload.sauces = seat.sauces
         socket.send(JSON.stringify(payload))
       }
 
@@ -455,6 +471,20 @@ export function usePool() {
     [close, startKeepalive, stopKeepalive],
   )
 
+  const join = useCallback((request: JoinRequest) => connect(request, request), [connect])
+
+  /**
+   * Open a socket without asking for a seat.
+   *
+   * The one caller is a browser that just opened a handoff link. If the server
+   * already holds a released handoff for this identity it says so immediately,
+   * with the same `matched` the first tab got, and the receipt appears here too;
+   * if it does not, this socket simply sits idle and the screen falls back to
+   * showing the code to read and type. Nothing about it confirms anything —
+   * confirming is still a tap, and the server still checks the code and the role.
+   */
+  const attach = useCallback((request: SocketRequest) => connect(request, null), [connect])
+
   /**
    * Say the handoff happened. The receiver sends the code off their bud's
    * receipt; the orderer sends nothing, because they are the receipt.
@@ -480,5 +510,5 @@ export function usePool() {
     socket.send(JSON.stringify({ type: 'chat', text }))
   }, [])
 
-  return { ...state, join, leave, confirmPickup, sendChat }
+  return { ...state, join, attach, leave, confirmPickup, sendChat }
 }

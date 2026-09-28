@@ -41,10 +41,20 @@ $8.98 collected. The gross retail spread is $5.99 per pairing.
 5. Once both cards clear, the orderer's receipt prints a pickup code — as a
    scannable QR and as six characters. At the handoff the receiver either points
    a camera at it or reads it out and types it, and then the orderer taps to
-   agree. The code is never sent to the receiver by the server, so both routes
-   are the same act: it travels the last few feet through the air, not over the
-   network. A scan fills the field; it does not confirm. Only that two-sided
+   agree. The code is never sent to the receiver by the server, so every route
+   is the same act: it travels the last few feet through the air, not over the
+   network. **A scan fills the field; it does not confirm.** Only that two-sided
    confirmation writes a row to the ledger.
+
+   The QR carries a **link** — `nuggbudz.com/h/K7M2QX` — rather than the bare
+   code, so a phone's own camera app is enough and the receiver does not need
+   this app's scanner. Opening that link hands the code to whoever opened it and
+   nothing more: if that browser is the one holding the match it lands in the
+   confirm field, and if it is not, the screen simply prints six characters to
+   read out. It can never confirm by itself, because `confirm_pickup` still
+   arrives on an authenticated socket and the server still checks that socket is
+   the receiver of that match. That check — not the secrecy of a code anybody
+   standing next to you could already read — is what protects the handoff.
 
 **A disputed split holds the money.** If one buddy confirms the handoff and the
 other never does, nothing is booked to the ledger and **nothing is refunded
@@ -306,11 +316,18 @@ underneath and then print the mode the deployment actually ended up in, read
 back from the deployed Worker's own `/api/health` — never from which script you
 ran — so a config drift or a stale cached build cannot pass silently.
 
-With demo pairing on, an unauthenticated socket is given a throwaway
-`demo:<uuid>` identity and pairs under a name the caller types; the UI says on
-screen that it is pairing without accounts. The caller may propose a *display
-name* but never a user id — the id is minted server-side, so two tabs cannot
-claim one identity.
+With demo pairing on, an unauthenticated caller is given a throwaway `demo:`
+identity and pairs under a name they type; the UI says on screen that it is
+pairing without accounts. The caller may propose a *display name* but never a
+user id — the id is minted server-side, on a cookie `/api/health` sets, and is
+therefore **sticky per browser**.
+
+**That stickiness costs the single-device demo, deliberately.** It has to exist:
+a phone's camera app opens the handoff link in a new tab, a new tab is a new
+socket, and an identity minted per socket would arrive at the handoff as a
+stranger the match has never heard of. The price is that two tabs in one browser
+are now one buyer — the self-match guard refuses to pair them, and says which
+tab you are already in — so **demoing the pairing flow needs two devices.**
 
 **`ALLOW_DEMO_PAIRING` is deliberately absent from `wrangler.jsonc`.** Passing
 it only at deploy time means a checkout, `pnpm test`, `pnpm smoke` and CI all

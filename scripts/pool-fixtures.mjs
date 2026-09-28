@@ -88,6 +88,7 @@ export const MARKETS = {
   miami: { lat: 25.7617, lng: -80.1918, label: 'Miami' },
   saltLakeCity: { lat: 40.7608, lng: -111.891, label: 'Salt Lake City' },
   detroit: { lat: 42.3314, lng: -83.0458, label: 'Detroit' },
+  albuquerque: { lat: 35.0844, lng: -106.6504, label: 'Albuquerque' },
 }
 
 /**
@@ -113,14 +114,19 @@ export const FIXTURE_COORDS = {
   // The one-sided-confirmation-then-abandonment (dispute) pair.
   ivy: { lat: 36.1699, lng: -115.1398 },
   jed: { lat: 36.169995, lng: -115.139682 },
-  // The roster-broadcast trio. `kim` and `kimTab` are two sockets of the *same*
-  // account 40 m apart — near enough to be on each other's map, never paired,
-  // because an account is never matched with itself. `lee` is a different
-  // account exactly three miles east: same shard, outside the radius, and
-  // therefore invisible to both of them.
+  // The roster-broadcast scenario. `kim` and `kimTab` are two sockets of the
+  // *same* account 40 m apart: since #101 the second one is **refused**, not
+  // queued beside the first, which is what makes them the fixture for that
+  // refusal rather than for the roster. `lee` is a different account exactly
+  // three miles east — same shard, outside the radius, invisible to everyone
+  // here. `moss` matches kim and then walks away, which requeues kim beside
+  // `nell`: two queued buyers inside one radius who are not each other's
+  // candidates, which after #101 is the only way that arrangement can arise.
   kim: { lat: 33.4484, lng: -112.074 },
   kimTab: { lat: 33.448277, lng: -112.073595 },
   lee: { lat: 33.4484, lng: -112.021962 },
+  moss: { lat: 33.44876, lng: -112.074 },
+  nell: { lat: 33.4484, lng: -112.073568 },
   // Nuggchat: two live matches and a fifth buyer queued alone, all in one market.
   chatA: { lat: 30.2676, lng: -97.7433 },
   chatB: { lat: 30.267708, lng: -97.7433 },
@@ -132,6 +138,11 @@ export const FIXTURE_COORDS = {
   chatDisputeTwo: { lat: 39.739395, lng: -104.990154 },
   chatLeaveOne: { lat: 32.7767, lng: -96.797 },
   chatLeaveTwo: { lat: 32.776895, lng: -96.796866 },
+  // The bystander who holds a real pickup code and is not in that match. Stands
+  // 15 m from `gus`, in the handshake pair's own market and therefore in their
+  // own Durable Object — the point of the probe is that the server refuses them
+  // for who they are, not because the match is somewhere else. Never joins.
+  bystander: { lat: 45.515295, lng: -122.678536 },
   // The sauce-preference pair.
   sal: { lat: 47.6062, lng: -122.3321 },
   nia: { lat: 47.606295, lng: -122.331959 },
@@ -173,6 +184,10 @@ export const FIXTURE_COORDS = {
   e2eNoCameraB: { lat: 40.760923, lng: -111.890593 },
   e2eUnmountA: { lat: 42.3314, lng: -83.0458 },
   e2eUnmountB: { lat: 42.331523, lng: -83.045393 },
+  // The scanner chunk that will not load: `import('jsqr')` is aborted at the
+  // network, which is the one camera-failure branch nothing else covers.
+  e2eNoChunkA: { lat: 35.0844, lng: -106.6504 },
+  e2eNoChunkB: { lat: 35.084523, lng: -106.649993 },
 }
 
 // The "Protocol hygiene" socket (BUYERS.bad) deliberately reuses `robb`'s
@@ -214,8 +229,10 @@ export const SCENARIOS = {
   handshakePair: {
     lane: 'smoke',
     market: 'portland',
-    fixtures: ['gus', 'hana'],
-    what: 'the two-sided pickup handshake settles to the ledger',
+    fixtures: ['gus', 'hana', 'bystander'],
+    what:
+      'the two-sided pickup handshake settles to the ledger, and a third socket holding the ' +
+      'real code settles nothing because it is not the receiver of that match',
   },
   disputePair: {
     lane: 'smoke',
@@ -226,8 +243,10 @@ export const SCENARIOS = {
   rosterBroadcast: {
     lane: 'smoke',
     market: 'phoenix',
-    fixtures: ['kim', 'kimTab', 'lee'],
-    what: 'the map roster is radius-scoped, and a newcomer refreshes it for everyone nearby',
+    fixtures: ['kim', 'kimTab', 'lee', 'moss', 'nell'],
+    what:
+      'the map roster is radius-scoped, a newcomer refreshes it for everyone nearby, and a ' +
+      'second tab of one identity is refused rather than queued beside the first',
   },
   boundaryStraddle: {
     lane: 'smoke',
@@ -337,6 +356,21 @@ export const SCENARIOS = {
     fixtures: ['e2eUnmountA', 'e2eUnmountB'],
     what: 'the camera stream is stopped when the receipt holding it goes away',
   },
+  e2eNativeHandoff: {
+    lane: 'e2e',
+    market: 'serverResolved',
+    fixtures: [],
+    what:
+      'the handoff link opened in a second tab carries the receiver into the same match — ' +
+      'promptlessly, because a second tab has no coordinates of its own to send and the ' +
+      'server-resolved shard is the one a real demo pairs in',
+  },
+  e2eScannerChunkFails: {
+    lane: 'e2e',
+    market: 'albuquerque',
+    fixtures: ['e2eNoChunkA', 'e2eNoChunkB'],
+    what: 'a decoder chunk that will not load is reported, and typing still settles',
+  },
   e2eRefusedPrompt: {
     lane: 'e2e',
     market: 'serverResolved',
@@ -392,6 +426,27 @@ export const MARKET_RELATIONS = [
     why:
       '`badRejoin` sits on `robb`, so the same five kilometres separate it from `far`. Declared ' +
       'so the alias above cannot quietly inherit a relationship nobody stated.',
+  },
+  {
+    fixtures: ['moss', 'lee'],
+    relation: 'beyond-radius',
+    why:
+      '`lee` is three miles from everything else in this market, `moss` included — the roster ' +
+      'scoping claim is that nobody here can see them, not merely that kim cannot.',
+  },
+  {
+    fixtures: ['nell', 'lee'],
+    relation: 'beyond-radius',
+    why:
+      'Same reason as moss/lee. `nell` is the buyer left queued beside the requeued kim, and ' +
+      'the roster both of them end up with has to be empty of `lee`.',
+  },
+  {
+    fixtures: ['kimTab', 'lee'],
+    relation: 'beyond-radius',
+    why:
+      '`kimTab` sits 40 m from `kim`, so the same three miles separate it from `lee`. Declared ' +
+      'so the refused second tab cannot quietly inherit a relationship nobody stated.',
   },
   {
     fixtures: ['kim', 'lee'],

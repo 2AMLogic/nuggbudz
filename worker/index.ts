@@ -1,6 +1,14 @@
 import { Hono } from 'hono'
+import { bytesToBase64Url } from '../shared/base64url'
 import { ACTIVE_DEALS, findDeal, isDealOffered } from '../shared/deals'
-import { demoPairingEnabled, demoUserId, sanitizeDemoName } from '../shared/demo'
+import {
+  DEMO_TOKEN_LENGTH,
+  demoCookie,
+  demoPairingEnabled,
+  demoTokenFromCookieHeader,
+  demoUserId,
+  sanitizeDemoName,
+} from '../shared/demo'
 import { analyzeSpread, settle } from '../shared/economics'
 import { DEFAULT_POOL_CELL_PRECISION, geohash } from '../shared/geo'
 import {
@@ -25,14 +33,53 @@ export { NuggPool } from './pool'
 
 const app = new Hono<{ Bindings: Env }>()
 
-app.get('/api/health', (c) =>
-  c.json({
+/**
+ * A demo token: 32 random bytes, base64url. `DEMO_TOKEN_LENGTH` is the length
+ * that produces, and `isDemoTokenShaped` is what checks it on the way back in.
+ */
+function mintDemoToken(): string {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  const token = bytesToBase64Url(bytes)
+  if (token.length !== DEMO_TOKEN_LENGTH) {
+    throw new Error(`demo token is ${token.length} characters, expected ${DEMO_TOKEN_LENGTH}`)
+  }
+  return token
+}
+
+/** Whether this request arrived over TLS, which is what `Secure` should follow. */
+function isSecureRequest(url: string): boolean {
+  return new URL(url).protocol === 'https:'
+}
+
+app.get('/api/health', (c) => {
+  const demoAllowed = demoPairingEnabled(c.env.ALLOW_DEMO_PAIRING)
+
+  /**
+   * The demo identity is handed out here, and here is not an accident.
+   *
+   * It cannot be minted on the socket upgrade, which is where it is *used*: a
+   * `Set-Cookie` on a 101 response is not reliably stored by every browser, and
+   * a cookie silently dropped would look exactly like having no sticky identity
+   * — which is the failure this whole mechanism exists to prevent. It has to be
+   * a plain HTTP response, and this is the one every client already fetches
+   * before it can connect: the answer that says whether demo pairing is on is
+   * the answer that hands you your demo identity. Minted only when the server
+   * actually pairs without accounts, and only when the caller has no usable one
+   * already, so a curl or a monitor gets a cookie it will ignore and nothing
+   * else changes.
+   */
+  if (demoAllowed && demoTokenFromCookieHeader(c.req.header('Cookie')) === null) {
+    c.header('Set-Cookie', demoCookie(mintDemoToken(), { secure: isSecureRequest(c.req.url) }))
+  }
+
+  return c.json({
     ok: true,
     service: 'nuggbudz',
     protocol: PROTOCOL_VERSION,
     // The client reads this to offer a name field instead of a sign-in button
     // that cannot work, and to say on screen that it is pairing without accounts.
-    demoPairing: demoPairingEnabled(c.env.ALLOW_DEMO_PAIRING),
+    demoPairing: demoAllowed,
     /**
      * Whether this server can charge for a match, and therefore whether it will
      * make one at all. Stated out loud so an operator can check a deploy with a
@@ -58,8 +105,8 @@ app.get('/api/health', (c) =>
       c.env.STRIPE_API_BASE === undefined || c.env.STRIPE_API_BASE.length === 0
         ? 'default'
         : 'custom',
-  }),
-)
+  })
+})
 
 app.route('/api/auth', authRoutes)
 
@@ -189,15 +236,38 @@ app.get('/api/pool/ws', async (c) => {
   // `set` replaces any same-named parameter the caller supplied, so these all
   // reach the Durable Object with server-derived values only.
   const url = new URL(c.req.url)
-  // Identity is the session when there is one, and a throwaway otherwise. A demo
-  // caller may propose a display name but never a user id: minting the id here is
-  // what keeps two tabs from claiming one identity, and therefore what keeps the
-  // self-match guard meaningful.
+  /**
+   * Identity is the session when there is one, and the browser's demo cookie
+   * otherwise. A demo caller may propose a display name but never a user id.
+   *
+   * This used to mint a fresh `demo:<uuid>` per upgrade, and the comment here
+   * said that was what kept two tabs from claiming one identity. It was, and
+   * that is no longer what this code does (#101). The pickup QR now carries a
+   * link; a phone's own camera app opens it in a **new tab**, which is a new
+   * socket — so a per-socket identity arrives at the handoff as a stranger the
+   * match has never heard of, on precisely the path the whole feature is for.
+   * Reading the id off a cookie is what makes the scanner the same person, which
+   * is what lets `worker/pool.ts` recognise them as the receiver of that match.
+   *
+   * The cost was taken deliberately, not discovered: two tabs in one browser are
+   * now one buyer, so the self-match guard refuses to pair them and a
+   * single-laptop demo no longer works — pairing needs two devices. That guard
+   * has not been weakened, it is simply reached in ordinary use now, which is
+   * why `handleJoin` names the tab you are already in rather than failing
+   * generically.
+   *
+   * A caller with no demo cookie still pairs, under a throwaway minted here and
+   * nowhere stored. They are the old behaviour: fine for two devices that each
+   * fetched `/api/health`, and *not* sticky for a raw socket client that never
+   * did. That path degrades to the manual one — the handoff link still shows
+   * them six characters to read and type — rather than to a dead end.
+   */
+  const demoToken = demoTokenFromCookieHeader(c.req.header('Cookie'))
   const identity =
     active !== null
       ? { userId: active.session.userId, displayName: active.session.displayName }
       : {
-          userId: demoUserId(crypto.randomUUID()),
+          userId: demoUserId(demoToken ?? crypto.randomUUID()),
           displayName: sanitizeDemoName(c.req.query('name')),
         }
 

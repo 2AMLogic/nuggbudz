@@ -86,7 +86,7 @@ _$0.40 a nugget in the 20pc against $0.70 solo — a 1.75× premium for buying s
 
 <!-- anvil-imagegen: protocol-pavement style=nugg-1996-composite -->
 
-![bg right:34%](assets/generated/protocol-pavement.png)
+![bg right:38%](assets/generated/protocol-pavement.png)
 
 ## The protocol
 
@@ -113,7 +113,9 @@ _$0.40 a nugget in the 20pc against $0.70 solo — a 1.75× premium for buying s
 | DoorDash / Uber Eats group orders | Share a cart via a link | You must already have the other person |
 | Splitting with a friend | Works perfectly | Requires a friend, here, hungry now |
 
-_Liquidity is cross-merchant and cross-cell — the one shape a single chain's app is worst at._
+_Cross-merchant, cross-cell liquidity — no chain app pools it._
+
+<p class="attrib">Concept render — generated imagery, not a photograph of a real product.</p>
 
 <!-- speaker: Nobody matches strangers by real-time proximity. Not because it is a bad idea, but because introducing two strangers over money reads like a support problem until the settlement is exact to the cent and neither party has to negotiate. And the chain that could copy it would only ever pool its own buyers in its own app — half the liquidity, by construction. The panel on the right is a concept render, not a photograph of anyone's restaurant. -->
 

@@ -159,6 +159,23 @@ describe('the orphan scan', () => {
       '34%',
     ])
   })
+
+  it('still reads prose that trails a keyword run, not only prose that leads one', () => {
+    // Both cases above put the prose *first*, so a regex widened only at the
+    // tail — `(?:KW)(?:\s+KW)*[^\]]*\]`, accepting any junk once a keyword has
+    // matched — passes them both while leaking every number after the last
+    // keyword. This is the case that kills that mutant: the alt opens with a
+    // genuine Marp directive and only then turns into a claim.
+    const slide = {
+      name: 'fixture.md',
+      text: '![bg right:34% \u2014 the spread is 34%](assets/generated/hero.png)\n',
+    }
+
+    expect(auditDeck(slide, [], ledger).orphans.map((orphan) => orphan.literal)).toEqual([
+      '34%',
+      '34%',
+    ])
+  })
 })
 
 describe('the deck theme and the app', () => {

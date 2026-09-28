@@ -43,6 +43,19 @@ render into it, which breaks the composite — the synthetic object has to sit
 *on* the real surface, not inside a floating frame. Naming that exclusion in the
 slide prompt fixed it. The prompts as shipped are in `speaker-notes.md`.
 
+**A composite has to survive the crop that ships, not the frame it was judged
+in.** `protocol-pavement` was re-rolled a second time, in review. The first
+render passed a full-frame look — pavement left and right, synthetic strip down
+the middle — but slide 7 shows it as `![bg right:N%]`, and Marp crops a
+background panel from the *centre* of the source. The panel that shipped was the
+synthetic strip alone: no photographic content in it at all, which is a pure
+render, which is off-brand by this deck's own test. The re-roll carries the same
+"no panel, no backdrop flat, no coloured band" exclusion the other slots use and
+asks for bare concrete on all four sides of the pair, and the split was widened
+so the ground is in the panel rather than only in the PNG. Every one of the six
+was then checked as-cropped at its shipped split, not full-frame; the other five
+keep their plate.
+
 **The constraint that governed all of it**: no generated image may be presented
 as a real merchant's product, restaurant, customer or employee. Every plate is a
 generic counter, car park, pavement, table or bench with no signage and no trade
@@ -73,6 +86,14 @@ from three rendered lines to two. Slide 11's figure caption was shortened for
 the same reason one step further on — the lint passed it, but the rendered PDF
 showed the second line colliding with the new footer strip, which is exactly the
 class of defect the vision pass exists to catch and the source lint cannot.
+
+Slide 8 is the third instance, and it is why the attribution line went missing
+there in the first place: adding it put the slide 0.3 units over. The fix is the
+same trade, not the omission — the attribution line is non-negotiable, so the
+slide's italic caption pays for it. It was two rendered lines and is now one,
+which buys back more than the line costs. The rule that produced all three: when
+a slide will not hold, the caption is what gives, never the attribution and never
+the capacity declaration.
 
 ## What did not change
 

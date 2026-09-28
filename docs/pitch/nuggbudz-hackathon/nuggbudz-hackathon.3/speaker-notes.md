@@ -327,10 +327,16 @@ is the one thing that has to survive the overlay — it is the pairing.
 
 ## Imagery prompt: protocol-pavement
 
-A real city pavement photographed from above in flat daylight: worn concrete slabs, a drain cover, a cigarette end, a little grit. Painted onto it, obviously synthetic, two black and white checkerboard squares a few paces apart, each with a small faceted amber polygon nugget standing on it, and one hard phosphor green line running between the two squares. Vertical composition with the two squares stacked one above the other so the frame survives a tall crop.
+A real city pavement photographed from directly above in flat daylight, filling the whole frame edge to edge: worn concrete slabs, a slab joint running across, a drain cover, a cigarette end, a little grit, no sky and no horizon anywhere. Painted flat onto the slabs, obviously synthetic, two small black and white checkerboard squares stacked one above the other a few paces apart, each with a small faceted amber polygon nugget standing on it, and one hard phosphor green line running straight down between the two squares. Each checkerboard stops at a hard straight seam with bare concrete continuing all round it: real pavement is visible above the upper square, below the lower one, and down both sides of the pair. There is no rectangular panel, no screen, no monitor, no backdrop flat, no coloured band or strip and no floating frame anywhere in the picture: the synthetic squares lie directly on the real pavement and the photograph is the entire background. The pair is small and occupies only the narrow middle of the frame, so a tall narrow crop taken straight down the centre keeps real concrete on both sides of it.
 
-`![bg right:34%]` beside the numbered protocol steps. The two squares are the
-two buyers and the green line is the socket; keep it literal.
+`![bg right:38%]` beside the numbered protocol steps. The two squares are the
+two buyers and the green line is the socket; keep it literal. Re-rolled once
+after review: the first render put a full-height gradient strip down the centre
+of the frame, so the `bg right:` crop — which is taken from the centre — kept the
+render and threw the pavement away. The prompt now excludes the strip explicitly
+and asks for concrete on all four sides of the pair, and the split above was
+widened a notch so the real ground is in the panel that ships, not only in the
+full PNG.
 
 ## Imagery prompt: market-counter
 

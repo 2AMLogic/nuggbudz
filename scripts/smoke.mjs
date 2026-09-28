@@ -24,6 +24,15 @@
  *   QUEUE_IDLE_SECONDS="6"
  *   QUEUE_WARN_LEAD_SECONDS="3"
  *   MATCH_CONFIRM_SECONDS="8"
+ *
+ * The operator checks (listing and resolving a dispute) likewise only run when
+ * this server has an operator on its allowlist — the routes answer 404 to
+ * everyone else, on purpose. To include them, add:
+ *
+ *   OPERATOR_USER_IDS="5eed5eed-0000-4000-8000-000000000033"
+ *
+ * which is `BUYERS.op` below. Set `SMOKE_REQUIRE_ADMIN=1` to turn the skip into
+ * a failure, which is what CI does so the coverage cannot go missing quietly.
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -125,6 +134,12 @@ const BUYERS = {
   chatDisputeTwo: { sid: sessionId('smoke-chat-d2'), userId: accountId(28), name: 'Dis Two' },
   chatLeaveOne: { sid: sessionId('smoke-chat-l1'), userId: accountId(29), name: 'Left One' },
   chatLeaveTwo: { sid: sessionId('smoke-chat-l2'), userId: accountId(30), name: 'Left Two' },
+  // The operator. Never opens a pool socket and owns no coordinate — this one
+  // exists to hold a session that `OPERATOR_USER_IDS` can name, which is the
+  // only way into the dispute-resolution routes. Put
+  //   OPERATOR_USER_IDS="5eed5eed-0000-4000-8000-000000000033"
+  // in `.dev.vars` to run those checks; without it they report SKIP.
+  op: { sid: sessionId('smoke-operator'), userId: accountId(33), name: 'Ops' },
 }
 
 /** Write the sessions into the dev server's KV namespace, in one CLI call. */
@@ -904,6 +919,9 @@ j.join()
 const [ordererI, receiverJ] = await Promise.all([i.expect('matched'), j.expect('matched')])
 j.confirm(ordererI.pickupCode)
 await j.expect('pickup_confirmed')
+// The settled-splits totals, read immediately before the dispute so the
+// comparison below is about the dispute and nothing else.
+const statsBeforeDispute = await fetch(`${BASE}/api/stats`).then((r) => r.json())
 i.ws.close()
 const disputed = await j.expect('pickup_disputed')
 check(
@@ -927,6 +945,215 @@ check(
   afterDispute.code === 'not_matched',
   afterDispute.code,
 )
+
+// --- the dispute survives the Durable Object ---
+// The state this used to leave behind was a dead end: a record in one cell's
+// storage that nobody could see and neither buyer could be made whole from.
+const filed = ledgerQuery(`SELECT * FROM disputes WHERE match_id = '${receiverJ.matchId}'`)
+check(
+  'a disputed match is filed in D1, with who confirmed and why',
+  filed.length === 1 &&
+    filed[0].reason === 'buddy_left' &&
+    filed[0].confirmed_role === 'receiver' &&
+    filed[0].confirmed_at > 0 &&
+    filed[0].disputed_at > 0 &&
+    filed[0].cell.length > 0,
+  JSON.stringify(filed[0] ?? null),
+)
+check(
+  'and names both buddies, because a resolution has to know whose money it is',
+  filed[0]?.orderer_user_id === BUYERS.ivy.userId &&
+    filed[0]?.receiver_user_id === BUYERS.jed.userId &&
+    filed[0]?.orderer_name === 'Ivy' &&
+    filed[0]?.receiver_name === 'Jed',
+  JSON.stringify(filed[0] ?? null),
+)
+check(
+  'and arrives open, with nobody having resolved it',
+  filed[0]?.resolved_at === null &&
+    filed[0]?.resolution === null &&
+    filed[0]?.refunded_cents === null,
+  JSON.stringify(filed[0] ?? null),
+)
+// The whole reason disputes are a table of their own: the settled ledger is a
+// revenue report, and a split that did not settle must not touch it.
+const statsAfterDispute = await fetch(`${BASE}/api/stats`).then((r) => r.json())
+check(
+  'a dispute changes nothing in the settled-splits totals',
+  statsAfterDispute.splitsSettled === statsBeforeDispute.splitsSettled &&
+    statsAfterDispute.feesCollectedCents === statsBeforeDispute.feesCollectedCents &&
+    statsAfterDispute.totalSavedCents === statsBeforeDispute.totalSavedCents,
+  `${JSON.stringify(statsBeforeDispute)} -> ${JSON.stringify(statsAfterDispute)}`,
+)
+
+// --- the operator surface ---
+// An admin route that answers anything but 404 to a caller who is not an
+// operator is the failure worth catching here: it resolves disputes, and a
+// resolution moves money.
+const adminAnon = await fetch(`${BASE}/api/admin/disputes`)
+check(
+  'the dispute queue is not readable without a session',
+  adminAnon.status === 404,
+  `status ${adminAnon.status}`,
+)
+const adminBuyer = await fetch(`${BASE}/api/admin/disputes`, { headers: cookie(BUYERS.jed) })
+check(
+  'and not by a signed-in buyer who is not on the operator allowlist',
+  adminBuyer.status === 404,
+  `status ${adminBuyer.status}`,
+)
+const adminResolveBuyer = await fetch(`${BASE}/api/admin/disputes/${receiverJ.matchId}/resolve`, {
+  method: 'POST',
+  headers: { ...jsonHeaders, ...cookie(BUYERS.jed) },
+  body: JSON.stringify({ resolution: 'voided' }),
+})
+check(
+  'and a buyer cannot resolve their own dispute',
+  adminResolveBuyer.status === 404,
+  `status ${adminResolveBuyer.status}`,
+)
+const stillOpen = ledgerQuery(
+  `SELECT resolved_at FROM disputes WHERE match_id = '${receiverJ.matchId}'`,
+)
+check(
+  'and the refused attempt resolved nothing',
+  stillOpen[0]?.resolved_at === null,
+  JSON.stringify(stillOpen[0] ?? null),
+)
+
+// The rest needs this server to actually have an operator configured. Same shape
+// as the expiry lane: reported as SKIP rather than passing vacuously, and turned
+// into a failure wherever the coverage is meant to be mandatory (CI sets
+// SMOKE_REQUIRE_ADMIN=1 alongside the var).
+const adminProbe = await fetch(`${BASE}/api/admin/disputes`, { headers: cookie(BUYERS.op) })
+if (adminProbe.status !== 200) {
+  const why =
+    `this server has no operator for the smoke fixture. Add\n      ` +
+    `OPERATOR_USER_IDS="${BUYERS.op.userId}"\n      to .dev.vars and restart the dev server to run them.`
+  if (process.env.SMOKE_REQUIRE_ADMIN) {
+    check('operator dispute resolution', false, `SMOKE_REQUIRE_ADMIN is set but ${why}`)
+  } else {
+    log(`SKIP  operator dispute resolution — ${why}`)
+  }
+} else {
+  const queue = await adminProbe.json()
+  const listed = queue.disputes?.find((d) => d.matchId === receiverJ.matchId)
+  check(
+    'an operator can see the open dispute, with the money it is holding',
+    listed !== undefined &&
+      listed.reason === 'buddy_left' &&
+      listed.confirmedBy === 'receiver' &&
+      Number.isInteger(listed.heldCents) &&
+      listed.resolvedAt === null,
+    JSON.stringify(listed ?? queue),
+  )
+  check(
+    'and each side of the dispute by name',
+    listed?.buddies?.orderer?.name === 'Ivy' && listed?.buddies?.receiver?.name === 'Jed',
+    JSON.stringify(listed?.buddies ?? null),
+  )
+
+  const resolveOnce = await fetch(`${BASE}/api/admin/disputes/${receiverJ.matchId}/resolve`, {
+    method: 'POST',
+    headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+    body: JSON.stringify({ resolution: 'voided', note: 'smoke: neither bud turned up' }),
+  })
+  const resolved = await resolveOnce.json()
+  check(
+    'an operator can resolve it, and the resolution has a money outcome',
+    resolveOnce.status === 200 &&
+      resolved.dispute?.resolution === 'voided' &&
+      resolved.dispute?.resolvedBy === BUYERS.op.userId &&
+      resolved.dispute?.resolvedAt > 0 &&
+      // On an uncharged server there is nothing to hand back, and the row says
+      // so as a number rather than leaving it unanswered.
+      resolved.dispute?.refundedCents === resolved.refundedCents,
+    `${resolveOnce.status} ${JSON.stringify(resolved)}`,
+  )
+  check(
+    'the refund figure is integer cents, never a float',
+    Number.isInteger(resolved.refundedCents) && Number.isInteger(resolved.heldCents),
+    JSON.stringify(resolved),
+  )
+  check(
+    'the operator note is kept, sanitized',
+    resolved.dispute?.note === 'smoke: neither bud turned up',
+    JSON.stringify(resolved.dispute?.note),
+  )
+
+  const resolveTwice = await fetch(`${BASE}/api/admin/disputes/${receiverJ.matchId}/resolve`, {
+    method: 'POST',
+    headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+    body: JSON.stringify({ resolution: 'settled' }),
+  })
+  check(
+    'a second resolution is refused rather than overwriting the first',
+    resolveTwice.status === 409,
+    `status ${resolveTwice.status}`,
+  )
+  const afterSecond = ledgerQuery(
+    `SELECT resolution FROM disputes WHERE match_id = '${receiverJ.matchId}'`,
+  )
+  check(
+    'and the first decision still stands',
+    afterSecond[0]?.resolution === 'voided',
+    JSON.stringify(afterSecond[0] ?? null),
+  )
+
+  const badResolution = await fetch(`${BASE}/api/admin/disputes/${receiverJ.matchId}/resolve`, {
+    method: 'POST',
+    headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+    body: JSON.stringify({ resolution: 'refund_everyone' }),
+  })
+  check(
+    'a resolution nobody defined is refused',
+    badResolution.status === 400,
+    `status ${badResolution.status}`,
+  )
+  const unknownDispute = await fetch(`${BASE}/api/admin/disputes/not-a-match/resolve`, {
+    method: 'POST',
+    headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+    body: JSON.stringify({ resolution: 'voided' }),
+  })
+  check(
+    'resolving a dispute that does not exist is a 404',
+    unknownDispute.status === 404,
+    `status ${unknownDispute.status}`,
+  )
+
+  const openAfter = await fetch(`${BASE}/api/admin/disputes`, { headers: cookie(BUYERS.op) }).then(
+    (r) => r.json(),
+  )
+  check(
+    'a resolved dispute leaves the open queue',
+    openAfter.disputes?.every((d) => d.matchId !== receiverJ.matchId) === true,
+    JSON.stringify(openAfter.disputes?.map((d) => d.matchId)),
+  )
+  const allAfter = await fetch(`${BASE}/api/admin/disputes?state=all`, {
+    headers: cookie(BUYERS.op),
+  }).then((r) => r.json())
+  check(
+    'but stays readable, so a decision can be audited after the fact',
+    allAfter.disputes?.some((d) => d.matchId === receiverJ.matchId) === true,
+    JSON.stringify(allAfter.disputes?.map((d) => d.matchId)),
+  )
+
+  const statsAfterResolve = await fetch(`${BASE}/api/stats`).then((r) => r.json())
+  check(
+    'and resolving one still books nothing to the settled-splits ledger',
+    statsAfterResolve.splitsSettled === statsBeforeDispute.splitsSettled &&
+      statsAfterResolve.feesCollectedCents === statsBeforeDispute.feesCollectedCents,
+    `${JSON.stringify(statsBeforeDispute)} -> ${JSON.stringify(statsAfterResolve)}`,
+  )
+  const disputeInMatches = ledgerQuery(
+    `SELECT match_id FROM matches WHERE match_id = '${receiverJ.matchId}'`,
+  )
+  check(
+    'and never writes the disputed match into `matches`',
+    disputeInMatches.length === 0,
+    JSON.stringify(disputeInMatches),
+  )
+}
 
 // --- pairing with no location permission at all ---
 // Neither of these sends a coordinate, in the upgrade or in the join, which is

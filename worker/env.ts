@@ -70,6 +70,22 @@ export interface Env {
    * reason `ALLOW_DEMO_PAIRING` never is.
    */
   ALLOW_UNCHARGED_PAIRING?: string
+  /**
+   * The accounts allowed to list and resolve disputed pickups — comma- or
+   * whitespace-separated `users.id` values, parsed by `shared/operators.ts`.
+   *
+   * An allowlist of real accounts rather than a shared bearer token, because a
+   * resolution moves money and the `disputes` row records who decided; a token
+   * can only ever record "whoever had the token". The identity still comes from
+   * the session cookie, so this var grants nothing on its own — possessing an
+   * id on this list is not the same as being able to sign in as it.
+   *
+   * Never set in `wrangler.jsonc`, for the same reason `ALLOW_DEMO_PAIRING`
+   * never is: unset means *no* operators, and the admin routes answer as though
+   * they do not exist. A checkout, `pnpm test` and CI therefore have no admin
+   * surface unless a lane says otherwise.
+   */
+  OPERATOR_USER_IDS?: string
 }
 
 /**

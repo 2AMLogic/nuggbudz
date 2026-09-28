@@ -1,11 +1,23 @@
 /**
- * The D1 ledger of settled splits.
+ * What a match leaves behind in D1 once the Durable Object is done with it.
  *
- * A match becomes a ledger row at exactly one moment: when both buddies have
- * confirmed the handoff. Anything earlier is live state, which the Durable
- * Object owns; anything unconfirmed is not a split that happened.
+ * Two outcomes reach durable storage, and they are deliberately two tables:
+ *
+ * - `matches` / `match_buyers` — the ledger of **settled** splits. A match
+ *   becomes a row here at exactly one moment: when both buddies have confirmed
+ *   the handoff. Anything earlier is live state, which the Durable Object owns;
+ *   anything unconfirmed is not a split that happened. Every revenue figure in
+ *   this repo is a query over it.
+ * - `disputes` — the queue of splits **one** buddy confirmed and the other
+ *   never did. Not a weaker settled split and not a row in `matches` with a
+ *   flag on it: it is an item of work for a human, holding money that was
+ *   collected and deliberately not returned.
+ *
+ * Keeping them apart is what lets `/api/stats` stay a plain `WHERE settled_at
+ * IS NOT NULL` rather than a filter every future query has to remember.
  */
 import { isDemoUserId } from '../shared/demo'
+import type { DisputeReason, DisputeResolution } from '../shared/disputes'
 import type { BuyerRole, Settlement } from '../shared/economics'
 import { classifyUserId } from '../shared/identity'
 
@@ -35,7 +47,35 @@ export interface SettledMatch {
 }
 
 /**
- * The roles a settled split has, in a fixed order.
+ * Everything the disputes queue needs to know about one dead handshake.
+ *
+ * `userIds` is required here for the same reason it is on a settled split, and
+ * for one more: a resolution says "refund the receiver", and that instruction
+ * means nothing unless the row records which account the receiver was.
+ */
+export interface DisputedMatch {
+  matchId: string
+  dealId: string
+  cell: string
+  createdAt: number
+  disputedAt: number
+  reason: DisputeReason
+  /** The side that did confirm, and when — null only for a record that has none. */
+  confirmedBy: BuyerRole | null
+  confirmedAt: number | null
+  /**
+   * Integer cents collected from both buyers and not handed back, as of the
+   * moment of the dispute. Taken off the payment ledger, never recomputed from
+   * the settlement: what a human is being asked about is what Stripe is
+   * actually holding, which for a half-refunded match is not the same number.
+   */
+  heldCents: number
+  names: Record<BuyerRole, string>
+  userIds: Record<BuyerRole, string>
+}
+
+/**
+ * The roles a match has, in a fixed order.
  *
  * Iterated by name rather than via `Object.keys(match.userIds)` so a role whose
  * id is missing altogether is *checked* rather than skipped — an untyped caller
@@ -81,7 +121,7 @@ export class UnauthenticIdentityError extends Error {
  * exactly as designed, and the wrong thing to be quiet about when a caller has a
  * bug instead.
  */
-function assertAuthenticIdentities(match: SettledMatch): void {
+function assertAuthenticIdentities(match: IdentifiedMatch): void {
   for (const role of SETTLED_ROLES) {
     if (classifyUserId(match.userIds[role]) === 'unauthentic') {
       throw new UnauthenticIdentityError(role)
@@ -101,13 +141,26 @@ function assertAuthenticIdentities(match: SettledMatch): void {
  * distinguishable nor filterable after the fact: the only safe answer is not to
  * write it.
  */
-export function isDemoMatch(match: SettledMatch): boolean {
+export function isDemoMatch(match: IdentifiedMatch): boolean {
   return Object.values(match.userIds).some((userId) => isDemoUserId(userId))
+}
+
+/**
+ * The part of a match either gate reads: who it says settled or disputed.
+ *
+ * Both gates take this rather than a `SettledMatch`, so the disputes queue
+ * inherits them instead of growing a second, drifting copy — a demo handshake
+ * that ends in a dispute is no more a real dispute than a demo handshake that
+ * completes is real revenue.
+ */
+interface IdentifiedMatch {
+  userIds: Record<BuyerRole, string>
 }
 
 export interface LedgerStatement {
   sql: string
-  params: (string | number)[]
+  /** `null` is a value here, not a missing one: a dispute may have no note. */
+  params: (string | number | null)[]
 }
 
 const INSERT_MATCH = `INSERT OR IGNORE INTO matches (
@@ -215,14 +268,29 @@ export async function writeSettledMatch(
   match: SettledMatch,
   options: WriteOptions = {},
 ): Promise<void> {
+  await runBatch(db, ledgerStatements(match), options)
+}
+
+/**
+ * Run a batch with bounded linear backoff, or nothing at all.
+ *
+ * Shared by both durable writes so the settled ledger and the disputes queue
+ * cannot end up with different retry behaviour — a dispute row is exactly as
+ * worth a retry as a settled one, and exactly as un-worth an infinite loop.
+ *
+ * An empty batch returns before the loop rather than inside it: a demo pairing
+ * yields no statements, and an empty batch D1 rejected would otherwise be
+ * retried with backoff and then thrown, turning "nothing to write" into an
+ * error on a path that is working correctly.
+ */
+async function runBatch(
+  db: D1Database,
+  statements: LedgerStatement[],
+  options: WriteOptions,
+): Promise<void> {
   const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
   const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS
   const sleep = options.sleep ?? wait
-  const statements = ledgerStatements(match)
-  // A demo pairing yields no statements. Returning before the retry loop rather
-  // than inside it matters: an empty batch that D1 rejected would otherwise be
-  // retried with backoff and then thrown, turning "nothing to book" into an
-  // error on a path that is working correctly.
   if (statements.length === 0) return
 
   for (let attempt = 1; ; attempt++) {
@@ -236,4 +304,231 @@ export async function writeSettledMatch(
       await sleep(retryDelayMs * attempt)
     }
   }
+}
+
+const INSERT_DISPUTE = `INSERT OR IGNORE INTO disputes (
+  match_id, deal_id, cell, created_at, disputed_at, reason,
+  confirmed_role, confirmed_at,
+  orderer_user_id, orderer_name, receiver_user_id, receiver_name,
+  held_cents
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+/**
+ * The row one dead handshake becomes.
+ *
+ * Both of `ledgerStatements`' gates run here too, in the same order and for the
+ * same reasons: an identity that names nobody is a caller bug and is refused,
+ * and a demo pairing writes nothing. A stage demo holds no money — a `demo`
+ * disposition never reaches Stripe at all — so a demo dispute asks a human to
+ * decide about nothing, and the operator's queue is the wrong place to discover
+ * that somebody ran a demo.
+ */
+export function disputeStatements(match: DisputedMatch): LedgerStatement[] {
+  assertAuthenticIdentities(match)
+  if (isDemoMatch(match)) return []
+
+  return [
+    {
+      // OR IGNORE for the same reason the settled write uses it: the Durable
+      // Object retries this write until it succeeds, and a retry after a partial
+      // failure must not overwrite a row an operator may already have resolved.
+      sql: INSERT_DISPUTE,
+      params: [
+        match.matchId,
+        match.dealId,
+        match.cell,
+        match.createdAt,
+        match.disputedAt,
+        match.reason,
+        match.confirmedBy,
+        match.confirmedAt,
+        match.userIds.orderer,
+        match.names.orderer,
+        match.userIds.receiver,
+        match.names.receiver,
+        match.heldCents,
+      ],
+    },
+  ]
+}
+
+/**
+ * File a disputed match for a human to resolve.
+ *
+ * Retried on a transient D1 failure exactly like a settled split, and for a
+ * sharper reason: until this row lands, the only record that two buyers are
+ * $8.98 out of pocket lives in one Durable Object's storage, which owns nothing
+ * durable by design. The caller (`NuggPool.disputeMatch`) keeps its record until
+ * this resolves, so a failure here costs a retry rather than the evidence.
+ */
+export async function writeDisputedMatch(
+  db: D1Database,
+  match: DisputedMatch,
+  options: WriteOptions = {},
+): Promise<void> {
+  await runBatch(db, disputeStatements(match), options)
+}
+
+/** One dispute as an operator sees it. Money is integer cents, as everywhere. */
+export interface DisputeRecord {
+  matchId: string
+  dealId: string
+  cell: string
+  createdAt: number
+  disputedAt: number
+  reason: string
+  confirmedBy: BuyerRole | null
+  confirmedAt: number | null
+  buddies: Record<BuyerRole, { userId: string; name: string }>
+  heldCents: number
+  resolvedAt: number | null
+  resolvedBy: string | null
+  resolution: DisputeResolution | null
+  /**
+   * What Stripe gave back. `null` on a resolved dispute is not zero: it means
+   * the refund was never answered for, which is a state a human has to finish.
+   */
+  refundedCents: number | null
+  note: string | null
+}
+
+interface DisputeRow {
+  match_id: string
+  deal_id: string
+  cell: string
+  created_at: number
+  disputed_at: number
+  reason: string
+  confirmed_role: BuyerRole | null
+  confirmed_at: number | null
+  orderer_user_id: string
+  orderer_name: string
+  receiver_user_id: string
+  receiver_name: string
+  held_cents: number
+  resolved_at: number | null
+  resolved_by: string | null
+  resolution: DisputeResolution | null
+  refunded_cents: number | null
+  note: string | null
+}
+
+const SELECT_DISPUTE_COLUMNS = `match_id, deal_id, cell, created_at, disputed_at, reason,
+  confirmed_role, confirmed_at,
+  orderer_user_id, orderer_name, receiver_user_id, receiver_name,
+  held_cents, resolved_at, resolved_by, resolution, refunded_cents, note`
+
+function toDisputeRecord(row: DisputeRow): DisputeRecord {
+  return {
+    matchId: row.match_id,
+    dealId: row.deal_id,
+    cell: row.cell,
+    createdAt: row.created_at,
+    disputedAt: row.disputed_at,
+    reason: row.reason,
+    confirmedBy: row.confirmed_role,
+    confirmedAt: row.confirmed_at,
+    buddies: {
+      orderer: { userId: row.orderer_user_id, name: row.orderer_name },
+      receiver: { userId: row.receiver_user_id, name: row.receiver_name },
+    },
+    heldCents: row.held_cents,
+    resolvedAt: row.resolved_at,
+    resolvedBy: row.resolved_by,
+    resolution: row.resolution,
+    refundedCents: row.refunded_cents,
+    note: row.note,
+  }
+}
+
+/** How many disputes one listing hands back, however large a `limit` is asked for. */
+export const MAX_DISPUTE_PAGE = 100
+
+/**
+ * The operator's queue: open disputes oldest first, so the money that has been
+ * held longest is the money at the top of the list.
+ *
+ * `openOnly` is the default because an operator's question is almost always
+ * "what is outstanding"; resolved rows stay readable so a decision can be
+ * audited after the fact.
+ */
+export async function listDisputes(
+  db: D1Database,
+  options: { openOnly?: boolean; limit?: number } = {},
+): Promise<DisputeRecord[]> {
+  const openOnly = options.openOnly ?? true
+  const limit = Math.min(Math.max(options.limit ?? MAX_DISPUTE_PAGE, 1), MAX_DISPUTE_PAGE)
+  const where = openOnly ? 'WHERE resolved_at IS NULL' : ''
+  const { results } = await db
+    .prepare(
+      `SELECT ${SELECT_DISPUTE_COLUMNS} FROM disputes ${where}
+       ORDER BY disputed_at ASC LIMIT ?1`,
+    )
+    .bind(limit)
+    .all<DisputeRow>()
+  return results.map(toDisputeRecord)
+}
+
+export async function getDispute(db: D1Database, matchId: string): Promise<DisputeRecord | null> {
+  const row = await db
+    .prepare(`SELECT ${SELECT_DISPUTE_COLUMNS} FROM disputes WHERE match_id = ?1`)
+    .bind(matchId)
+    .first<DisputeRow>()
+  return row === null ? null : toDisputeRecord(row)
+}
+
+export interface DisputeResolutionRequest {
+  matchId: string
+  resolution: DisputeResolution
+  /** The operator's `users.id`, read off their session and never off the body. */
+  resolvedBy: string
+  resolvedAt: number
+  note: string | null
+}
+
+/**
+ * Take ownership of an open dispute, and say whether this caller got it.
+ *
+ * `WHERE resolved_at IS NULL` is the whole concurrency story: two operators
+ * resolving the same dispute at the same moment both reach this, exactly one
+ * changes a row, and the other is told no. A read-then-write would let both
+ * believe they had decided, and only one decision moves the money.
+ *
+ * Claiming happens *before* the refund is attempted, and `refunded_cents` is
+ * deliberately left NULL here. The same rule the payment ledger follows: a
+ * refund is only a refund once Stripe says so, and this row must not claim one
+ * that has not been asked for yet.
+ */
+export async function claimDispute(
+  db: D1Database,
+  request: DisputeResolutionRequest,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE disputes
+         SET resolved_at = ?2, resolved_by = ?3, resolution = ?4, note = ?5
+       WHERE match_id = ?1 AND resolved_at IS NULL`,
+    )
+    .bind(request.matchId, request.resolvedAt, request.resolvedBy, request.resolution, request.note)
+    .run()
+  return (result.meta.changes ?? 0) === 1
+}
+
+/**
+ * Stamp what Stripe actually handed back, once it has answered.
+ *
+ * Only ever called after the refund round trip, and only for a dispute this
+ * caller claimed. A resolution whose refund call failed leaves `refunded_cents`
+ * NULL rather than 0, because "the money did not move" and "nothing was owed"
+ * are different facts and a reconciliation needs to tell them apart.
+ */
+export async function stampDisputeRefund(
+  db: D1Database,
+  matchId: string,
+  refundedCents: number,
+): Promise<void> {
+  await db
+    .prepare('UPDATE disputes SET refunded_cents = ?2 WHERE match_id = ?1')
+    .bind(matchId, refundedCents)
+    .run()
 }

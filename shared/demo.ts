@@ -73,17 +73,29 @@ export function sanitizeDemoName(raw: string | null | undefined): string {
   return Array.from(cleaned).slice(0, MAX_NAME).join('').trim()
 }
 
+/** The marker that makes a demo identity greppable, spelled once. */
+export const DEMO_USER_ID_PREFIX = 'demo:'
+
 /**
  * A throwaway user id for a demo socket.
  *
- * Prefixed so a demo identity is never mistaken for a real account in the
- * ledger, in logs or in a reputation count, and so one is trivially greppable.
+ * Prefixed so a demo identity is legible as one at a glance — in the ledger
+ * gate, in logs, in a reputation count — and trivially greppable.
  */
 export function demoUserId(unique: string): string {
-  return `demo:${unique}`
+  return `${DEMO_USER_ID_PREFIX}${unique}`
 }
 
-/** True when this id was minted by demo pairing rather than a real sign-in. */
+/**
+ * True when this id was minted by demo pairing rather than a real sign-in.
+ *
+ * What this guarantees, precisely: an id carrying the prefix *is* a demo
+ * identity, so the ledger can exclude it. It says nothing about the ids it
+ * answers `false` for — `''` is not a demo id and is not a real account either.
+ * Deciding that an id is genuinely an account, which is what lets money be
+ * booked against it, is `classifyUserId` in `shared/identity.ts`; this predicate
+ * is only one of its three answers.
+ */
 export function isDemoUserId(userId: string): boolean {
-  return userId.startsWith('demo:')
+  return userId.startsWith(DEMO_USER_ID_PREFIX)
 }

@@ -6,11 +6,20 @@ import {
   isDemoMatch,
   ledgerStatements,
   type SettledMatch,
+  UnauthenticIdentityError,
   writeSettledMatch,
 } from '../worker/ledger'
 
 const deal = findDeal('mcd-nuggets-20')
 if (deal === undefined) throw new Error('benchmark deal missing from the catalogue')
+
+/**
+ * Real account ids, shaped as `crypto.randomUUID()` mints `users.id` — the
+ * ledger now books money only against an id a sign-in could actually have
+ * produced, so a readable stand-in like `user-robb` is no longer one.
+ */
+const ROBB = '3f7b1a2c-9d4e-4f6a-8b1c-2d3e4f5a6b7c'
+const DANA = 'c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f'
 
 const settled: SettledMatch = {
   matchId: 'match-1',
@@ -21,7 +30,7 @@ const settled: SettledMatch = {
   settledAt: 1_700_000_060_000,
   settlement: settle(deal, 2),
   names: { orderer: 'Robb', receiver: 'Dana' },
-  userIds: { orderer: 'user-robb', receiver: 'user-dana' },
+  userIds: { orderer: ROBB, receiver: DANA },
 }
 
 describe('ledgerStatements', () => {
@@ -86,8 +95,8 @@ describe('the demo gate', () => {
     // A real account paired with a stage phone is still not revenue, and
     // `match_buyers` has no user-id column to record which half was fake.
     for (const userIds of [
-      { orderer: demo, receiver: 'user-dana' },
-      { orderer: 'user-robb', receiver: demo },
+      { orderer: demo, receiver: DANA },
+      { orderer: ROBB, receiver: demo },
     ]) {
       const mixed: SettledMatch = { ...settled, userIds }
       expect(isDemoMatch(mixed)).toBe(true)
@@ -104,6 +113,74 @@ describe('the demo gate', () => {
     const spoofed: SettledMatch = { ...settled, names: { orderer: 'demo:Robb', receiver: 'Dana' } }
     expect(isDemoMatch(spoofed)).toBe(false)
     expect(ledgerStatements(spoofed)).toHaveLength(3)
+  })
+})
+
+/**
+ * The gap the demo gate alone left open (issue #55).
+ *
+ * `userIds` being a required field means a caller has to *state* who settled;
+ * these prove the ledger now also checks that the statement could be true.
+ * Every case here type-checks — that is the whole point — and before the
+ * authenticity gate each one booked a full set of money rows.
+ */
+describe('the authenticity gate', () => {
+  const empty = { orderer: '', receiver: '' }
+
+  it('refuses an empty identity rather than booking it', () => {
+    const nobody: SettledMatch = { ...settled, userIds: empty }
+    // The old behaviour, for the record: empty ids are not demo ids, so the
+    // prefix test waved them through as a real split.
+    expect(isDemoMatch(nobody)).toBe(false)
+    expect(() => ledgerStatements(nobody)).toThrow(UnauthenticIdentityError)
+  })
+
+  it('names the side that could not be identified', () => {
+    for (const [role, userIds] of [
+      ['orderer', { ...empty, receiver: DANA }],
+      ['receiver', { ...empty, orderer: ROBB }],
+    ] as const) {
+      const half: SettledMatch = { ...settled, userIds }
+      expect(() => ledgerStatements(half)).toThrow(new UnauthenticIdentityError(role).message)
+    }
+  })
+
+  it('refuses an id that is neither an account nor a demo pairing', () => {
+    for (const bogus of [
+      'user-robb', // a readable stand-in, not an id anything mints
+      'DEMO:abc', // close enough to the demo prefix to be missed by a prefix test
+      ' ',
+      'demo:', // prefixed, but identifying nobody
+      `${ROBB} `,
+    ]) {
+      for (const userIds of [
+        { orderer: bogus, receiver: DANA },
+        { orderer: ROBB, receiver: bogus },
+      ]) {
+        expect(() => ledgerStatements({ ...settled, userIds })).toThrow(UnauthenticIdentityError)
+      }
+    }
+  })
+
+  it('catches an id that is missing entirely, which only an untyped caller can do', () => {
+    // `tsc` rejects this; a future JS caller, or a record rebuilt from storage,
+    // can still produce it — so the check iterates the roles rather than the keys.
+    const halfFilled = { ...settled, userIds: { orderer: ROBB } as SettledMatch['userIds'] }
+    expect(() => ledgerStatements(halfFilled)).toThrow(UnauthenticIdentityError)
+  })
+
+  it('still books a split between two real accounts', () => {
+    expect(ledgerStatements(settled)).toHaveLength(3)
+  })
+
+  it('still books nothing, and throws nothing, for a demo pairing', () => {
+    // The two outcomes must stay distinct: a demo handshake is working as
+    // designed and books nothing quietly, an unauthentic id is a caller bug.
+    const pairing: SettledMatch = {
+      ...settled,
+      userIds: { orderer: demoUserId(crypto.randomUUID()), receiver: demoUserId('two') },
+    }
+    expect(ledgerStatements(pairing)).toEqual([])
   })
 })
 
@@ -184,6 +261,18 @@ describe('writeSettledMatch', () => {
     }
     await expect(writeSettledMatch(db, pairing, { sleep })).resolves.toBeUndefined()
     expect(calls.attempts).toBe(0)
+    expect(slept).toEqual([])
+  })
+
+  it('refuses an empty identity at the write, without touching D1 or retrying', async () => {
+    // The proof that the hole in issue #55 is closed where it mattered: a
+    // healthy D1 that would have booked the row is never asked to.
+    const { db, calls } = flakyDb(0)
+    const { slept, sleep } = recordingSleep()
+    const nobody: SettledMatch = { ...settled, userIds: { orderer: '', receiver: '' } }
+    await expect(writeSettledMatch(db, nobody, { sleep })).rejects.toThrow(UnauthenticIdentityError)
+    expect(calls.attempts).toBe(0)
+    expect(calls.batched).toEqual([])
     expect(slept).toEqual([])
   })
 })

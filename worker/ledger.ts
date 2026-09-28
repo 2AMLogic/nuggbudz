@@ -7,6 +7,7 @@
  */
 import { isDemoUserId } from '../shared/demo'
 import type { BuyerRole, Settlement } from '../shared/economics'
+import { classifyUserId } from '../shared/identity'
 
 /** Everything the ledger needs to know about one settled split. */
 export interface SettledMatch {
@@ -24,11 +25,68 @@ export interface SettledMatch {
    * Account ids by role, as the Worker minted them at upgrade time.
    *
    * Required, and not written to any column: the ledger needs them only to
-   * decide whether this split is real. Making it a required field is the point —
-   * a future caller cannot reach the write without stating who settled, so the
-   * demo gate below cannot be bypassed by forgetting to pass something.
+   * decide whether this split is real. Making it a required field is half the
+   * point — a future caller cannot reach the write without stating who settled.
+   * `assertAuthenticIdentities` below is the other half, because a required
+   * field can still be filled with `''`, and the type system cannot tell the
+   * difference between a stated identity and a true one.
    */
   userIds: Record<BuyerRole, string>
+}
+
+/**
+ * The roles a settled split has, in a fixed order.
+ *
+ * Iterated by name rather than via `Object.keys(match.userIds)` so a role whose
+ * id is missing altogether is *checked* rather than skipped — an untyped caller
+ * can hand this a half-filled record, and that is exactly the case worth
+ * catching.
+ */
+const SETTLED_ROLES: readonly BuyerRole[] = ['orderer', 'receiver']
+
+/**
+ * A split arrived at the ledger carrying an identity that names nobody.
+ *
+ * Its own class because this is not a D1 problem and retrying cannot help: the
+ * write is refused before a single statement is shaped. The one caller,
+ * `NuggPool.completeMatch`, already logs and swallows ledger failures so two
+ * people who have swapped nuggets are not stranded, which is the right handling
+ * here too — the split does not become revenue, and it says so in the log.
+ *
+ * The offending value is deliberately not in the message: an unauthentic id is
+ * by definition not one we minted, so it is untrusted text, and the role is
+ * enough to find the bug.
+ */
+export class UnauthenticIdentityError extends Error {
+  readonly role: BuyerRole
+
+  constructor(role: BuyerRole) {
+    super(`ledger write refused: the ${role} is neither a real account nor a demo pairing`)
+    this.name = 'UnauthenticIdentityError'
+    this.role = role
+  }
+}
+
+/**
+ * Refuse a split whose identities could not have been minted by either path.
+ *
+ * The demo gate below is a prefix test, so before this check `{ orderer: '',
+ * receiver: '' }` type-checked, answered `isDemoMatch=false`, and booked a full
+ * set of money rows (issue #55). A statement of who settled is only worth
+ * anything if the ledger can tell it is true, and the only truth available at
+ * this layer is the shape of an id the Worker mints — `classifyUserId`.
+ *
+ * Throwing rather than returning no statements, which is what a demo pairing
+ * gets: booking nothing is the correct, quiet outcome for a handshake working
+ * exactly as designed, and the wrong thing to be quiet about when a caller has a
+ * bug instead.
+ */
+function assertAuthenticIdentities(match: SettledMatch): void {
+  for (const role of SETTLED_ROLES) {
+    if (classifyUserId(match.userIds[role]) === 'unauthentic') {
+      throw new UnauthenticIdentityError(role)
+    }
+  }
 }
 
 /**
@@ -69,9 +127,14 @@ const INSERT_BUYER = `INSERT OR IGNORE INTO match_buyers (
  * the settlement, never recomputed.
  */
 export function ledgerStatements(match: SettledMatch): LedgerStatement[] {
-  // The demo gate lives here, at the one place the rows are shaped, rather than
-  // at the Durable Object that happens to call it today — a second call site
-  // added later inherits it instead of having to remember it.
+  // Both gates live here, at the one place the rows are shaped, rather than at
+  // the Durable Object that happens to call it today — a second call site added
+  // later inherits them instead of having to remember them.
+  //
+  // Authenticity first: an empty id is not a demo id, so asking the demo
+  // question first would answer "not a demo, book it" about an identity that
+  // names nobody.
+  assertAuthenticIdentities(match)
   if (isDemoMatch(match)) return []
 
   const { settlement } = match
@@ -141,6 +204,11 @@ const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(
  * one layer, and that layer is `NuggPool.completeMatch`, which must not strand
  * two people who already swapped nuggets; having both retry here and a silent
  * return would leave the caller unable to tell a booked split from a lost one.
+ *
+ * Rejects immediately with `UnauthenticIdentityError` for a split whose
+ * identities name nobody: the statements are shaped before the loop, so an
+ * unauthentic identity never reaches D1 and is never retried — there is nothing
+ * transient about it.
  */
 export async function writeSettledMatch(
   db: D1Database,

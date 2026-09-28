@@ -7,9 +7,10 @@ import type { MatchedMessage, PaymentRequiredMessage } from '@shared/protocol'
 import { describeSauceSelection, type SauceSelection } from '@shared/sauces'
 import { useState } from 'react'
 import type { ChatLine } from '../hooks/usePool'
-import { Barcode } from './Barcode'
 import { BuddyChat } from './BuddyChat'
+import { CodeScanner } from './CodeScanner'
 import { PaymentPanel } from './PaymentPanel'
+import { PickupQr } from './PickupQr'
 import { Line, Perf } from './Roll'
 
 /**
@@ -201,34 +202,44 @@ export function SettlementReceipt({
             {instruction}
           </p>
 
+          {/* Only the orderer has a code: `pool.ts` fills `pickupCode` for them
+              alone, and never before both halves have paid. The QR is governed by
+              that same non-null gate, so a client has no way to print a symbol
+              for a code it was not given. */}
           {match.pickupCode !== null && (
             <div className="printed mt-5" style={{ animationDelay: '760ms' }}>
-              <Barcode value={match.pickupCode} />
-              <p className="mt-2 font-display text-lg font-bold tracking-[0.35em]">
+              <PickupQr value={match.pickupCode} />
+              <p className="mt-3 font-display text-lg font-bold tracking-[0.35em]">
                 {match.pickupCode}
               </p>
               <p className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
-                Read this out to your bud
+                Let your bud scan this, or read it out
               </p>
             </div>
           )}
 
           {role === 'receiver' && !iConfirmed && (
-            <label className="mt-5 block">
-              <span className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
-                The code on {buddy.name}'s receipt
-              </span>
-              <input
-                value={typedCode}
-                onChange={(event) => setTypedCode(event.target.value.toUpperCase())}
-                maxLength={PICKUP_CODE_LENGTH + 2}
-                autoCapitalize="characters"
-                autoCorrect="off"
-                spellCheck={false}
-                placeholder="------"
-                className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg tracking-[0.35em] focus:outline-none"
-              />
-            </label>
+            <>
+              <label className="mt-5 block">
+                <span className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
+                  The code on {buddy.name}'s receipt
+                </span>
+                <input
+                  value={typedCode}
+                  onChange={(event) => setTypedCode(event.target.value.toUpperCase())}
+                  maxLength={PICKUP_CODE_LENGTH + 2}
+                  autoCapitalize="characters"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  placeholder="------"
+                  className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg tracking-[0.35em] focus:outline-none"
+                />
+              </label>
+              {/* The accelerator, beside the field rather than instead of it: a
+                  scan fills the same input, and a camera nobody can or will grant
+                  leaves the typed path exactly as it was. */}
+              <CodeScanner onScan={setTypedCode} />
+            </>
           )}
 
           {/* Only while the match is live. There is no chat before a match and

@@ -38,9 +38,13 @@ $8.98 collected. The gross retail spread is $5.99 per pairing.
    their own half. `$0.99` of the total is the pairing fee, and it is retained
    only when **both** halves clear — a half-collected match is a loss to be
    refunded, not a fee to book.
-5. Once both cards clear, the orderer's receipt prints a pickup code. The
-   receiver reads it off them at the handoff and types it in; the orderer taps
-   to agree. Only that two-sided confirmation writes a row to the ledger.
+5. Once both cards clear, the orderer's receipt prints a pickup code — as a
+   scannable QR and as six characters. At the handoff the receiver either points
+   a camera at it or reads it out and types it, and then the orderer taps to
+   agree. The code is never sent to the receiver by the server, so both routes
+   are the same act: it travels the last few feet through the air, not over the
+   network. A scan fills the field; it does not confirm. Only that two-sided
+   confirmation writes a row to the ledger.
 
 **A disputed split holds the money.** If one buddy confirms the handoff and the
 other never does, nothing is booked to the ledger and **nothing is refunded

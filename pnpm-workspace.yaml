@@ -11,11 +11,11 @@
 # lockfile already pins. With no allowlist key at all pnpm skips them: pnpm 11
 # exits ERR_PNPM_IGNORED_BUILDS, pnpm 10 only prints "Ignored build scripts",
 # which is the quieter, worse half. `allowBuilds` was backported into the pnpm
-# 10 line at 10.28.0, so the pnpm CI resolves today (10.34.5) does honour it —
-# but 10.20.0 through 10.24.0 silently ignore it, and a floating `version: 10`
+# 10 line at 10.26.0, so the pnpm CI resolves today (10.34.5) does honour it —
+# but 10.20.0 through 10.25.0 silently ignore it, and a floating `version: 10`
 # is free to resolve elsewhere tomorrow.
 #   onlyBuiltDependencies is read by every pnpm 10.x, and still by 11
-#   allowBuilds           is read by pnpm 10.28+ and by 11
+#   allowBuilds           is read by pnpm 10.26+ and by 11
 # Declaring both is what makes the allowlist hold regardless of which 10.x the
 # pin lands on — today's, an older one a contributor has locally, or whatever a
 # future release brings. Verified on 10.34.5: both spellings, same install.

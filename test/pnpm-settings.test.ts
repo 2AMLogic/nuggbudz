@@ -9,9 +9,9 @@ import workspaceSource from '../pnpm-workspace.yaml?raw'
  * not say so when it cannot: a settings key the running pnpm does not know is
  * silently dropped rather than rejected. That is #61. CI pins `version: 10`,
  * which is a *floating* major — it resolves to the newest 10.x at job time — and
- * `allowBuilds` only became readable in the 10 line at 10.28.0, so the build
+ * `allowBuilds` only became readable in the 10 line at 10.26.0, so the build
  * allowlist's fate depends on where that pin happens to land. Today it lands on
- * 10.34.5, which does honour `allowBuilds`; 10.20.0 through 10.24.0 do not.
+ * 10.34.5, which does honour `allowBuilds`; 10.20.0 through 10.25.0 do not.
  * `onlyBuiltDependencies` is read by every 10.x (and still by 11), so declaring
  * it alongside `allowBuilds` is what pins the outcome down.
  *
@@ -56,7 +56,7 @@ describe('pnpm settings', () => {
   })
 })
 
-/** The `allowBuilds` spelling (pnpm 10.28+ and 11): package name to a boolean. */
+/** The `allowBuilds` spelling (pnpm 10.26+ and 11): package name to a boolean. */
 function parseAllowBuilds(source: string): string[] {
   return blockLines(source, 'allowBuilds').flatMap((line) => {
     const match = /^\s+([^\s:]+):\s*true\s*$/.exec(line)

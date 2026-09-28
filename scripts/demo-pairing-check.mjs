@@ -62,7 +62,7 @@ console.log(`server reports demoPairing=${health.demoPairing} (protocol ${health
 /**
  * Open a demo socket the way a phone now does: a name, and no coordinates.
  *
- * Nothing is sent about where the caller is, so the Worker resolves the cell
+ * Nothing is sent about where the caller is, so the Worker resolves the position
  * itself — from `request.cf` on a deployed server, from the demo origin locally.
  * Two clients behind the same connection therefore land in the same market,
  * which is the whole point on a stage where nobody should see a location prompt.
@@ -123,9 +123,12 @@ if (!demo) {
 
   const welcome = await a.expect('welcome')
   check(
-    'demo socket is welcomed',
-    typeof welcome.cell === 'string' && welcome.cell.length === 6,
-    welcome.cell,
+    'demo socket is welcomed, placed, and told the radius it is matching in',
+    typeof welcome.cell === 'string' &&
+      welcome.cell.length > 0 &&
+      Number.isFinite(welcome.position?.lat) &&
+      welcome.radiusMeters > 0,
+    `${welcome.cell} ${JSON.stringify(welcome.position)} ${welcome.radiusMeters}m`,
   )
   check(
     'welcome carries a demo identity',
@@ -133,7 +136,7 @@ if (!demo) {
     JSON.stringify(welcome.user),
   )
   check(
-    'the cell came from the server, with no coordinates and no prompt',
+    'the position came from the server, with no coordinates and no prompt',
     welcome.locationSource === 'edge' || welcome.locationSource === 'demo',
     `${welcome.locationSource} — 'edge' from request.cf, 'demo' when there is none to read`,
   )

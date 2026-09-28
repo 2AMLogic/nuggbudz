@@ -1,6 +1,7 @@
 import { CHAT_FRAME_LIMIT, type ChatErrorCode } from './chat'
 import type { BuyerRole, BuyerShare, Settlement } from './economics'
 import type { ExpiryWindows } from './expiry'
+import type { LatLng } from './geo'
 import type { LocationSource } from './location'
 import { normalizePickupCode } from './pickup'
 import { SAUCES_PER_SELECTION, type SauceSelection } from './sauces'
@@ -9,10 +10,11 @@ import { SAUCES_PER_SELECTION, type SauceSelection } from './sauces'
  * Wire protocol version. Bump on any breaking message change.
  *
  * Two changes independently claimed **5** on separate branches — chat on `main`,
- * and money in front of the pickup code here — so this merge is **6** rather
- * than either of them: a client speaking one of the two 5s cannot be assumed to
- * speak the other, and a version number that two incompatible wires both answer
- * to is worse than no version number at all.
+ * and money in front of the pickup code — so that merge took **6** rather than
+ * either of them: a client speaking one of the two 5s cannot be assumed to speak
+ * the other, and a version number that two incompatible wires both answer to is
+ * worse than no version number at all. This merge is **7** for the same reason:
+ * the radius work below also landed on 6 independently.
  *
  * 5 (chat) added the two-party relay between matched buddies, and with it the
  * `ChatErrorCode` arm of `ProtocolErrorCode` below.
@@ -22,12 +24,20 @@ import { SAUCES_PER_SELECTION, type SauceSelection } from './sauces'
  * later on `payment_cleared`. A client from before it would sit on a null code
  * with no idea it was waiting for two cards to clear.
  *
- * 6 also stops a teardown claiming a refund it did not get: `payment_failed`,
- * `match_expired` and `pickup_disputed` all carry `heldCents` — money collected
- * and *not* handed back. An older client would silently show nothing where a
- * buyer is owed real money, which is exactly the misreport it exists to end.
+ * 6 (money) also stops a teardown claiming a refund it did not get:
+ * `payment_failed`, `match_expired` and `pickup_disputed` all carry `heldCents` —
+ * money collected and *not* handed back. An older client would silently show
+ * nothing where a buyer is owed real money, which is exactly the misreport it
+ * exists to end.
+ *
+ * 7 (radius) makes the market a distance rather than a shard: `welcome` now
+ * carries `position` and `radiusMeters`, and a client from before it has no
+ * centre for its map and no idea how far "nearby" is. `waiting` counts and the
+ * `buddies` roster changed meaning with it — radius-scoped, not shard-scoped —
+ * which is a change in what the same field means and so a version bump even
+ * though the shape survived.
  */
-export const PROTOCOL_VERSION = 6
+export const PROTOCOL_VERSION = 7
 
 /**
  * Take a seat in the pool.
@@ -40,8 +50,8 @@ export const PROTOCOL_VERSION = 6
  * for the socket at upgrade time — from the edge when the buyer has not turned on
  * precise location — so the common case sends nothing but a deal. A client that
  * does send them has an exact fix the buyer opted into, which sharpens the
- * walking distance inside the cell; it can never change the cell, which was
- * fixed when the socket was upgraded.
+ * walking distance; it can never change the shard, which was fixed when the
+ * socket was upgraded.
  */
 export interface JoinMessage {
   type: 'join'
@@ -111,14 +121,38 @@ export type ClientMessage =
 export interface WelcomeMessage {
   type: 'welcome'
   protocol: number
-  /** Geohash cell this connection was routed to. */
+  /**
+   * Geohash cell this connection was routed to — the shard, not the market.
+   * Nothing on screen shows it: matching is decided by `radiusMeters` below, and
+   * the cell is only here so a test (and a ledger row) can say which Durable
+   * Object handled a socket.
+   */
   cell: string
   /**
-   * Which rung of the location fallback produced that cell. The client shows
-   * this: a buyer on the demo cell should never be told they were placed
-   * precisely.
+   * The position the server actually placed this socket at.
+   *
+   * Sending a buyer their own position is not a disclosure — it is theirs
+   * already, and on the opt-in rung they supplied it. It is here because the map
+   * needs a centre on *every* rung: the server always knows where it put a
+   * socket, and hiding the map whenever the buyer declined a permission prompt
+   * withheld a picture we could always have drawn. Everyone *else* stays snapped
+   * through `snapToGrid` — see `CellBuddy`.
+   */
+  position: LatLng
+  /**
+   * Which rung of the location fallback produced that position. The client shows
+   * this: a buyer on the demo origin should never be told it is where they are.
    */
   locationSource: LocationSource
+  /**
+   * How far a buddy may be and still be matched with this buyer, in metres.
+   *
+   * The market is this circle, not the shard. Sent so no client carries its own
+   * idea of how far "nearby" is — the same reason deal prices are data rather
+   * than literals. Metres because metres are canonical everywhere in code; the
+   * screen converts once, in `formatMiles`.
+   */
+  radiusMeters: number
   waiting: number
   /** Who the server thinks you are, straight off your session. */
   user: {
@@ -141,7 +175,7 @@ export interface WelcomeMessage {
 }
 
 /**
- * Another buyer waiting in your cell, reduced to a dot on a map.
+ * Another buyer waiting within your radius, reduced to a dot on a map.
  *
  * Deliberately just coordinates: no `connId`, no `name`. The position itself
  * is already coarse by the time it reaches here — see `snapToGrid` in
@@ -155,15 +189,21 @@ export interface CellBuddy {
 
 export interface WaitingMessage {
   type: 'waiting'
-  /** How many buyers are queued on your deal in this cell, including you. */
+  /**
+   * How many buyers on your deal are queued within your radius, including you.
+   *
+   * Radius-scoped, not shard-scoped. The shard is a region — a count of
+   * everybody in it would be a number about infrastructure, and the buyer is
+   * asking how many people could actually meet them.
+   */
   waiting: number
-  /** How many eligible buyers joined before you. */
+  /** How many of those eligible buyers joined before you. */
   queuedAhead: number
   /**
-   * Everyone else waiting in this cell, on any deal, snapped to a coarse
-   * grid — never you. This is the cell's whole roster, not just your deal:
-   * the map is explaining the cell as a market, and `waiting`/`queuedAhead`
-   * above stay scoped to the deal that actually decides who you pair with.
+   * Everyone else waiting within your radius, on any deal, snapped to a coarse
+   * grid — never you. Any deal, because the map is explaining the market rather
+   * than the queue; within the radius, because a dot you could never be matched
+   * with is noise on the screen and a privacy surface off it.
    */
   buddies: CellBuddy[]
 }
@@ -344,7 +384,7 @@ export interface MatchExpiredMessage {
  * One line of a two-party conversation, relayed live.
  *
  * Sent to both buddies and to nobody else — not to another buyer queued in the
- * same cell, not to another match in the same cell. The sender gets it back so
+ * same market, not to another match in the same shard. The sender gets it back so
  * both screens render the same canonical, sanitized text rather than the sender
  * seeing what they typed and the buddy seeing what survived cleaning.
  *

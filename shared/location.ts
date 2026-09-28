@@ -5,14 +5,15 @@ import type { LatLng } from './geo'
  *
  * NuggBudz never asks for location permission to pair. A prompt on a borrowed
  * phone, on venue wifi, with one wrong tap available, is a dead end — so the
- * cell is resolved from the most precise source already in hand, and the screen
- * says which one that was rather than implying a fix we do not have:
+ * position is resolved from the most precise source already in hand, and the
+ * screen says which one that was rather than implying a fix we do not have:
  *
  * - `client` — the buyer explicitly asked for their exact location, and the
  *   browser gave it up. The only rung that ever involves a prompt.
  * - `edge` — Cloudflare's approximate location for the inbound request
- *   (`request.cf.latitude`/`longitude`). Free, promptless, and city-level, which
- *   is exactly the resolution a precision-6 cell needs.
+ *   (`request.cf.latitude`/`longitude`). Free, promptless, and city-level — good
+ *   to a neighbourhood, which is honest about who it can pair you with over a
+ *   two-mile radius and is why the screen labels it as approximate.
  * - `demo` — the fixed origin below, for when there is no usable `cf` to read:
  *   `cf` is absent outside a Workers runtime, and a miniflare that could not
  *   fetch one (offline, or a trimmed CI box) hands over an object with no
@@ -46,6 +47,10 @@ export interface RawCoords {
  * on a local dev server, denied permissions on a borrowed phone, no GPS indoors.
  * Falling back to a fixed coordinate keeps pairing alive, and the UI says plainly
  * that it is doing so.
+ *
+ * It is also the one point on earth every unplaced socket shares, so test
+ * fixtures have to stay clear of it by more than the match radius — see
+ * `scripts/pool-fixtures.mjs`, which treats it as a market of its own.
  */
 export const DEMO_ORIGIN: LatLng = { lat: 37.7955, lng: -122.3937 }
 
@@ -90,7 +95,7 @@ export function parseCoords(raw: RawCoords | null | undefined): LatLng | null {
  *
  * The difference between "sent nothing" and "sent something unusable" matters at
  * the edge: the first is the normal promptless path, and the second is a client
- * bug that deserves a clear refusal rather than a silent move to another cell.
+ * bug that deserves a clear refusal rather than a silent move to another market.
  */
 export function coordsSupplied(raw: RawCoords | null | undefined): boolean {
   if (raw === null || raw === undefined) return false
@@ -136,7 +141,7 @@ export function parseLocationSource(raw: unknown): LocationSource | null {
 
 /** How a rung is named on screen, and what it honestly promises. */
 export interface LocationSourceCopy {
-  /** A short badge, shown next to the cell. */
+  /** A short badge, shown in the header and beside the map. */
   label: string
   /** A sentence for the buyer, saying how good this location actually is. */
   detail: string
@@ -146,8 +151,10 @@ export interface LocationSourceCopy {
  * Wording for each rung.
  *
  * Only `client` may describe a location as exact; the other two say what they
- * are. Stated once, here, so the screen cannot drift into claiming a precision
- * the fix does not have.
+ * are, and the demo rung says outright that the position is not the buyer's.
+ * Stated once, here, so the screen cannot drift into claiming a precision the
+ * fix does not have — nor into naming the shard, which is an implementation
+ * detail a hungry person has no model for.
  */
 export function describeLocationSource(source: LocationSource): LocationSourceCopy {
   switch (source) {
@@ -158,17 +165,17 @@ export function describeLocationSource(source: LocationSource): LocationSourceCo
       }
     case 'edge':
       return {
-        label: 'approximate, from the network',
+        label: 'approximate, from your network',
         detail:
           'Paired from your approximate location — worked out from your connection, with no ' +
           'location prompt. Good to about a neighbourhood.',
       }
     case 'demo':
       return {
-        label: 'demo cell',
+        label: 'demo location',
         detail:
-          'Paired on the fixed demo cell: no location was available for this connection. ' +
-          'Everyone here lands in the same market.',
+          'Paired from the fixed demo location, not yours: nothing was available for this ' +
+          'connection. Everyone placed this way starts from the same point.',
       }
   }
 }

@@ -53,21 +53,28 @@ export interface JoinRequest {
 
 export interface PoolState {
   stage: PoolStage
-  /** Buyers queued in your cell on your deal, including you. */
+  /** Buyers queued within your radius on your deal, including you. */
   waiting: number
   queuedAhead: number
-  cell: string | null
   /** Which rung of the location fallback placed this socket; null until welcomed. */
   locationSource: LocationSource | null
   /**
-   * Where you told the server you are standing, when you told it at all. Kept
-   * around (not just handed off to `join` and discarded) so the cell map has a
-   * "you are here" marker to draw at full precision — the server only ever
-   * coarsens *other* buyers' positions, since this one is already yours. Null on
-   * the no-prompt path, where only the server knows where you are.
+   * Where the server placed this socket, read off `welcome` — not out of the
+   * join request.
+   *
+   * The server always knows this, on every rung, so taking it from there is what
+   * lets the map have a centre even when the buyer never answered a permission
+   * prompt. Taking it from the *request* instead would have been null exactly on
+   * the promptless path, which is the common one. Null only until the socket is
+   * welcomed.
    */
   own: { lat: number; lng: number } | null
-  /** Everyone else waiting in your cell, snapped to a coarse grid server-side. */
+  /**
+   * How far a buddy may be and still be matched with you, in metres, as the
+   * server reports it. Null until welcomed; never a literal in this app.
+   */
+  radiusMeters: number | null
+  /** Everyone else waiting within your radius, snapped to a coarse grid server-side. */
   buddies: CellBuddy[]
   match: MatchedMessage | null
   /**
@@ -109,9 +116,9 @@ const INITIAL: PoolState = {
   stage: 'idle',
   waiting: 0,
   queuedAhead: 0,
-  cell: null,
   locationSource: null,
   own: null,
+  radiusMeters: null,
   buddies: [],
   match: null,
   payment: null,
@@ -168,8 +175,8 @@ function socketUrl({ lat, lng, demoName }: JoinRequest): string {
 /**
  * Hold a live seat in a neighbourhood's matching pool.
  *
- * One socket per session. The server decides which cell you belong to, where it
- * thinks you are standing, and — from your session cookie — who you are. So the
+ * One socket per session. The server decides where it thinks you are standing,
+ * how far a buddy may be, and — from your session cookie — who you are. So the
  * only thing this hook has to send up is which box it wants.
  */
 export function usePool() {
@@ -222,11 +229,9 @@ export function usePool() {
   const join = useCallback(
     (request: JoinRequest) => {
       close()
-      const own =
-        request.lat !== undefined && request.lng !== undefined
-          ? { lat: request.lat, lng: request.lng }
-          : null
-      setState({ ...INITIAL, stage: 'connecting', own })
+      // No optimistic position here: `welcome` carries the one the server
+      // actually used, which is the only one the radius on the map is true for.
+      setState({ ...INITIAL, stage: 'connecting' })
 
       const socket = new WebSocket(socketUrl(request))
       socketRef.current = socket
@@ -259,8 +264,9 @@ export function usePool() {
             case 'welcome':
               return {
                 ...prev,
-                cell: message.cell,
                 locationSource: message.locationSource,
+                own: message.position,
+                radiusMeters: message.radiusMeters,
                 waiting: message.waiting,
               }
             case 'waiting':
@@ -397,7 +403,7 @@ export function usePool() {
                 stage: 'idle',
                 waiting: 0,
                 queuedAhead: 0,
-                // No longer in the market, so the cell's dots are not yours to show.
+                // No longer in the market, so the dots are not yours to show.
                 buddies: [],
                 notice: `Dropped from the queue after ${humanWindow(message.idleMs)} of quiet. Join again when you are ready.`,
               }

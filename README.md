@@ -26,11 +26,13 @@ $8.98 collected. The gross retail spread is $5.99 per pairing.
 
 1. Sign in with Google and pick a deal. There is no location prompt: the Worker
    places you from Cloudflare's edge geo (`request.cf`), which is accurate to
-   about a neighbourhood — exactly what a cell needs. "Use my exact location" is
-   a separate control, and the only thing that ever asks permission.
-2. You join the pool for your **cell** — a geohash precision-6 box, roughly
-   1.2km × 0.6km.
-3. The moment another buyer within walking distance wants the same box, you are
+   about a neighbourhood. "Use my exact location" is a separate control, and the
+   only thing that ever asks permission.
+2. You join the pool, and the screen draws the market: a **2-mile circle** around
+   wherever the server placed you, with a dot for everyone else already waiting
+   inside it. The circle is the rule — `MATCH_RADIUS_METERS` — not a picture of
+   one.
+3. The moment another buyer inside that circle wants the same box, you are
    paired. The buyer who waited longest places the order; the other walks over.
 4. Both see the same itemised settlement, down to the cent, and are charged
    their own half. `$0.99` of the total is the pairing fee, and it is retained
@@ -65,13 +67,15 @@ Browser (React 19, Tailwind 4)
    │  GET /api/deals            catalogue + settlement + spread
    │  WS  /api/pool/ws          live pairing — requires a session
    ▼
-Cloudflare Worker (Hono)  ── derives the geohash cell server-side (edge geo,
-   │                          no prompt) and the buyer's identity from their session
+Cloudflare Worker (Hono)  ── derives the position server-side (edge geo, no
+   │                          prompt) and the buyer's identity from their session
    ├─▶ KV: SESSIONS      ── opaque session ids, pending PKCE state, Google JWKS
    ├─▶ D1: users         ── one row per Google account
    ▼
-Durable Object: NuggPool  ── ONE PER CELL = one matching market
-   │                          single-threaded, so double-pairing is impossible
+Durable Object: NuggPool  ── ONE PER GEOHASH CELL = one shard, deliberately much
+   │                          wider (~156 km) than the 2-mile market it contains,
+   │                          so one single-threaded object sees every candidate
+   │                          it might pair and double-pairing is impossible
    ▼
 D1  ── ledger of settled splits
 ```
@@ -102,7 +106,8 @@ routes answer `503`; `pnpm test` and `pnpm smoke` do not need it. `.dev.vars` is
 gitignored and `GOOGLE_CLIENT_SECRET` never belongs in `wrangler.jsonc`.
 
 Two browser windows (or two phones on the same wifi) will pair with each other
-live, with location permission denied on both — the cell comes from the server.
+live, with location permission denied on both — the position comes from the
+server, and the map is drawn from it either way.
 Location resolves in three rungs, most precise first (`shared/location.ts`):
 
 | Rung | Source | Prompts? |
@@ -285,7 +290,7 @@ slide and the code disagree in either direction. See
 ## Roadmap
 
 Current milestone: **M0 — live pairing.** Done: the matching engine, settlement
-math, cell routing, a working two-phone pairing flow, and Google sign-in.
+math, radius matching, a working two-phone pairing flow, and Google sign-in.
 
 Next up, tracked as issues: payouts to merchants through Stripe Connect, a
 retry queue for a refund that fails at Stripe, and buddy reputation.

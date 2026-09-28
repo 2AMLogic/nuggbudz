@@ -1,9 +1,10 @@
 import type { DealSpec, Settlement, SpreadAnalysis } from '@shared/economics'
 import { formatCents } from '@shared/economics'
+import { formatMiles } from '@shared/geo'
 import { describeLocationSource, type LocationSource } from '@shared/location'
 import { saucesForMerchant } from '@shared/sauces'
 import { useEffect, useState } from 'react'
-import { CellMap } from './components/CellMap'
+import { RadiusMap } from './components/RadiusMap'
 import { Line, Perf, Roll } from './components/Roll'
 import { SaucePicker } from './components/SaucePicker'
 import { SettlementReceipt } from './components/SettlementReceipt'
@@ -112,7 +113,7 @@ export function App() {
     (pool.stage === 'matched' || pool.stage === 'settled' || pool.stage === 'disputed')
   ) {
     return (
-      <Shell cell={pool.cell} source={pool.locationSource}>
+      <Shell radiusMeters={pool.radiusMeters} source={pool.locationSource}>
         <SettlementReceipt
           match={pool.match}
           payment={pool.payment}
@@ -133,23 +134,34 @@ export function App() {
   }
 
   if (pool.stage === 'connecting' || pool.stage === 'waiting') {
+    const within = pool.radiusMeters === null ? null : formatMiles(pool.radiusMeters)
     return (
-      <Shell cell={pool.cell} source={pool.locationSource}>
+      <Shell radiusMeters={pool.radiusMeters} source={pool.locationSource}>
         <section aria-live="polite">
           <p className="font-display text-[0.65rem] tracking-[0.2em] text-faded uppercase">
-            {pool.stage === 'connecting' ? 'Joining your cell' : 'Looking for a bud'}
+            {pool.stage === 'connecting' ? 'Joining the pool' : 'Looking for a bud'}
           </p>
           <h2 className="caret mt-1 font-display text-2xl font-bold">
-            {pool.stage === 'connecting' ? 'Standing in line' : `${pool.waiting} in your cell`}
+            {pool.stage === 'connecting' || within === null
+              ? 'Standing in line'
+              : `${pool.waiting} within ${within}`}
           </h2>
 
-          {/* The map needs a "you are here" at full precision, and on the
-              promptless path nobody has one: the server knows where it placed
-              this socket but `welcome` carries only the cell. So the map appears
-              once the buyer opts into exact location, rather than drawing the
-              cell centre and calling it them. */}
-          {pool.stage === 'waiting' && pool.cell !== null && pool.own !== null && (
-            <CellMap cell={pool.cell} you={pool.own} buddies={pool.buddies} />
+          {/* Drawn on every location rung, including the two that never involved
+              a prompt: `welcome` carries the position the server actually used
+              and the radius it is matching in, so there is always a centre and
+              always a circle. The line under it says which rung that was, so a
+              buyer on the demo origin is never told it is where they are. */}
+          {pool.own !== null && pool.radiusMeters !== null && placement !== null && (
+            <>
+              <RadiusMap
+                you={pool.own}
+                radiusMeters={pool.radiusMeters}
+                buddies={pool.buddies}
+                centreLabel={placement.label}
+              />
+              <p className="mt-1 font-body text-xs leading-snug text-faded">{placement.detail}</p>
+            </>
           )}
 
           <Perf label={selected?.merchant ?? 'Deal'} />
@@ -166,13 +178,10 @@ export function App() {
           )}
 
           <p className="mt-4 font-body text-sm leading-snug text-faded">
-            You are paired the moment someone within walking distance wants the same box. Keep this
-            open.
+            {within === null
+              ? 'You are paired the moment someone nearby wants the same box. Keep this open.'
+              : `You are paired the moment someone within ${within} wants the same box. Keep this open.`}
           </p>
-
-          {placement !== null && (
-            <p className="mt-3 font-body text-xs leading-snug text-faded">{placement.detail}</p>
-          )}
 
           <button
             type="button"
@@ -187,7 +196,7 @@ export function App() {
   }
 
   return (
-    <Shell cell={pool.cell} source={pool.locationSource}>
+    <Shell radiusMeters={pool.radiusMeters} source={pool.locationSource}>
       <p className="font-body text-base leading-snug">
         Twenty nuggets cost less than ten. Split the box with someone nearby and you both stop
         paying the single-person tax.
@@ -334,20 +343,20 @@ export function App() {
       )}
 
       <p className="mt-3 font-body text-xs leading-snug text-faded">
-        No permission prompt needed: we place you in a cell from your connection, which is accurate
-        to about a neighbourhood. Pairing fee is {formatCents(selected?.platformFeeCents ?? 99)} per
-        split.
+        No permission prompt needed: we place you from your connection, which is accurate to about a
+        neighbourhood. Pairing fee is {formatCents(selected?.platformFeeCents ?? 99)} per split.
       </p>
     </Shell>
   )
 }
 
 function Shell({
-  cell,
+  radiusMeters,
   source,
   children,
 }: {
-  cell: string | null
+  /** The market in force, as the server reported it; null before `welcome`. */
+  radiusMeters: number | null
   /** Which rung placed this socket, once the server has said. */
   source: LocationSource | null
   children: React.ReactNode
@@ -357,8 +366,11 @@ function Shell({
       <header>
         <div className="flex items-baseline justify-between gap-2">
           <h1 className="font-display text-xl font-bold tracking-[0.08em]">NUGGBUDZ</h1>
+          {/* The shard used to be printed here. It is not a thing a hungry
+              person has a model for, and it stopped being what decides a match;
+              the radius is both. */}
           <span className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
-            {cell === null ? 'no cell' : `cell ${cell}`}
+            {radiusMeters === null ? 'not placed yet' : `within ${formatMiles(radiusMeters)}`}
           </span>
         </div>
         <div className="flex items-baseline justify-between gap-2">

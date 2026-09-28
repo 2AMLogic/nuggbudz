@@ -41,6 +41,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startFakeStripe } from './fake-stripe.mjs'
+import { FIXTURE_COORDS } from './pool-fixtures.mjs'
 
 const BASE = process.env.BASE ?? 'http://localhost:5248'
 const WS = BASE.replace('http', 'ws')
@@ -53,12 +54,16 @@ const DEAL_ID = 'mcd-nuggets-20'
 /**
  * The deal is fixed because `ACTIVE_DEALS` gates the join path: isolating these
  * fixtures with a second deal id would have them refused as `unknown_deal`, which
- * is the gate working. Isolation is by cell and distance instead — these
- * coordinates are nowhere near the ones `scripts/smoke.mjs` uses, so the two
- * suites never share a NuggPool instance even against one dev server.
+ * is the gate working. Isolation is by *distance* instead, and it comes from the
+ * one table every lane shares (`scripts/pool-fixtures.mjs`): these two are a
+ * market of their own, more than a hundred kilometres from every fixture in
+ * `scripts/smoke.mjs` and `e2e/`, which `test/fixture-separation.test.ts` checks
+ * rather than leaving to this comment. Since #82 a shared geohash cell no longer
+ * means a shared market — the cell is ~156 km wide — so "nowhere near" has to be
+ * measured, not asserted.
  */
-const HERE = { lat: 40.758, lng: -73.9855 }
-const NEARBY = { lat: 40.7583, lng: -73.9858 }
+const HERE = FIXTURE_COORDS.payHere
+const NEARBY = FIXTURE_COORDS.payNearby
 
 const log = (...a) => console.log(...a)
 let failures = 0

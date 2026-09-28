@@ -13,7 +13,7 @@ import {
   queueDeadline,
   resolveWindows,
 } from '../shared/expiry'
-import { type LatLng, snapToGrid } from '../shared/geo'
+import { DEFAULT_MATCH_RADIUS_METERS, distanceMeters, type LatLng, snapToGrid } from '../shared/geo'
 import { type LocationSource, parseCoords, parseLocationSource } from '../shared/location'
 import { type Candidate, findMatch } from '../shared/matchmaker'
 import {
@@ -90,7 +90,7 @@ const TOMBSTONE_RETENTION_MS = 4 * 24 * 60 * 60 * 1_000
  * Who is on the other end of a socket.
  *
  * Identity and cell are both set by the Worker at upgrade time and never from a
- * client message, so a connection cannot rename itself or move market.
+ * client message, so a connection cannot rename itself or move shard.
  */
 interface Principal {
   connId: string
@@ -218,8 +218,15 @@ function pickupUnlocked(record: MatchRecord): boolean {
  * lunch and dinner rushes without losing the queue.
  */
 export class NuggPool extends DurableObject<Env> {
+  /**
+   * The market: how far apart two buyers may be and still be paired.
+   *
+   * This — not the shard — is the product rule, so it is also what scopes every
+   * count and roster this object broadcasts. Read fresh from the var so a
+   * repriced radius takes effect without a redeploy of the client.
+   */
   private get radiusMeters(): number {
-    return intVar(this.env.MATCH_RADIUS_METERS, 800)
+    return intVar(this.env.MATCH_RADIUS_METERS, DEFAULT_MATCH_RADIUS_METERS)
   }
 
   private get pickupTimeoutMs(): number {
@@ -316,8 +323,17 @@ export class NuggPool extends DurableObject<Env> {
       type: 'welcome',
       protocol: PROTOCOL_VERSION,
       cell,
+      // Their own position, and the rung that produced it, so the map has a
+      // centre on every rung rather than only when a permission prompt was
+      // answered. The radius travels with it: the client draws the circle the
+      // server is actually matching in, and hardcodes nothing.
+      position: origin,
       locationSource,
-      waiting: this.waitingStates().length,
+      radiusMeters: this.radiusMeters,
+      // Scoped to the radius, not the shard, for the same reason `sendWaiting`
+      // is: at this precision the shard is a region, and "42 waiting" two
+      // counties away is not a fact about anybody's night.
+      waiting: this.withinRadius(origin).length,
       user: { id: userId, name },
       expiry: this.windows,
       pickupTimeoutMs: this.pickupTimeoutMs,
@@ -1347,8 +1363,8 @@ export class NuggPool extends DurableObject<Env> {
     await this.retireMatch(state.matchId, retired)
     // Without this the survivor's UI would keep showing the pool count (and
     // buddy dots) from before they were matched, which for an instant match
-    // is zero — and it also tells everyone else in the cell about the
-    // buyer who just got requeued.
+    // is zero — and it also tells everyone nearby about the buyer who just got
+    // requeued.
     this.broadcastWaiting()
     // The requeued buddy is back under the queue's idle timer, and the match's
     // own deadline is gone with the record.
@@ -1358,26 +1374,51 @@ export class NuggPool extends DurableObject<Env> {
   /**
    * Tell a queued buyer where they stand. Called after the state is committed,
    * so the count includes the buyer being told.
+   *
+   * Everything here is scoped to this buyer's radius rather than to the shard.
+   * The shard is ~156 km across (see `DEFAULT_POOL_CELL_PRECISION`), so a
+   * shard-wide count is a number about sharding and a shard-wide roster is a
+   * much larger privacy surface than the map it draws — a buyer fifty miles
+   * away, who could never be matched here, is simply invisible.
    */
   private sendWaiting(ws: WebSocket, state: WaitingState): void {
-    const eligible = this.waitingStates().filter((o) => o.state.dealId === state.dealId)
-    // The map roster is the whole cell, not just this buyer's deal: a cell can
-    // host more than one deal's queue at once, and the point of the map is to
-    // explain the cell as a market, not to leak who could actually pair.
-    const buddies = this.waitingStates()
-      .filter((o) => o.state.connId !== state.connId)
+    const nearby = this.withinRadius(state, state.connId)
+    const eligible = nearby.filter((o) => o.state.dealId === state.dealId)
+    // The map roster is every deal within the radius, not just this buyer's: one
+    // market can host more than one deal's queue at once, and the point of the
+    // map is to explain the market rather than to show who could pair.
+    const buddies = nearby
       // Quantized here, at the one chokepoint every waiting broadcast passes
       // through, so a buyer's exact position never reaches the wire.
       .map((o) => snapToGrid(o.state))
 
     this.send(ws, {
       type: 'waiting',
-      waiting: eligible.length,
-      queuedAhead: eligible.filter(
-        (o) => o.state.connId !== state.connId && o.state.joinedAt < state.joinedAt,
-      ).length,
+      waiting: eligible.length + 1,
+      queuedAhead: eligible.filter((o) => o.state.joinedAt < state.joinedAt).length,
       buddies,
     })
+  }
+
+  /**
+   * The waiting buyers inside the match radius of a point, optionally excluding
+   * one connection (normally the buyer being told).
+   *
+   * The one place "who is nearby" is decided, so a count, a roster and the
+   * matcher's candidate set cannot drift apart. It answers only *which* buyers
+   * are eligible — never which one wins, which is `findMatch`'s fairness rule
+   * and deliberately kept separate from this.
+   */
+  private withinRadius(
+    at: LatLng,
+    exceptConnId?: string,
+  ): { ws: WebSocket; state: WaitingState }[] {
+    const radius = this.radiusMeters
+    return this.waitingStates().filter(
+      ({ state }) =>
+        state.connId !== exceptConnId &&
+        distanceMeters(at, { lat: state.lat, lng: state.lng }) <= radius,
+    )
   }
 
   private async matchRecords(): Promise<Map<string, MatchRecord>> {
@@ -1457,7 +1498,13 @@ export class NuggPool extends DurableObject<Env> {
     return out
   }
 
-  /** Refresh every waiting socket's roster after a join, cancel or disconnect. */
+  /**
+   * Refresh every waiting socket's roster after a join, cancel or disconnect.
+   *
+   * Every socket in the shard is told, but each is told only about its own
+   * radius: `sendWaiting` re-derives "nearby" from the recipient, so two buyers
+   * in one shard and forty miles apart get genuinely different rosters.
+   */
   private broadcastWaiting(): void {
     for (const { ws, state } of this.waitingStates()) {
       this.sendWaiting(ws, state)

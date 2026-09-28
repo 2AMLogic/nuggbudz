@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { decodeCell, distanceMeters, formatDistance, geohash, snapToGrid } from '../shared/geo'
+import {
+  DEFAULT_MATCH_RADIUS_METERS,
+  DEFAULT_POOL_CELL_PRECISION,
+  decodeCell,
+  distanceMeters,
+  formatDistance,
+  formatMiles,
+  geohash,
+  METERS_PER_MILE,
+  snapToGrid,
+} from '../shared/geo'
 
 describe('geohash', () => {
   it('matches the canonical reference vector', () => {
@@ -132,10 +142,48 @@ describe('distanceMeters', () => {
 })
 
 describe('formatDistance', () => {
-  it('uses metres up close and kilometres far away', () => {
-    expect(formatDistance(120)).toBe('120 m away')
-    expect(formatDistance(999)).toBe('999 m away')
-    expect(formatDistance(1000)).toBe('1.0 km away')
-    expect(formatDistance(1340)).toBe('1.3 km away')
+  it('uses feet up close and miles once feet stop meaning anything', () => {
+    expect(formatDistance(40)).toBe('130 ft away')
+    expect(formatDistance(METERS_PER_MILE / 2)).toBe('0.5 mi away')
+    expect(formatDistance(METERS_PER_MILE)).toBe('1.0 mi away')
+    expect(formatDistance(2 * METERS_PER_MILE)).toBe('2.0 mi away')
+  })
+
+  it('switches units exactly at a tenth of a mile', () => {
+    // The boundary itself is the mile side, so no distance reads as both.
+    expect(formatDistance(METERS_PER_MILE / 10)).toBe('0.1 mi away')
+    expect(formatDistance(METERS_PER_MILE / 10 - 1)).toBe('520 ft away')
+  })
+
+  it('never says nought feet: two people standing together are still apart', () => {
+    expect(formatDistance(0)).toBe('10 ft away')
+    expect(formatDistance(1)).toBe('10 ft away')
+  })
+})
+
+describe('formatMiles', () => {
+  it('names the radius the way it is offered', () => {
+    expect(formatMiles(DEFAULT_MATCH_RADIUS_METERS)).toBe('2 mi')
+    expect(formatMiles(3 * METERS_PER_MILE)).toBe('3 mi')
+    expect(formatMiles(METERS_PER_MILE * 1.5)).toBe('1.5 mi')
+    expect(formatMiles(METERS_PER_MILE / 2)).toBe('0.5 mi')
+  })
+})
+
+describe('the defaults the shard and the market fall back to', () => {
+  it('derives the match radius from the mile rather than restating it', () => {
+    expect(DEFAULT_MATCH_RADIUS_METERS).toBe(Math.round(2 * METERS_PER_MILE))
+  })
+
+  it('shards coarsely enough to contain the whole circle', () => {
+    // The point of the precision: a buyer anywhere in a cell must be able to see
+    // every candidate inside their radius, so the cell has to be much wider than
+    // the circle's diameter. Precision 3 is ~156 km; the diameter is ~6.4 km.
+    const cell = decodeCell(geohash(37.7749, -122.4194, DEFAULT_POOL_CELL_PRECISION))
+    const widthMeters = distanceMeters(
+      { lat: cell.latMin, lng: cell.lngMin },
+      { lat: cell.latMin, lng: cell.lngMax },
+    )
+    expect(widthMeters).toBeGreaterThan(10 * 2 * DEFAULT_MATCH_RADIUS_METERS)
   })
 })

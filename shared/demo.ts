@@ -31,32 +31,66 @@ export function demoPairingEnabled(raw: string | undefined): boolean {
 /** Longest display name a buddy card can show without wrapping badly. */
 const MAX_NAME = 40
 
-/** Space, the lowest printable code point. Anything below it is a control char. */
-const FIRST_PRINTABLE = 0x20
-const DELETE_CHAR = 0x7f
+/**
+ * Every invisible character a buddy card must never receive.
+ *
+ * - `\p{Cc}` is the control range: C0 (U+0000–U+001F), DEL, **and** C1
+ *   (U+0080–U+009F). C1 is the gap a hand-rolled `code >= 0x20` check left open
+ *   — JS `\s` does not match U+0085 NEL either, so it used to reach the card as
+ *   an invisible byte inside an otherwise ordinary-looking name.
+ * - `\p{Cf}` is the format range: U+200B zero-width space, and the bidi
+ *   overrides (U+202E RLO) that let a name render in an order its stored bytes
+ *   do not have. That reordering is the one real display-spoofing primitive
+ *   available to an unauthenticated demo caller.
+ * - `\p{Cs}` is the lone surrogates, which decode to U+FFFD wherever they land.
+ *
+ * Dropping the whole `Cf` range also splits a ZWJ emoji sequence into its
+ * components (a family emoji becomes three glyphs). That is a rendering
+ * downgrade on a throwaway demo name, and a cheap price for a card that is
+ * guaranteed to hold no invisible characters at all.
+ */
+const INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}]/gu
+
+/**
+ * Cap a name at `limit` user-perceived characters.
+ *
+ * `slice` counts UTF-16 code units, so cutting at 40 units lands mid-pair when
+ * the 40th unit happens to open an emoji's surrogate pair, leaving a lone
+ * surrogate that decodes to U+FFFD. Segment first, then rejoin whole units.
+ * `Intl.Segmenter` additionally keeps a combining mark attached to its base
+ * letter; where it is unavailable we cap by code point, which is coarser but
+ * still never cuts a pair in half.
+ */
+function capToLength(value: string, limit: number): string {
+  const units =
+    typeof Intl.Segmenter === 'function'
+      ? Array.from(
+          new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value),
+          (entry) => entry.segment,
+        )
+      : Array.from(value)
+  return units.slice(0, limit).join('')
+}
 
 /**
  * Clean a demo-supplied name into something safe to show a stranger.
  *
  * An unauthenticated caller chooses this string, so it is untrusted input:
- * control characters stripped, whitespace collapsed, length-capped, never empty.
+ * control, format and surrogate characters stripped, whitespace collapsed,
+ * length-capped by grapheme, never empty.
  */
 export function sanitizeDemoName(raw: string | null | undefined): string {
   if (typeof raw !== 'string') return 'Guest'
-  // Whitespace first, control characters second. A newline or tab is whitespace
-  // that happens to sit below the printable range, so deleting it before this
-  // step would glue two words together ('Robb\nWalters' -> 'RobbWalters')
-  // instead of separating them.
-  const spaced = raw.replace(/\s/g, ' ')
-  const printable = Array.from(spaced)
-    .filter((ch) => {
-      const code = ch.charCodeAt(0)
-      return code >= FIRST_PRINTABLE && code !== DELETE_CHAR
-    })
-    .join('')
-  const cleaned = printable.replace(/ +/g, ' ').trim()
-  if (cleaned.length === 0) return 'Guest'
-  return cleaned.slice(0, MAX_NAME)
+  // Whitespace first, invisibles second. A newline or tab is whitespace that
+  // happens to sit inside the C0 control range, so deleting it before this step
+  // would glue two words together ('Robb\nWalters' -> 'RobbWalters') instead of
+  // separating them. This ordering is load-bearing and pinned by a test.
+  const spaced = raw.replace(/\s/gu, ' ')
+  const cleaned = spaced.replace(INVISIBLE, '').replace(/ +/g, ' ').trim()
+  // Trim after capping too: the cap can otherwise end the name on the space
+  // that used to separate two words.
+  const capped = capToLength(cleaned, MAX_NAME).trim()
+  return capped.length === 0 ? 'Guest' : capped
 }
 
 /**

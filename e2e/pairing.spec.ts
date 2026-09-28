@@ -7,6 +7,7 @@ import { findDeal } from '../shared/deals'
 import { formatCents, settle } from '../shared/economics'
 import { geohash } from '../shared/geo'
 import { DEMO_ORIGIN, describeLocationSource } from '../shared/location'
+import { describeSauceOrder, findSauce, readSauceHoroscope } from '../shared/sauces'
 
 /**
  * Drives the real UI (`src/App.tsx`) end to end through two browser contexts,
@@ -40,6 +41,8 @@ const BUYERS = {
   nova: { sid: sessionId('e2e-nova'), userId: accountId(1), name: 'Nova' },
   remy: { sid: sessionId('e2e-remy'), userId: accountId(2), name: 'Remy' },
   ivy: { sid: sessionId('e2e-ivy'), userId: accountId(3), name: 'Ivy' },
+  // Picks a sauce pair in one browser session and expects it back in the next.
+  pax: { sid: sessionId('e2e-pax'), userId: accountId(4), name: 'Pax' },
 } as const
 
 type Buyer = (typeof BUYERS)[keyof typeof BUYERS]
@@ -58,6 +61,39 @@ function applyMigrations(): void {
     stdio: 'pipe',
     env: WRANGLER_ENV,
   })
+}
+
+/**
+ * Give the seeded sessions the `users` rows a real sign-in would have created.
+ *
+ * `user_sauces` hangs off `users` by foreign key (`migrations/0003_sauce_prefs.sql`),
+ * so a preference written for a session with no account behind it is refused —
+ * correctly. Seeding accounts makes these fixtures resemble signed-in buyers
+ * rather than loosening the schema for a test's convenience.
+ */
+function seedUsers(): void {
+  const now = Date.now()
+  const values = Object.values(BUYERS)
+    .map(
+      (buyer) =>
+        `('${buyer.userId}', 'e2e-sub-${buyer.userId}', NULL, '${buyer.name}', NULL, ${now}, ${now})`,
+    )
+    .join(', ')
+  execFileSync(
+    'npx',
+    [
+      'wrangler',
+      'd1',
+      'execute',
+      'nuggbudz',
+      '--local',
+      '--command',
+      `INSERT OR IGNORE INTO users
+         (id, google_sub, email, display_name, avatar_url, created_at, updated_at)
+       VALUES ${values}`,
+    ],
+    { stdio: 'pipe', env: WRANGLER_ENV },
+  )
 }
 
 /** Write the seeded sessions into the dev server's local KV in one CLI call. */
@@ -124,9 +160,36 @@ const settlement = settle(deal, 2)
 const expectedHalf = formatCents(settlement.shares[0].payCents)
 const expectedSavings = formatCents(settlement.shares[0].savingsCents)
 
+/**
+ * The pairs these buyers pick, resolved from the catalogue rather than typed out:
+ * a sauce leaving the menu has to fail here, not render a blank card. One pair and
+ * one double, because a double order of a single sauce is a selection too.
+ */
+function sauce(id: string) {
+  const found = findSauce(id)
+  if (found === undefined) throw new Error(`fixture sauce missing: ${id}`)
+  return found
+}
+
+const NOVA_SAUCES = [sauce('mcd-hot-mustard'), sauce('mcd-ketchup')] as const
+const REMY_SAUCES = [sauce('mcd-sweet-n-sour'), sauce('mcd-sweet-n-sour')] as const
+const NOVA_ORDER = describeSauceOrder(NOVA_SAUCES[0], NOVA_SAUCES[1])
+const REMY_ORDER = describeSauceOrder(REMY_SAUCES[0], REMY_SAUCES[1])
+
+/** Tap a pair on the sauce chart. The same sauce twice is a double order. */
+async function pickSauces(
+  page: import('@playwright/test').Page,
+  pair: readonly [{ label: string }, { label: string }],
+): Promise<void> {
+  for (const picked of pair) {
+    await page.getByRole('button', { name: picked.label }).first().click()
+  }
+}
+
 test.beforeAll(() => {
   seedSessions()
   applyMigrations()
+  seedUsers()
 })
 
 /** Sign a page in by handing its context the session cookie a real callback would set. */
@@ -179,6 +242,16 @@ test('two nearby buds pair, split the box evenly, and see complementary roles', 
     await expect(pageA.getByText(/exact location on/i)).toBeVisible()
     await expect(pageB.getByText(/exact location on/i)).toBeVisible()
 
+    // The sauce chart, before anyone queues. The reading is a pure function of the
+    // pair (`shared/sauces.ts`), so the expected lines are computed here from the
+    // same catalogue the page renders from — not pasted in.
+    await pickSauces(pageA, NOVA_SAUCES)
+    await pickSauces(pageB, REMY_SAUCES)
+    const novaReading = readSauceHoroscope(NOVA_SAUCES[0], NOVA_SAUCES[1])
+    await expect(pageA.getByText(novaReading.lines[0])).toBeVisible()
+    await expect(pageA.getByText(novaReading.lines[1])).toBeVisible()
+    await expect(pageA.getByText(NOVA_ORDER, { exact: true })).toBeVisible()
+
     // Nova joins first and waits, so `findMatch`'s fairness rule (the longest
     // waiter orders) makes her the deterministic orderer once Remy joins.
     await pageA.getByRole('button', { name: /find a bud/i }).click()
@@ -216,6 +289,15 @@ test('two nearby buds pair, split the box evenly, and see complementary roles', 
     await expect(pageA.getByText(expectedSavings, { exact: true })).toBeVisible()
     await expect(pageB.getByText(expectedHalf, { exact: true })).toBeVisible()
     await expect(pageB.getByText(expectedSavings, { exact: true })).toBeVisible()
+
+    // Both receipts carry both pairs, because the practical point of the feature is
+    // that one of these two is about to be standing at a counter ordering for both
+    // of them. Each buddy's pair arrives over the socket as validated ids and is
+    // resolved to a label through the catalogue.
+    await expect(pageA.getByText(NOVA_ORDER, { exact: true })).toBeVisible()
+    await expect(pageA.getByText(REMY_ORDER, { exact: true })).toBeVisible()
+    await expect(pageB.getByText(NOVA_ORDER, { exact: true })).toBeVisible()
+    await expect(pageB.getByText(REMY_ORDER, { exact: true })).toBeVisible()
 
     // The pickup code is not "the same code shown on both screens" -- CLAUDE.md
     // is explicit that it is "never sent to the receiver," and `pool.ts` only
@@ -298,5 +380,60 @@ test('leaving the queue does not immediately rejoin, and a refused prompt still 
     await expect(refusalNotice).toBeVisible()
   } finally {
     await context.close()
+  }
+})
+
+test('a sauce pair is remembered, and reads the same every time', async ({ browser }) => {
+  const reading = readSauceHoroscope(NOVA_SAUCES[0], NOVA_SAUCES[1])
+  const first = await browser.newContext()
+  const page = await first.newPage()
+
+  try {
+    await signIn(page, BUYERS.pax)
+    await page.goto('/')
+
+    // Wait for the write to reach the account, rather than racing the reload
+    // below against it.
+    const stored = page.waitForResponse(
+      (response) =>
+        response.url().includes('/api/me/sauces') && response.request().method() === 'PUT',
+    )
+    await pickSauces(page, NOVA_SAUCES)
+    expect((await stored).ok()).toBe(true)
+
+    await expect(page.getByText(NOVA_ORDER, { exact: true })).toBeVisible()
+    await expect(page.getByText(reading.lines[0])).toBeVisible()
+    await expect(page.getByText(reading.lines[1])).toBeVisible()
+
+    // The pair is in `localStorage` too, which is the *only* home a demo buyer has
+    // — they deliberately have no account (`shared/demo.ts`), so this is the thing
+    // that makes their pair survive a reload. Asserted here because this dev server
+    // runs with demo pairing off, so no browser test can sign in as one.
+    const remembered = await page.evaluate(() => localStorage.getItem('nuggbudz.sauces'))
+    expect(JSON.parse(remembered ?? 'null')).toEqual([NOVA_SAUCES[0].id, NOVA_SAUCES[1].id])
+
+    // A reload must not reroll the reading. This is the assertion the whole
+    // "derived, never random" rule exists for: a buyer who refreshes and reads
+    // something new has learned the feature is noise.
+    await page.reload()
+    await expect(page.getByText(NOVA_ORDER, { exact: true })).toBeVisible()
+    await expect(page.getByText(reading.lines[0])).toBeVisible()
+    await expect(page.getByText(reading.lines[1])).toBeVisible()
+  } finally {
+    await first.close()
+  }
+
+  // A brand-new context: empty localStorage, same account. Only the row written
+  // by `PUT /api/me/sauces` can put the pair back on this screen, which is what
+  // "survives a sign-out and a sign-in" means for a signed-in buyer.
+  const second = await browser.newContext()
+  const laterPage = await second.newPage()
+  try {
+    await signIn(laterPage, BUYERS.pax)
+    await laterPage.goto('/')
+    await expect(laterPage.getByText(NOVA_ORDER, { exact: true })).toBeVisible()
+    await expect(laterPage.getByText(reading.lines[0])).toBeVisible()
+  } finally {
+    await second.close()
   }
 })

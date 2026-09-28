@@ -1,6 +1,7 @@
 import type { BuyerRole } from '@shared/economics'
 import type { LocationSource } from '@shared/location'
 import type { CellBuddy, MatchedMessage, ServerMessage } from '@shared/protocol'
+import type { SauceSelection } from '@shared/sauces'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 export type PoolStage = 'idle' | 'connecting' | 'waiting' | 'matched' | 'settled' | 'disputed'
@@ -23,6 +24,12 @@ export interface JoinRequest {
    * off the session, so this can never rename a real account.
    */
   demoName?: string
+  /**
+   * The two sauces this buyer wants, when they picked a pair. The server checks
+   * them against the catalogue and refuses a pair it does not recognise, so this
+   * is a request rather than a fact.
+   */
+  sauces?: SauceSelection
 }
 
 export interface PoolState {
@@ -170,14 +177,15 @@ export function usePool() {
 
       socket.onopen = () => {
         // Coordinates are omitted unless the buyer opted into precise location:
-        // the socket already carries a server-resolved one.
-        socket.send(
-          JSON.stringify(
-            request.lat !== undefined && request.lng !== undefined
-              ? { type: 'join', dealId: request.dealId, lat: request.lat, lng: request.lng }
-              : { type: 'join', dealId: request.dealId },
-          ),
-        )
+        // the socket already carries a server-resolved one. Sauces are omitted
+        // until a pair is complete — half a choice is not a selection.
+        const payload: Record<string, unknown> = { type: 'join', dealId: request.dealId }
+        if (request.lat !== undefined && request.lng !== undefined) {
+          payload.lat = request.lat
+          payload.lng = request.lng
+        }
+        if (request.sauces !== undefined) payload.sauces = request.sauces
+        socket.send(JSON.stringify(payload))
       }
 
       socket.onmessage = (event) => {

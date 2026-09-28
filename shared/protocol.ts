@@ -2,6 +2,7 @@ import type { BuyerRole, BuyerShare, Settlement } from './economics'
 import type { ExpiryWindows } from './expiry'
 import type { LocationSource } from './location'
 import { normalizePickupCode } from './pickup'
+import { SAUCES_PER_SELECTION, type SauceSelection } from './sauces'
 
 /** Wire protocol version. Bump on any breaking message change. */
 export const PROTOCOL_VERSION = 4
@@ -25,6 +26,15 @@ export interface JoinMessage {
   dealId: string
   lat?: number
   lng?: number
+  /**
+   * The two sauces this buyer wants, so the one placing the order knows what to
+   * ask for. Optional: a buyer who never picked a pair still pairs.
+   *
+   * Only shape-checked here. Whether these ids name sauces on the joined deal's
+   * menu is decided against the catalogue in `worker/pool.ts`, the same division
+   * `dealId` follows — a typo and a malformed frame deserve different answers.
+   */
+  sauces?: readonly [string, string]
 }
 
 export interface CancelMessage {
@@ -120,6 +130,13 @@ export interface MatchedMessage {
   buddy: {
     name: string
     distanceMeters: number
+    /**
+     * Their sauces, validated server-side against the catalogue, as ids for the
+     * client to resolve through `shared/sauces.ts` — never a label echoed off
+     * the wire. Null when they picked none. This is the practical half of the
+     * feature: one of you is about to be standing at the counter.
+     */
+    sauces: SauceSelection | null
   }
   /**
    * The code your buddy has to read off you at the handoff — sent to the
@@ -211,6 +228,7 @@ export type ProtocolErrorCode =
   | 'already_matched'
   | 'not_waiting'
   | 'not_matched'
+  | 'unknown_sauce'
   | 'bad_pickup_code'
   | 'already_confirmed'
   | 'match_disputed'
@@ -257,13 +275,16 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       // is the only one the server will ever show a buddy.
       const { dealId, lat, lng } = msg
       if (typeof dealId !== 'string' || dealId.length === 0 || dealId.length > 64) return null
+      const sauces = parseSauceShape(msg.sauces)
+      if (sauces === undefined) return null
       // No coordinates is the normal case: the server already resolved a location
       // for this socket. Half a pair is neither a location nor a valid message.
-      if (lat === undefined && lng === undefined) return { type: 'join', dealId }
+      if (lat === undefined && lng === undefined)
+        return withSauces({ type: 'join', dealId }, sauces)
       if (typeof lat !== 'number' || typeof lng !== 'number') return null
       if (!Number.isFinite(lat) || lat < -90 || lat > 90) return null
       if (!Number.isFinite(lng) || lng < -180 || lng > 180) return null
-      return { type: 'join', dealId, lat, lng }
+      return withSauces({ type: 'join', dealId, lat, lng }, sauces)
     }
     case 'cancel':
       return { type: 'cancel' }
@@ -281,4 +302,26 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     default:
       return null
   }
+}
+
+/**
+ * Shape-check a `sauces` field: absent, or two strings within a sane bound.
+ *
+ * Three answers rather than two. `null` is "the field was not there", a pair is
+ * "two strings arrived", and `undefined` is "this frame is malformed" — which is
+ * not the same as "those are not real sauces", the question `worker/pool.ts`
+ * asks the catalogue afterwards.
+ */
+function parseSauceShape(raw: unknown): readonly [string, string] | null | undefined {
+  if (raw === undefined || raw === null) return null
+  if (!Array.isArray(raw) || raw.length !== SAUCES_PER_SELECTION) return undefined
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || entry.length === 0 || entry.length > 64) return undefined
+  }
+  return [raw[0], raw[1]]
+}
+
+/** Attach a shape-checked selection, leaving the field off when there was none. */
+function withSauces(message: JoinMessage, sauces: readonly [string, string] | null): JoinMessage {
+  return sauces === null ? message : { ...message, sauces }
 }

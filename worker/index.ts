@@ -210,8 +210,11 @@ app.get('/api/pool/ws', async (c) => {
   const clientKey = deriveClientKey(c.req.header('CF-Connecting-IP')) ?? 'unknown'
 
   // Checked here, before the pool is addressed, so a flood costs a KV read and
-  // no Durable Object time. It runs after the session check so an
-  // unauthenticated flood is turned away without touching the limiter's keys.
+  // no Durable Object time. Outside demo mode, an unauthenticated flood never
+  // reaches this line — the session check above refuses it first. In demo mode
+  // an unauthenticated caller does reach the limiter, which stays safe because
+  // it keys on `clientKey` (from `CF-Connecting-IP`), not on user id: minting a
+  // fresh `demo:<uuid>` per socket does not buy a new bucket.
   const rate = await checkUpgradeRate(c.env, clientKey)
   if (!rate.allowed) {
     c.header('Retry-After', String(rate.retryAfterSeconds))

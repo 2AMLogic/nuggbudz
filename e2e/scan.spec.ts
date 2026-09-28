@@ -299,6 +299,14 @@ const qrOf = (page: Page) => page.getByRole('img', { name: /pickup code/i })
  * synthetic camera is the picture this browser actually rendered — not a second
  * render of the same matrix in the test, which would only have proved the two
  * halves of the test agree with each other.
+ *
+ * **The backing store, deliberately, and it cannot see how big the symbol is
+ * displayed** (#127). No CSS reaches `getImageData`, and this file runs at
+ * Playwright's wide default viewport where nothing is clamped anyway — so a change
+ * that halved the rendered size leaves every assertion below green. That is the
+ * right instrument for the question here, which is what the symbol *says*;
+ * `e2e/qr-scale.spec.ts` owns the other question and screenshots the composited
+ * element on a 320px viewport to answer it. Neither replaces the other.
  */
 async function photograph(page: Page): Promise<GreyscaleImage> {
   return await qrOf(page).evaluate((node) => {

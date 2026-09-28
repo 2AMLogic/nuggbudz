@@ -107,7 +107,57 @@ export function pickupQrMatrix(code: string, origin: string): boolean[][] {
   return rows
 }
 
-/** How many modules wide a rendered symbol is, quiet zone included. */
+/**
+ * How many modules wide a rendered symbol is, **quiet zone included**.
+ *
+ * The distinction is load-bearing and has been got wrong once already (#127):
+ * `matrix.length` is the *data area* — 29 modules for `nuggbudz.com`, 37 for a
+ * `*.workers.dev` name — and this function is that plus the four-module margin on
+ * each side, so 37 and 45. Size a canvas off the data area and the symbol is
+ * eight modules wider than the space reserved for it; that is how a 296 px symbol
+ * came to be described as a 232 px one.
+ */
 export function qrSpanModules(matrix: boolean[][]): number {
   return matrix.length + QR_QUIET_ZONE_MODULES * 2
+}
+
+/**
+ * Pixels per module a receipt draws at when it has the room.
+ *
+ * Generous on purpose: this symbol is read off a screen by a stranger's phone, at
+ * an angle, through a fingerprint, and the error-correction budget is spent on
+ * those conditions rather than on being small.
+ */
+export const QR_MODULE_PIXELS_MAX = 8
+
+/**
+ * The narrowest pitch worth drawing at, rather than letting CSS resample.
+ *
+ * A browser's own downscale is the worse of the two failures: it lands module
+ * edges on fractional pixels, which is the moiré a decoder has to hunt through,
+ * and it is invisible in any test that reads the canvas's backing store. Four
+ * pixels per module is comfortably above what `jsQR` needs, and `qrModulePixels`
+ * should never have to reach for it — the narrowest screen in use is 320 CSS px,
+ * whose receipt column is wider than 45 × 4.
+ */
+export const QR_MODULE_PIXELS_MIN = 4
+
+/**
+ * The widest whole-pixel module pitch whose symbol fits `availablePixels`.
+ *
+ * **`spanModules` is `qrSpanModules`, which includes the quiet zone** — pass the
+ * bare `matrix.length` and this hands back a pitch eight modules too generous.
+ * That is the arithmetic #127 was filed for: at a fixed pitch of 8 the longest
+ * deployed origin needs 45 × 8 = 360 px, which no 320 px phone has, so a single
+ * pitch cannot both fill a desktop column and fit a phone. The pitch has to be
+ * derived from the space that actually exists.
+ *
+ * Whole pixels, because a fractional pitch is a resample under another name. The
+ * result is clamped rather than allowed to collapse, so a container that has not
+ * been measured yet still gets a drawable symbol.
+ */
+export function qrModulePixels(spanModules: number, availablePixels: number): number {
+  if (!Number.isFinite(availablePixels) || spanModules <= 0) return QR_MODULE_PIXELS_MAX
+  const fits = Math.floor(availablePixels / spanModules)
+  return Math.min(QR_MODULE_PIXELS_MAX, Math.max(QR_MODULE_PIXELS_MIN, fits))
 }

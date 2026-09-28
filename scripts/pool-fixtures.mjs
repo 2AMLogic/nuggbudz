@@ -89,6 +89,7 @@ export const MARKETS = {
   saltLakeCity: { lat: 40.7608, lng: -111.891, label: 'Salt Lake City' },
   detroit: { lat: 42.3314, lng: -83.0458, label: 'Detroit' },
   albuquerque: { lat: 35.0844, lng: -106.6504, label: 'Albuquerque' },
+  kansasCity: { lat: 39.0997, lng: -94.5786, label: 'Kansas City' },
 }
 
 /**
@@ -188,6 +189,12 @@ export const FIXTURE_COORDS = {
   // network, which is the one camera-failure branch nothing else covers.
   e2eNoChunkA: { lat: 35.0844, lng: -106.6504 },
   e2eNoChunkB: { lat: 35.084523, lng: -106.649993 },
+  // The narrow-phone QR scale lane (`e2e/qr-scale.spec.ts`). No camera in this
+  // one — it screenshots the orderer's rendered symbol on a 320px viewport — but
+  // it still needs a market of its own, because it pairs two browsers and holds a
+  // live pickup code while it measures.
+  e2eNarrowA: { lat: 39.0997, lng: -94.5786 },
+  e2eNarrowB: { lat: 39.099823, lng: -94.578193 },
 }
 
 // The "Protocol hygiene" socket (BUYERS.bad) deliberately reuses `robb`'s
@@ -364,6 +371,14 @@ export const SCENARIOS = {
       'the handoff link opened in a second tab carries the receiver into the same match — ' +
       'promptlessly, because a second tab has no coordinates of its own to send and the ' +
       'server-resolved shard is the one a real demo pairs in',
+  },
+  e2eNarrowQr: {
+    lane: 'e2e',
+    market: 'kansasCity',
+    fixtures: ['e2eNarrowA', 'e2eNarrowB'],
+    what:
+      'the pickup QR is drawn at whole pixels per module and is never resampled by the ' +
+      'browser, measured off a screenshot of the composited element on a 320px viewport',
   },
   e2eScannerChunkFails: {
     lane: 'e2e',

@@ -3,6 +3,13 @@ import { ACTIVE_DEALS, findDeal, isDealOffered } from '../shared/deals'
 import { demoPairingEnabled, demoUserId, sanitizeDemoName } from '../shared/demo'
 import { analyzeSpread, settle } from '../shared/economics'
 import { geohash } from '../shared/geo'
+import {
+  coordsSupplied,
+  DEMO_ORIGIN,
+  parseCoords,
+  type RawCoords,
+  resolveLocation,
+} from '../shared/location'
 import { PROTOCOL_VERSION } from '../shared/protocol'
 import { clientKey as deriveClientKey } from '../shared/ratelimit'
 import { authRoutes, sessionFromRequest } from './auth'
@@ -62,12 +69,34 @@ app.get('/api/deals/:dealId/quote', (c) => {
 })
 
 /**
+ * The approximate location Cloudflare attached to this request, if any.
+ *
+ * `cf` can be missing entirely, and its `latitude`/`longitude` are strings that
+ * may individually be absent — miniflare caches a real one for local dev, but an
+ * offline one has no coordinates in it. So this hands back raw values for
+ * `resolveLocation` to validate rather than trusting them. Nothing here is more
+ * trustworthy than a query parameter: it is simply cheaper and promptless.
+ */
+function edgeCoords(request: Request): RawCoords | null {
+  const cf: unknown = request.cf
+  if (cf === null || typeof cf !== 'object') return null
+  const { latitude, longitude } = cf as { latitude?: unknown; longitude?: unknown }
+  return { lat: latitude, lng: longitude }
+}
+
+/**
  * Upgrade to the matching socket for the caller's neighbourhood.
  *
  * Two things are decided here and never by the client: who you are, from your
- * session cookie, and which cell you are in, from your coordinates. A caller
- * who could name their own cell would park themselves in someone else's market;
- * a caller who could name themselves would show a stranger any name they liked.
+ * session cookie, and which cell you are in, from a location this Worker
+ * resolves. A caller who could name their own cell would park themselves in
+ * someone else's market; a caller who could name themselves would show a
+ * stranger any name they liked.
+ *
+ * The location has three rungs (see `shared/location.ts`), and the default one
+ * needs no permission prompt at all: coordinates arrive only if the buyer turned
+ * on precise location, otherwise the edge's guess is used, otherwise the demo
+ * origin. So a phone with location denied still pairs.
  */
 app.get('/api/pool/ws', async (c) => {
   const active = await sessionFromRequest(c.env, c.req.raw)
@@ -80,13 +109,13 @@ app.get('/api/pool/ws', async (c) => {
     return c.text('expected a websocket upgrade', 426)
   }
 
-  const lat = Number(c.req.query('lat'))
-  const lng = Number(c.req.query('lng'))
-  if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
-    return c.json({ error: 'lat must be a number in -90..90' }, 400)
-  }
-  if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
-    return c.json({ error: 'lng must be a number in -180..180' }, 400)
+  // Rung 1, and opt-in only. Sending nothing is the normal case, so absence is
+  // not an error — but coordinates that are present and unusable are a client
+  // bug, and answering that by quietly filing the buyer under a different cell
+  // would be a worse answer than saying so.
+  const clientCoords: RawCoords = { lat: c.req.query('lat'), lng: c.req.query('lng') }
+  if (coordsSupplied(clientCoords) && parseCoords(clientCoords) === null) {
+    return c.json({ error: 'lat must be in -90..90 and lng in -180..180' }, 400)
   }
 
   // Cloudflare sets CF-Connecting-IP at the edge and a caller cannot override
@@ -102,10 +131,14 @@ app.get('/api/pool/ws', async (c) => {
     return c.json({ error: 'too many connection attempts, slow down' }, 429)
   }
 
-  const cell = geohash(lat, lng, intVar(c.env.POOL_CELL_PRECISION, 6))
+  // Every rung is range-checked, so `geohash` cannot be reached with an argument
+  // that would make it throw — a RangeError inside an upgrade would reach the
+  // buyer as a socket that just breaks.
+  const fix = resolveLocation(clientCoords, edgeCoords(c.req.raw), DEMO_ORIGIN)
+  const cell = geohash(fix.lat, fix.lng, intVar(c.env.POOL_CELL_PRECISION, 6))
   const stub = c.env.NUGG_POOL.get(c.env.NUGG_POOL.idFromName(cell))
 
-  // `set` replaces any same-named parameter the caller supplied, so these three
+  // `set` replaces any same-named parameter the caller supplied, so these all
   // reach the Durable Object with server-derived values only.
   const url = new URL(c.req.url)
   // Identity is the session when there is one, and a throwaway otherwise. A demo
@@ -121,6 +154,9 @@ app.get('/api/pool/ws', async (c) => {
         }
 
   url.searchParams.set('cell', cell)
+  url.searchParams.set('lat', String(fix.lat))
+  url.searchParams.set('lng', String(fix.lng))
+  url.searchParams.set('locationSource', fix.source)
   url.searchParams.set('userId', identity.userId)
   url.searchParams.set('displayName', identity.displayName)
   return stub.fetch(new Request(url, c.req.raw))

@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
 import { findDeal } from '../shared/deals'
 import { formatCents, settle } from '../shared/economics'
+import { geohash } from '../shared/geo'
+import { DEMO_ORIGIN, describeLocationSource } from '../shared/location'
 
 /**
  * Drives the real UI (`src/App.tsx`) end to end through two browser contexts,
@@ -78,11 +80,35 @@ function seedSessions(): void {
 /**
  * A geohash-6 cell is roughly city-block sized (~1.2km x 0.6km), and these two
  * points sit ~40m apart -- close enough to pair, and nowhere near the demo
- * origin `useCoords.ts` falls back to, so this test's queue never shares a
- * Durable Object instance with the denied-geolocation spec below.
+ * origin `shared/location.ts` falls back to, so this test's queue never shares a
+ * Durable Object instance with the promptless spec below.
  */
 const BUDDY_A = { latitude: 37.79, longitude: -122.4 }
 const BUDDY_B = { latitude: 37.7903, longitude: -122.4003 }
+
+/**
+ * The cell those overridden coordinates must actually route to, computed with
+ * the same encoder the Worker uses rather than pasted in. Asserting this on
+ * screen is what stops the geolocation override from going decorative: the
+ * server has three location rungs (`shared/location.ts`), and only the `client`
+ * rung -- coordinates the page explicitly sent -- can produce this cell. Drop
+ * back to `edge` or `demo` and both contexts land in one shared fallback cell
+ * instead, pair with each other anyway, and every other assertion below still
+ * passes. So the cell is the thing that has to be checked, not the pairing.
+ */
+const OVERRIDE_CELL = geohash(BUDDY_A.latitude, BUDDY_A.longitude)
+const DEMO_CELL = geohash(DEMO_ORIGIN.lat, DEMO_ORIGIN.lng)
+
+// Both buddies have to share a cell to be in one market at all, and that cell
+// has to differ from the fallback for the assertion above to distinguish the
+// rungs. Checked here so moving `DEMO_ORIGIN` (or either fixture point) fails
+// loudly instead of quietly making the cell assertion vacuous.
+if (geohash(BUDDY_B.latitude, BUDDY_B.longitude) !== OVERRIDE_CELL) {
+  throw new Error('fixture buddies must share a cell to pair')
+}
+if (OVERRIDE_CELL === DEMO_CELL) {
+  throw new Error('fixture buddies must not sit in the demo fallback cell')
+}
 
 const deal = findDeal(DEAL_ID)
 if (deal === undefined) throw new Error(`fixture deal missing: ${DEAL_ID}`)
@@ -132,12 +158,41 @@ test('two nearby buds pair, split the box evenly, and see complementary roles', 
     await expect(pageA.getByRole('button', { name: /find a bud/i })).toBeEnabled()
     await expect(pageB.getByRole('button', { name: /find a bud/i })).toBeEnabled()
 
+    // The overridden geolocation above only routes anyone if the page asks the
+    // device for it, and `App.tsx` deliberately never does that on its own --
+    // pairing must not produce a permission prompt. So this suite has to tap the
+    // opt-in control the way a buyer who wants an accurate walk would. Skip it
+    // and both contexts join with no coordinates, the server places both from
+    // its own `edge`/`demo` rung, and they pair in one shared fallback cell
+    // having never used the overrides at all.
+    await pageA.getByRole('button', { name: /use my exact location/i }).click()
+    await pageB.getByRole('button', { name: /use my exact location/i }).click()
+    // The control is replaced by this line once a fix is in hand, so it doubles
+    // as the signal that the browser actually answered.
+    await expect(pageA.getByText(/exact location on/i)).toBeVisible()
+    await expect(pageB.getByText(/exact location on/i)).toBeVisible()
+
     // Nova joins first and waits, so `findMatch`'s fairness rule (the longest
     // waiter orders) makes her the deterministic orderer once Remy joins.
     await pageA.getByRole('button', { name: /find a bud/i }).click()
     await expect(pageA.getByText(/looking for a bud/i)).toBeVisible()
 
+    // Now the part the override is for. The header reports the cell the server
+    // routed this socket to and the rung that produced it, so these two
+    // assertions together say the overridden coordinates -- not a fallback --
+    // decided the market. Either one alone is weaker: the rung could in
+    // principle be right with the wrong coordinates, and the cell is only
+    // unambiguous because the fixture guard above keeps it off the demo cell.
+    const clientBadge = describeLocationSource('client').label
+    // `.first()` only because the badge text is also inside its wrapper's text
+    // content; a miss still fails, since an empty locator is never visible.
+    await expect(pageA.getByText(`cell ${OVERRIDE_CELL}`).first()).toBeVisible()
+    await expect(pageA.getByText(clientBadge).first()).toBeVisible()
+
     await pageB.getByRole('button', { name: /find a bud/i }).click()
+
+    await expect(pageB.getByText(`cell ${OVERRIDE_CELL}`).first()).toBeVisible()
+    await expect(pageB.getByText(clientBadge).first()).toBeVisible()
 
     await expect(pageA.getByText('Matched')).toBeVisible()
     await expect(pageB.getByText('Matched')).toBeVisible()
@@ -179,7 +234,7 @@ test('two nearby buds pair, split the box evenly, and see complementary roles', 
   }
 })
 
-test('leaving the queue does not immediately rejoin, and a denied location falls back to the demo cell', async ({
+test('leaving the queue does not immediately rejoin, and a refused prompt still pairs', async ({
   browser,
 }) => {
   // No `permissions: ['geolocation']` here: the browser denies the prompt on
@@ -193,11 +248,36 @@ test('leaving the queue does not immediately rejoin, and a denied location falls
 
     const findButton = page.getByRole('button', { name: /find a bud/i })
     await expect(findButton).toBeEnabled()
+
+    // Ask for precise location and get refused. Nothing about pairing depends on
+    // this succeeding -- the point is that a refusal leaves the flow intact
+    // rather than dead-ending it, which is only worth asserting if something
+    // actually did the asking.
+    await page.getByRole('button', { name: /use my exact location/i }).click()
+    const refusalNotice = page.getByText(
+      'Location is off. Pairing still works — you are placed by your connection.',
+    )
+    await expect(refusalNotice).toBeVisible()
+
     await findButton.click()
 
-    // Queued, at the demo cell rather than rejected -- a denied fix downgrades
-    // to `DEMO_ORIGIN` (`useCoords.ts`) instead of dead-ending the flow.
+    // Queued anyway. The server placed this socket from its own location --
+    // `edge` when the runtime has a usable `request.cf`, `demo` when it does
+    // not -- so the rung is one of those two and never `client`, because this
+    // page has no coordinates to send. Which cell the `demo` rung lands in is
+    // not asserted here on purpose; that is 2am-nuggbudz#45.
     await expect(page.getByText(/looking for a bud/i)).toBeVisible()
+    await expect(page.getByText(describeLocationSource('client').label)).toHaveCount(0)
+    await expect(
+      page
+        .getByText(
+          new RegExp(
+            `${describeLocationSource('edge').label}|${describeLocationSource('demo').label}`,
+            'i',
+          ),
+        )
+        .first(),
+    ).toBeVisible()
 
     // This was a real bug: leaving must not re-run the join because location
     // and deal state are still set (see the comment on `start` in `App.tsx`).
@@ -206,11 +286,9 @@ test('leaving the queue does not immediately rejoin, and a denied location falls
     await page.waitForTimeout(500)
     await expect(page.getByText(/looking for a bud|standing in line/i)).toHaveCount(0)
 
-    // Back on the idle screen, the notice `coords.locate()` set on the way in
-    // is still visible -- the on-screen record that the demo cell was used.
-    await expect(
-      page.getByText('Location is off. Using the demo cell so you can still pair.'),
-    ).toBeVisible()
+    // Back on the idle screen, the refusal notice is still there -- the on-screen
+    // record that the buyer was placed without a fix of their own.
+    await expect(refusalNotice).toBeVisible()
   } finally {
     await context.close()
   }

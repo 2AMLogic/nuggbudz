@@ -157,8 +157,10 @@ complementary roles, identical settlement, a buddy name that comes from the
 session rather than the wire, a buyer outside the radius left waiting, a
 survivor requeued when their buddy disconnects, and the two-sided pickup
 handshake: only the orderer holds the code, a wrong code settles nothing, and a
-row reaches the ledger only when both sides confirm. Then say the fourth
-bullet: no users, no revenue, no pilot.
+row reaches the ledger only when both sides confirm. Two of those checks are the
+ones that matter on a borrowed phone: a socket that sends no coordinates at all
+still gets a cell and still pairs, because the location comes from the edge.
+Then say the fourth bullet: no users, no revenue, no pilot.
 
 **Anticipated questions**: Is that against production? (The full run is
 against a full local stack — `pnpm dev` plus the real bindings — because the
@@ -181,11 +183,15 @@ runs with demo pairing enabled, so there is no account to create.
 1. **Plan A** — judges' phones on venue wifi. Both join, both pair, read the
    settlement off the screen.
 2. **Plan B** — our two phones on a personal hotspot. Same flow.
-3. **Plan C** — geolocation denied or unavailable: the app falls back to a fixed
-   demo cell and says so on screen (`src/hooks/useCoords.ts`). The pairing is
-   real; only the coordinate is stipulated. Narrate that out loud — a hackathon
-   venue is exactly where GPS dies, and pretending the fix is real is the one
-   thing that would cost the audience's trust.
+3. **Plan C** — geolocation denied or unavailable: nothing to recover from, and
+   nothing to click. There is no permission prompt in the pairing flow at all;
+   the Worker places each socket from Cloudflare's edge geo, and from a fixed
+   demo cell when there is no usable one (`shared/location.ts`). The screen names
+   which of the three rungs placed you, and only the opt-in one is ever called
+   exact. The pairing is real; on the last rung only the coordinate is
+   stipulated. Narrate that out loud — a hackathon venue is exactly where GPS
+   dies, and pretending the fix is real is the one thing that would cost the
+   audience's trust.
 4. **Plan D** — no network at all: read the recorded runs in
    `refs/smoke-runs.md` off this deck. Dated, reproducible, and they assert the
    same settlement the slides quote.

@@ -37,7 +37,13 @@ state.
   and the settlement functions. Reprice a deal and `pnpm test` goes red until
   the slides are corrected — fix the slides, never the ledger.
 - **The server derives the cell, never the client.** Otherwise a caller parks
-  themselves in someone else's market.
+  themselves in someone else's market. It also derives the *coordinates* by
+  default: `shared/location.ts` resolves client-supplied coords (opt-in only) →
+  Cloudflare edge geo (`request.cf`) → a fixed demo origin, so pairing never
+  needs a location prompt. `cf` is untrusted and can be missing or partial —
+  parse it through `parseCoords`, never straight into `geohash()`. Miniflare
+  caches a real `cf` locally, so `pnpm dev` usually gets rung 2; with no usable
+  one (offline, or unit tests) rung 3 keeps the flow alive.
 - **Identity comes from the session, never from a message.** The pool socket is
   authenticated at upgrade time and the display name a buddy sees is read off
   the session in KV. A `name` on the wire is ignored, not trusted.

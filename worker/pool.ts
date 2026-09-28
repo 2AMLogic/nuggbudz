@@ -1691,9 +1691,11 @@ export class NuggPool extends DurableObject<Env> {
     // buyer who stayed has paid for an order that is not being placed, and the one
     // who walked away has paid for nothing at all.
     let retired = record
+    let held: PaymentLeg[] = []
     if (record?.ledger !== undefined) {
       const settled = await this.settleRefunds(state.matchId, record.ledger)
       retired = { ...record, ledger: settled.ledger }
+      held = settled.held
       await this.ctx.storage.put<MatchRecord>(`match:${state.matchId}`, retired)
     }
     // Matched, nobody had confirmed anything, and this is the socket that went
@@ -1717,7 +1719,15 @@ export class NuggPool extends DurableObject<Env> {
         warned: false,
       }
       this.setState(other.ws, requeued)
-      this.send(other.ws, { type: 'buddy_left', matchId: state.matchId })
+      this.send(other.ws, {
+        type: 'buddy_left',
+        matchId: state.matchId,
+        // Almost always zero: the ordinary refund succeeds. Non-zero only when
+        // Stripe refused this survivor's refund — the same rare case the other
+        // three teardown frames already say out loud, see `heldCents` on
+        // `PaymentFailedMessage`/`MatchExpiredMessage`/`PickupDisputedMessage`.
+        heldCents: centsFor(held, other.state.role),
+      })
     }
 
     await this.retireMatch(state.matchId, retired)

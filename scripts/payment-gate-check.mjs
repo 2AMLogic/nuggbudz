@@ -91,6 +91,11 @@ const BUYERS = {
   // refuses to hand the first one's money back.
   wes: { sid: sessionId('pay-wes'), userId: accountId(8), name: 'Wes' },
   zed: { sid: sessionId('pay-zed'), userId: accountId(9), name: 'Zed' },
+  // The abandonment-with-a-refused-refund pair: one half pays, the other walks
+  // away before anybody confirms — same as rex/tam — but this time Stripe
+  // refuses the survivor's refund too, so `buddy_left` has to say so (#86).
+  gia: { sid: sessionId('pay-gia'), userId: accountId(10), name: 'Gia' },
+  hal: { sid: sessionId('pay-hal'), userId: accountId(11), name: 'Hal' },
 }
 
 /** Tell the fake Stripe to refuse refunds (or, with no argument, to stop). */
@@ -531,6 +536,7 @@ if (mode === 'unconfigured') {
   tam.ws.close()
   const left = await rex.expect('buddy_left')
   check('the survivor of an abandoned match is told', left.matchId === mr.matchId)
+  check('and the ordinary refund leaves nothing held', left.heldCents === 0, `${left.heldCents}`)
 
   await new Promise((r) => setTimeout(r, 800))
   if (FAKE_STRIPE !== null) {
@@ -683,6 +689,59 @@ if (mode === 'unconfigured') {
     check('the refund stub is restored', cleared.refunds === 0, JSON.stringify(cleared))
 
     for (const socket of [wes, zed]) socket.ws.close()
+  }
+
+  // --- the survivor of an abandoned match is told when THEIR refund is refused ---
+  //
+  // The rex/tam scenario above proves `buddy_left` carries `heldCents` and that it
+  // is zero in the ordinary case. This is the same teardown — a buddy walks away
+  // before anybody confirms — but Stripe refuses the survivor's refund, which used
+  // to vanish: `buddy_left` carried no money fields at all, so the survivor's held
+  // $4.49 was reported as nothing (#86).
+  if (FAKE_STRIPE !== null) {
+    const gia = open(BUYERS.gia, HERE)
+    const hal = open(BUYERS.hal, NEARBY)
+    await Promise.all([gia.opened, hal.opened])
+    await checkDistinctIdentities(gia, hal)
+    gia.join()
+    await gia.expect('waiting')
+    hal.join()
+    const [mg] = await Promise.all([gia.expect('matched'), hal.expect('matched')])
+    const rg = await gia.expect('payment_required')
+    await hal.expect('payment_required')
+
+    await failRefunds(500)
+
+    // Gia pays; Hal walks away before either confirms. Gia's refund is owed —
+    // and refused.
+    await deliverWebhook(intentOf(rg), 'payment_intent.succeeded', {
+      match_id: mg.matchId,
+      role: mg.role,
+      cell,
+    })
+    hal.ws.close()
+    const goneWithHold = await gia.expect('buddy_left')
+    check(
+      'the survivor is told their money is held, not refunded silently',
+      goneWithHold.matchId === mg.matchId && goneWithHold.heldCents === rg.amountCents,
+      `matchId=${goneWithHold.matchId} heldCents=${goneWithHold.heldCents} vs ${rg.amountCents}`,
+    )
+
+    await new Promise((r) => setTimeout(r, 400))
+    const afterHold = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
+    check(
+      "the survivor's refund really was attempted and really was refused",
+      afterHold.refundAttempts.some(
+        (r) => r.idempotencyKey === `refund:${mg.matchId}:${mg.role}`,
+      ) && afterHold.refunds.every((r) => !r.idempotencyKey.includes(mg.matchId)),
+      `attempts ${JSON.stringify(afterHold.refundAttempts.filter((r) => r.idempotencyKey.includes(mg.matchId)))}`,
+    )
+
+    // Restored, so nothing after this runs against a stub that refuses refunds.
+    const clearedAgain = await failRefunds(0)
+    check('the refund stub is restored', clearedAgain.refunds === 0, JSON.stringify(clearedAgain))
+
+    for (const socket of [gia, hal]) socket.ws.close()
   }
 }
 

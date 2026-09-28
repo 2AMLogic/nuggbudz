@@ -103,10 +103,10 @@ export function RadiusMap({ you, radiusMeters, buddies, centreLabel }: RadiusMap
     // The tell is that the placeholder is a constant image — an empty ocean
     // tile and a dense city tile came back byte-identical at 2049 bytes.
     //
-    // The receipt palette does not depend on the basemap: `.cell-map-tiles`
-    // desaturates whatever is underneath, so this swap is a drop-in. OSM's
-    // standard style does carry labels, which read as faint street context
-    // under that filter.
+    // The console palette does not depend on the basemap: `.cell-map-tiles`
+    // re-tones whatever is underneath onto it (see `src/styles/globals.css`), so
+    // this swap is a drop-in. OSM's standard style does carry labels, and that
+    // filter brings them *up* as pale street context rather than burying them.
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       className: 'cell-map-tiles',

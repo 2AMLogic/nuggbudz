@@ -505,22 +505,23 @@ export class NuggPool extends DurableObject<Env> {
       return
     }
 
-    // The match record is the authority on whether this channel exists. A
-    // settled, disputed or deleted match closes it, so a message arriving after
-    // `pickup_complete`, after a dispute, or after a buddy walked away is refused
-    // here rather than relayed into a conversation that is over. Both this and
-    // the socket-state check above have to hold: the socket is dropped back to
-    // idle at the same moments, and either alone would be a single point of
-    // failure for the one guarantee the feature makes.
-    const record = await this.ctx.storage.get<MatchRecord>(`match:${state.matchId}`)
-    if (record === undefined || record.status !== 'pending') {
-      this.fail(ws, 'not_matched', 'that match is finished, and the chat went with it')
-      return
-    }
-
     const now = Date.now()
-    // Same sliding window the upgrade limiter uses (#10), per connection rather
-    // than per IP, because the thing being limited here is one seat in one match.
+    // Checked before the `ctx.storage.get` below (#79): this is an in-memory
+    // read off the connection's own attachment, so a flood costs nothing but
+    // the attachment write, where the storage read below costs an actual I/O
+    // round trip per refused message. Same sliding window the upgrade limiter
+    // uses (#10), per connection rather than per IP, because the thing being
+    // limited here is one seat in one match.
+    //
+    // Consequence, chosen deliberately rather than left as a side effect: a
+    // flood against a match that has already finished (settled, disputed, or
+    // deleted) now earns `chat_rate_limited` once the window fills, not
+    // `not_matched` — the socket-state check above already answers
+    // `not_matched` for the common "not matched at all" case, and the storage
+    // read a few lines down still answers `not_matched` for the first
+    // messages of a burst, before the window closes. Only a *sustained* flood
+    // against a dead match changes verdict, and `chat_rate_limited` is no
+    // less informative there: it still tells the caller to stop.
     const verdict = slidingWindow(state.chatHits ?? [], now, CHAT_RATE_WINDOW_MS, CHAT_RATE_LIMIT)
     if (!verdict.allowed) {
       this.fail(
@@ -534,6 +535,19 @@ export class NuggPool extends DurableObject<Env> {
     // limited exactly like a flood of valid messages. A rejected *attempt* costs
     // nothing (`slidingWindow` does not record one), so backing off works.
     this.setState(ws, { ...state, chatHits: verdict.hits })
+
+    // The match record is the authority on whether this channel exists. A
+    // settled, disputed or deleted match closes it, so a message arriving after
+    // `pickup_complete`, after a dispute, or after a buddy walked away is refused
+    // here rather than relayed into a conversation that is over. Both this and
+    // the socket-state check above have to hold: the socket is dropped back to
+    // idle at the same moments, and either alone would be a single point of
+    // failure for the one guarantee the feature makes.
+    const record = await this.ctx.storage.get<MatchRecord>(`match:${state.matchId}`)
+    if (record === undefined || record.status !== 'pending') {
+      this.fail(ws, 'not_matched', 'that match is finished, and the chat went with it')
+      return
+    }
 
     const reviewed = reviewChatText(raw)
     if (!reviewed.ok) {

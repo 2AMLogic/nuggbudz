@@ -437,10 +437,17 @@ test('a new match starts with an empty conversation, never the last one', async 
   // make: the transcript is client state, and it has to be emptied rather than
   // merely hidden. A buyer whose bud walks away mid-conversation is requeued on
   // the *same socket* and matched with somebody else -- so if the hook keeps the
-  // old lines, a stranger is shown what the previous stranger typed. Two
-  // independent clears guard this (`buddy_left` and `matched` in
-  // `src/hooks/useCoords.ts`'s neighbour `usePool.ts`); this asserts the outcome,
-  // so it fails if both of them go.
+  // old lines, a stranger is shown what the previous stranger typed.
+  //
+  // Only the `matched` clear (`usePool.ts` line 307) is what this spec pins: the
+  // flow below never inspects the transcript between `buddy_left` and the second
+  // `matched`, since the UI renders no chat surface at all while `stage` is
+  // `waiting` -- there is nothing on screen to assert against yet. Remove the
+  // `buddy_left` clear (line 366) alone and this spec still goes green, because
+  // the following `matched` clear papers over it. That clear is still correct to
+  // keep -- it is what makes the promise true the instant a bud walks, rather
+  // than one message later, should any future screen render a transcript while
+  // `waiting` -- it is just not what this spec proves (#79).
   const contexts = await Promise.all(
     REQUEUE_AT.map((geolocation) =>
       browser.newContext({ geolocation, permissions: ['geolocation'] }),

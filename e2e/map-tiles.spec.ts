@@ -79,6 +79,15 @@ test('the cell map renders real tiles, not a constant placeholder', async ({ bro
     ])
 
     await page.goto('/')
+
+    // The map is gated on `pool.own`, which only exists once the buyer opts into
+    // precise location — pairing itself is deliberately promptless, so granting
+    // Playwright's geolocation permission routes nobody by itself. Without this
+    // tap the waiting screen renders with no map at all and this spec fails on a
+    // missing container rather than on anything to do with tiles.
+    await page.getByRole('button', { name: /use my exact location/i }).click()
+    await expect(page.getByText(/exact location on/i)).toBeVisible()
+
     await page.getByRole('button', { name: /find a bud/i }).click()
 
     // The map only exists on the waiting screen, and only once a location

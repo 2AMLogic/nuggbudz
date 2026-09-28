@@ -123,7 +123,17 @@ export function CellMap({ cell, you, buddies }: CellMapProps) {
         } waiting nearby`}
       />
       <p className="mt-1 text-right font-display text-[0.55rem] tracking-[0.05em] text-faded uppercase">
-        Map data &copy; OpenStreetMap contributors
+        Map data &copy;{' '}
+        {/* OSMF asks that attribution link to the copyright page; that link is
+            the part that is an actual licensing requirement, not decoration. */}
+        <a
+          href="https://www.openstreetmap.org/copyright"
+          target="_blank"
+          rel="noreferrer"
+          className="underline"
+        >
+          OpenStreetMap contributors
+        </a>
       </p>
     </div>
   )

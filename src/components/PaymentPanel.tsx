@@ -121,9 +121,7 @@ export function PaymentPanel({ payment }: { payment: PaymentRequiredMessage }) {
 
   return (
     <div className="printed mt-5" style={{ animationDelay: '760ms' }}>
-      <p className="font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase">
-        Your half — {formatCents(payment.amountCents)}
-      </p>
+      <p className="tag">Your half — {formatCents(payment.amountCents)}</p>
 
       {status === 'submitted' ? (
         <p className="mt-3 font-body text-sm leading-snug">
@@ -137,7 +135,7 @@ export function PaymentPanel({ payment }: { payment: PaymentRequiredMessage }) {
             type="button"
             onClick={pay}
             disabled={status !== 'ready'}
-            className="mt-4 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px disabled:opacity-35"
+            className="btn btn-chrome mt-4"
           >
             {status === 'submitting' ? 'Charging…' : `Pay ${formatCents(payment.amountCents)}`}
           </button>

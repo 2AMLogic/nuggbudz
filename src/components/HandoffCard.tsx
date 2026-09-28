@@ -29,15 +29,16 @@ export function HandoffCard({
 }) {
   return (
     <section aria-live="polite">
-      <p className="font-display text-[0.65rem] tracking-[0.2em] text-faded uppercase">
-        Pickup code
-      </p>
-      <h2 className="mt-1 font-display text-4xl font-bold tracking-[0.3em]">{code}</h2>
+      <p className="tag">Pickup code</p>
+      {/* The code itself stays monospaced and phosphor-green rather than taking
+          the chrome display treatment: it is six characters somebody has to
+          read out loud across a counter, and legibility beats styling. */}
+      <h2 className="mt-1 font-mono text-4xl font-bold tracking-[0.3em] text-phosphor">{code}</h2>
 
       <Perf label={resolving ? 'Checking' : 'Read it out'} />
 
       {resolving ? (
-        <p className="font-body text-base leading-snug text-faded">
+        <p className="font-body text-base leading-snug text-steel">
           Seeing whether this device is the one in the match.
         </p>
       ) : (
@@ -47,11 +48,7 @@ export function HandoffCard({
         </p>
       )}
 
-      <button
-        type="button"
-        onClick={onDismiss}
-        className="mt-7 w-full border-2 border-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px"
-      >
+      <button type="button" onClick={onDismiss} className="btn btn-outline mt-7">
         Back to NuggBudz
       </button>
     </section>

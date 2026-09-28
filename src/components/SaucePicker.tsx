@@ -33,15 +33,13 @@ export function SaucePicker({
               type="button"
               onClick={() => onTap(sauce.id)}
               aria-pressed={count > 0}
-              className={`flex items-baseline justify-between gap-1 border-2 px-3 py-2 text-left transition-colors ${
-                count > 0 ? 'border-ink bg-nugget/20' : 'border-hairline'
-              }`}
+              className="chip flex items-baseline justify-between gap-1"
             >
-              <span className="font-display text-[0.68rem] tracking-[0.08em] uppercase">
+              <span className="font-mono text-[0.68rem] tracking-[0.08em] text-chrome uppercase">
                 {sauce.label}
               </span>
               {count > 1 && (
-                <span className="font-display text-[0.6rem] font-bold text-ketchup tabular-nums">
+                <span className="font-mono text-[0.6rem] font-bold text-ketchup tabular-nums">
                   2x
                 </span>
               )}
@@ -51,14 +49,14 @@ export function SaucePicker({
       </div>
 
       {reading === null ? (
-        <p className="mt-3 font-body text-sm leading-snug text-faded">
+        <p className="mt-3 font-body text-sm leading-snug text-steel">
           Pick two. The same one twice counts — nobody is judging, except the chart.
         </p>
       ) : (
         <>
           <Line label="At the counter" value={reading.counterOrder} />
           <p className="printed mt-2 font-body text-sm leading-snug">{reading.lines[0]}</p>
-          <p className="printed font-body text-sm leading-snug text-faded">{reading.lines[1]}</p>
+          <p className="printed font-body text-sm leading-snug text-steel">{reading.lines[1]}</p>
         </>
       )}
     </section>

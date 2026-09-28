@@ -3,10 +3,16 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
+import { FIXTURE_COORDS } from '../scripts/pool-fixtures.mjs'
 import { findDeal } from '../shared/deals'
 import { formatCents, settle } from '../shared/economics'
-import { geohash } from '../shared/geo'
-import { DEMO_ORIGIN, describeLocationSource } from '../shared/location'
+import {
+  DEFAULT_MATCH_RADIUS_METERS,
+  distanceMeters,
+  formatDistance,
+  formatMiles,
+} from '../shared/geo'
+import { describeLocationSource } from '../shared/location'
 import { describeSauceOrder, findSauce, readSauceHoroscope } from '../shared/sauces'
 
 /**
@@ -126,62 +132,46 @@ function seedSessions(): void {
 }
 
 /**
- * A geohash-6 cell is roughly city-block sized (~1.2km x 0.6km), and these two
- * points sit ~40m apart -- close enough to pair, and nowhere near the demo
- * origin `shared/location.ts` falls back to, so this test's queue never shares a
- * Durable Object instance with the promptless spec below.
- */
-const BUDDY_A = { latitude: 37.79, longitude: -122.4 }
-const BUDDY_B = { latitude: 37.7903, longitude: -122.4003 }
-
-/**
- * The cell those overridden coordinates must actually route to, computed with
- * the same encoder the Worker uses rather than pasted in. Asserting this on
- * screen is what stops the geolocation override from going decorative: the
- * server has three location rungs (`shared/location.ts`), and only the `client`
- * rung -- coordinates the page explicitly sent -- can produce this cell. Drop
- * back to `edge` or `demo` and both contexts land in one shared fallback cell
- * instead, pair with each other anyway, and every other assertion below still
- * passes. So the cell is the thing that has to be checked, not the pairing.
- */
-const OVERRIDE_CELL = geohash(BUDDY_A.latitude, BUDDY_A.longitude)
-const DEMO_CELL = geohash(DEMO_ORIGIN.lat, DEMO_ORIGIN.lng)
-
-/**
- * A second neighbourhood, for the requeue spec below.
+ * Where these browsers say they are standing.
  *
- * Its own cell so that spec's queue never shares a Durable Object instance with
- * the pairing spec above -- `NuggPool` is one instance per cell, and a buyer left
- * queued by one spec would be a candidate for a match in the other.
+ * The coordinates come from `scripts/pool-fixtures.mjs`, the one table every
+ * live-pairing lane in this repo shares, and `test/fixture-separation.test.ts`
+ * is what keeps each scenario's market more than a hundred kilometres from every
+ * other one — including from `DEMO_ORIGIN`, where the promptless spec at the
+ * bottom of this file inevitably lands. Since #82 a market is a *distance* (two
+ * miles) rather than a geohash cell, so isolation cannot be argued from a cell
+ * string any more: it has to be measured, and it is, there rather than here.
  */
-const REQUEUE_AT = [
-  { latitude: 42.3601, longitude: -71.0589 },
-  { latitude: 42.3602, longitude: -71.059 },
-  { latitude: 42.3603, longitude: -71.0591 },
-] as const
-const REQUEUE_CELL = geohash(REQUEUE_AT[0].latitude, REQUEUE_AT[0].longitude)
+const asGeolocation = (id: string) => ({
+  latitude: FIXTURE_COORDS[id].lat,
+  longitude: FIXTURE_COORDS[id].lng,
+})
 
-// Both buddies have to share a cell to be in one market at all, and that cell
-// has to differ from the fallback for the assertion above to distinguish the
-// rungs. Checked here so moving `DEMO_ORIGIN` (or either fixture point) fails
-// loudly instead of quietly making the cell assertion vacuous.
-if (geohash(BUDDY_B.latitude, BUDDY_B.longitude) !== OVERRIDE_CELL) {
-  throw new Error('fixture buddies must share a cell to pair')
-}
-if (OVERRIDE_CELL === DEMO_CELL) {
-  throw new Error('fixture buddies must not sit in the demo fallback cell')
-}
-// All three requeue fixtures must share one cell (or they are not one market) and
-// that cell must be neither of the two above (or the specs can pair across each
-// other). Checked here so nudging a coordinate fails loudly rather than quietly.
-for (const at of REQUEUE_AT) {
-  if (geohash(at.latitude, at.longitude) !== REQUEUE_CELL) {
-    throw new Error('requeue fixtures must share a cell')
-  }
-}
-if (REQUEUE_CELL === OVERRIDE_CELL || REQUEUE_CELL === DEMO_CELL) {
-  throw new Error('the requeue cell must be a neighbourhood of its own')
-}
+const BUDDY_A = asGeolocation('e2eBuddyA')
+const BUDDY_B = asGeolocation('e2eBuddyB')
+
+/**
+ * What the pair's receipts must say the walk is, computed from the fixtures with
+ * the app's own formatter.
+ *
+ * This is the assertion that keeps the geolocation override from going
+ * decorative. `App.tsx` no longer prints the shard — it is not a unit anybody
+ * reads — so the old "cell 9q8yy1 is on screen" check is gone, and a rung badge
+ * alone would be weaker: it says *which* rung answered, not that the coordinates
+ * it produced were these ones. Forty metres does: drop back to `edge` or `demo`
+ * and both contexts land on one identical server-resolved point, where the walk
+ * would be nought.
+ */
+const expectedWalk = formatDistance(
+  distanceMeters(FIXTURE_COORDS.e2eBuddyA, FIXTURE_COORDS.e2eBuddyB),
+)
+
+/** A second market, for the requeue spec below. */
+const REQUEUE_AT = [
+  asGeolocation('e2eOrla'),
+  asGeolocation('e2ePace'),
+  asGeolocation('e2eQuin'),
+] as const
 
 const deal = findDeal(DEAL_ID)
 if (deal === undefined) throw new Error(`fixture deal missing: ${DEAL_ID}`)
@@ -287,22 +277,29 @@ test('two nearby buds pair, split the box evenly, and see complementary roles', 
     await pageA.getByRole('button', { name: /find a bud/i }).click()
     await expect(pageA.getByText(/looking for a bud/i)).toBeVisible()
 
-    // Now the part the override is for. The header reports the cell the server
-    // routed this socket to and the rung that produced it, so these two
-    // assertions together say the overridden coordinates -- not a fallback --
-    // decided the market. Either one alone is weaker: the rung could in
-    // principle be right with the wrong coordinates, and the cell is only
-    // unambiguous because the fixture guard above keeps it off the demo cell.
+    // The market is named as a distance, never as a shard: "within 2 mi", with
+    // the figure coming from the server over the protocol rather than from any
+    // literal in the client.
+    await expect(
+      pageA.getByText(`within ${formatMiles(DEFAULT_MATCH_RADIUS_METERS)}`).first(),
+    ).toBeVisible()
+    await expect(pageA.getByText(/cell/i)).toHaveCount(0)
+
+    // Now the part the override is for. The header names the market in force and
+    // the rung that produced this socket's position, and the map is drawn from
+    // both -- on every rung, which is what #82 changed: this used to appear only
+    // for a buyer who had answered a permission prompt.
     const clientBadge = describeLocationSource('client').label
     // `.first()` only because the badge text is also inside its wrapper's text
     // content; a miss still fails, since an empty locator is never visible.
-    await expect(pageA.getByText(`cell ${OVERRIDE_CELL}`).first()).toBeVisible()
     await expect(pageA.getByText(clientBadge).first()).toBeVisible()
+    await expect(pageA.locator('.leaflet-container')).toBeVisible()
+    await expect(pageA.getByText(describeLocationSource('client').detail)).toBeVisible()
 
     await pageB.getByRole('button', { name: /find a bud/i }).click()
 
-    await expect(pageB.getByText(`cell ${OVERRIDE_CELL}`).first()).toBeVisible()
     await expect(pageB.getByText(clientBadge).first()).toBeVisible()
+    await expect(pageB.locator('.leaflet-container')).toBeVisible()
 
     await expect(pageA.getByText('Matched')).toBeVisible()
     await expect(pageB.getByText('Matched')).toBeVisible()
@@ -312,6 +309,16 @@ test('two nearby buds pair, split the box evenly, and see complementary roles', 
       pageA.getByText(`You order the box. ${BUYERS.remy.name} comes to you.`),
     ).toBeVisible()
     await expect(pageB.getByText(`${BUYERS.nova.name} orders the box. Go meet them.`)).toBeVisible()
+
+    // The walk between them, computed from the fixtures with the app's own
+    // formatter. This is what makes the geolocation override load-bearing: if
+    // either context had fallen back to a server-resolved position, both would
+    // be standing on the same point and this distance would not be on screen.
+    // It is also where the units changed in #82 -- feet and miles, because the
+    // radius on the header is quoted in miles and a buddy card answering in
+    // kilometres would be a second system to translate between.
+    await expect(pageA.getByText(expectedWalk)).toBeVisible()
+    await expect(pageB.getByText(expectedWalk)).toBeVisible()
 
     // Both receipts show the real settlement for this deal, computed by
     // `shared/economics.ts` rather than assumed here.
@@ -441,7 +448,7 @@ test('a new match starts with an empty conversation, never the last one', async 
 
     // Orla waits, so she is the deterministic orderer of both matches below.
     await orla.getByRole('button', { name: /find a bud/i }).click()
-    await expect(orla.getByText(`cell ${REQUEUE_CELL}`).first()).toBeVisible()
+    await expect(orla.getByText(describeLocationSource('client').label).first()).toBeVisible()
     await pace.getByRole('button', { name: /find a bud/i }).click()
     await expect(orla.getByText(`${BUYERS.pace.name} comes to you.`)).toBeVisible()
 
@@ -508,7 +515,7 @@ test('leaving the queue does not immediately rejoin, and a refused prompt still 
     // Queued anyway. The server placed this socket from its own location --
     // `edge` when the runtime has a usable `request.cf`, `demo` when it does
     // not -- so the rung is one of those two and never `client`, because this
-    // page has no coordinates to send. Which cell the `demo` rung lands in is
+    // page has no coordinates to send. Which point the `demo` rung lands on is
     // not asserted here on purpose; that is 2am-nuggbudz#45.
     await expect(page.getByText(/looking for a bud/i)).toBeVisible()
     await expect(page.getByText(describeLocationSource('client').label)).toHaveCount(0)
@@ -522,6 +529,24 @@ test('leaving the queue does not immediately rejoin, and a refused prompt still 
         )
         .first(),
     ).toBeVisible()
+
+    // The map is here too, which is the other half of #82: the server always
+    // knows where it placed a socket, so a buyer who refused the prompt gets the
+    // same picture as one who accepted it -- and a line saying, in as many words,
+    // which rung that centre came from. A buyer on the demo origin is told it is
+    // not their position.
+    await expect(page.locator('.leaflet-container')).toBeVisible({ timeout: 20_000 })
+    await expect(
+      page.getByText(
+        new RegExp(
+          `${describeLocationSource('edge').detail}|${describeLocationSource('demo').detail}`.replace(
+            /[.*+?^${}()|[\]\\]/g,
+            '\\$&',
+          ),
+        ),
+      ),
+    ).toBeVisible()
+    await expect(page.getByText(/cell/i)).toHaveCount(0)
 
     // This was a real bug: leaving must not re-run the join because location
     // and deal state are still set (see the comment on `start` in `App.tsx`).

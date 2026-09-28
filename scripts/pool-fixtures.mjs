@@ -82,6 +82,7 @@ export const MARKETS = {
   nashville: { lat: 36.1627, lng: -86.7816, label: 'Nashville' },
   atlanta: { lat: 33.749, lng: -84.388, label: 'Atlanta' },
   boston: { lat: 42.3601, lng: -71.0589, label: 'Boston' },
+  pittsburgh: { lat: 40.4406, lng: -79.9959, label: 'Pittsburgh' },
   minneapolis: { lat: 44.9778, lng: -93.265, label: 'Minneapolis' },
 }
 
@@ -143,6 +144,10 @@ export const FIXTURE_COORDS = {
   // seen each other however close they stood to the boundary; they must match.
   mia: { lat: 36.1627, lng: -86.7816 },
   theo: { lat: 36.1627, lng: -86.75471 },
+  // The payment-gate lane (`scripts/payment-gate-check.mjs`), which drives the
+  // same dev server as `pnpm smoke` and so needs the same separation.
+  payHere: { lat: 40.4406, lng: -79.9959 },
+  payNearby: { lat: 40.440723, lng: -79.995518 },
   // The browser lane (`e2e/`). Same table, because the separation rule is about
   // which Durable Object a fixture lands in, and both lanes drive the same one.
   e2eBuddyA: { lat: 33.749, lng: -84.388 },
@@ -167,7 +172,8 @@ FIXTURE_COORDS.badRejoin = FIXTURE_COORDS.robb
  * market (the opening pair and the socket that rejoins its market after it
  * empties); everything else gets a metro to itself.
  *
- * @type {Record<string, { lane: 'smoke' | 'e2e', market: string, fixtures: string[], what: string }>}
+ * @type {Record<string, { lane: 'smoke' | 'e2e' | 'payments', market: string,
+ *                          fixtures: string[], what: string }>}
  */
 export const SCENARIOS = {
   openingPair: {
@@ -260,6 +266,12 @@ export const SCENARIOS = {
     fixtures: ['halfOne', 'halfTwo'],
     what: 'a half-confirmed match belongs to the dispute timer, not the expiry sweep',
   },
+  paymentGatePair: {
+    lane: 'payments',
+    market: 'pittsburgh',
+    fixtures: ['payHere', 'payNearby'],
+    what: 'no pickup code is issued until both halves of a match have paid',
+  },
   promptlessPair: {
     lane: 'smoke',
     market: 'serverResolved',
@@ -289,6 +301,12 @@ export const SCENARIOS = {
     market: 'serverResolved',
     fixtures: [],
     what: 'a refused location prompt still pairs, placed by the server',
+  },
+  demoCheckPair: {
+    lane: 'payments',
+    market: 'serverResolved',
+    fixtures: [],
+    what: 'two demo clients with no accounts and no coordinates pair on stage',
   },
 }
 

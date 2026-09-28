@@ -35,10 +35,32 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Pairing is refused outright when this server can neither charge nor be
+      # told not to (worker/env.ts, `ALLOW_UNCHARGED_PAIRING`) -- that fail-closed
+      # behaviour is what the `payment-gate-closed` job below asserts. This lane
+      # is about the pairing protocol rather than the money, so it opts out
+      # explicitly, here, for this step's server only. Never `wrangler.jsonc`.
+      - run: echo 'ALLOW_UNCHARGED_PAIRING="1"' > .dev.vars
       # Live pairing across two WebSocket clients, against the real Worker.
       - run: pnpm dev --port 5199 &
       - run: npx wait-on http://localhost:5199/api/health --timeout 90000
+      # A server that came up in any other mode would make every pickup-code
+      # assertion below mean something different, so assert the mode first.
+      - name: Assert the server came up uncharged
+        run: |
+          health="$(curl -sf http://localhost:5199/api/health)"
+          echo "$health"
+          node -e '
+            const health = JSON.parse(process.argv[1])
+            if (health.payments !== "uncharged") {
+              console.error("expected payments: uncharged, got", health.payments)
+              process.exit(1)
+            }
+          ' "$health"
       - run: pnpm smoke
+      # The uncharged branch of the money gate: an opted-in server pairs and
+      # releases the code at match time, and nobody is asked to pay.
+      - run: BASE=http://localhost:5199 pnpm payment-gate
 
   e2e:
     runs-on: ubuntu-latest
@@ -53,6 +75,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: npx playwright install --with-deps chromium
+      # Same reasoning as the `smoke` job: this suite is about the screen, not the
+      # money, so it opts out of charging explicitly rather than relying on the
+      # absence of secrets -- which now refuses to pair at all.
+      - run: echo 'ALLOW_UNCHARGED_PAIRING="1"' > .dev.vars
       # Drives the real UI in two browser contexts; playwright.config.ts's
       # webServer boots `pnpm dev` itself, so there is no separate wait-on step.
       - run: pnpm test:e2e
@@ -78,7 +104,21 @@ jobs:
       # `wrangler.jsonc`, not a tracked `.dev.vars`, not a workflow- or
       # job-level `env:` a sibling job could inherit. `.dev.vars` is what
       # actually reaches `c.env` for `pnpm dev`; a bare shell env var does not.
-      - run: echo 'ALLOW_DEMO_PAIRING="1"' > .dev.vars
+      # Stripe is deliberately "configured" for this job, with a secret that is
+      # not a secret and an API base that nothing is listening on. That is the
+      # enforcement test for issue #3: a demo pair must never reach the payment
+      # processor, so if `paymentDisposition` ever stopped answering `demo`
+      # first, `createPaymentIntent` would try 127.0.0.1:9 (discard), fail, and
+      # take the match down -- turning every assertion below red. Proving the
+      # exclusion by breaking it is the only way to know the check is on the
+      # path rather than merely present (cf. `isDealOffered`, `isDemoUserId`).
+      - run: |
+          {
+            echo 'ALLOW_DEMO_PAIRING="1"'
+            echo 'STRIPE_SECRET_KEY="sk_test_not_a_real_key"'
+            echo 'STRIPE_WEBHOOK_SECRET="whsec_not_a_real_secret"'
+            echo 'STRIPE_API_BASE="http://127.0.0.1:9/v1"'
+          } > .dev.vars
       # Distinct port from `smoke` (5199) and `e2e` (playwright.config.ts,
       # which also defaults to 5199) so a stale/foreign server from a sibling
       # job's `reuseExistingServer`-style adoption can never be mistaken for
@@ -104,3 +144,85 @@ jobs:
       # to the D1 ledger (issue #68) — a defect that shipped once and was only
       # caught in review.
       - run: BASE=http://localhost:5211 pnpm demo-check
+
+  # The money gate, from the side that matters: no secrets, no opt-in. An
+  # unconfigured pool must refuse to pair rather than hand two strangers a
+  # working pickup code for a box nobody paid for. Its own job, on its own
+  # runner, because the mode is a property of the whole server.
+  payment-gate-closed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Deliberately no `.dev.vars` at all: this is the shape a deploy that lost
+      # a `wrangler secret put` has.
+      - run: pnpm dev --port 5248 &
+      - run: npx wait-on http://localhost:5248/api/health --timeout 90000
+      - name: Assert the server came up unconfigured
+        run: |
+          health="$(curl -sf http://localhost:5248/api/health)"
+          echo "$health"
+          node -e '
+            const health = JSON.parse(process.argv[1])
+            if (health.payments !== "unconfigured") {
+              console.error("expected payments: unconfigured, got", health.payments)
+              process.exit(1)
+            }
+          ' "$health"
+      - run: BASE=http://localhost:5248 pnpm payment-gate
+
+  # The charged path, end to end through the real Durable Object: two
+  # PaymentIntents, a signed webhook per half, a pickup code released only after
+  # the second one, and a D1 row only after the handshake. `scripts/fake-stripe.mjs`
+  # answers the three REST calls so this needs no Stripe account -- `pnpm test`
+  # cannot reach the Durable Object, and a payment gate exercised only as a pure
+  # function is a payment gate nobody has exercised.
+  payment-gate-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The fake Stripe is NOT started here. A backgrounded `&` step does not
+      # reliably outlive the step that started it -- this job watched it print its
+      # banner and then die before the next step ran -- so `payment-gate` hosts it
+      # in its own process via `FAKE_STRIPE_SERVE` below. Nothing calls Stripe
+      # until a match is struck, which cannot happen before that script runs.
+      - run: |
+          {
+            echo 'STRIPE_SECRET_KEY="sk_test_fake"'
+            echo 'STRIPE_WEBHOOK_SECRET="whsec_fake_for_ci_only"'
+            echo 'STRIPE_API_BASE="http://127.0.0.1:5312/v1"'
+          } > .dev.vars
+      - run: pnpm dev --port 5249 &
+      - run: npx wait-on http://localhost:5249/api/health --timeout 90000
+      - name: Assert the server came up live
+        run: |
+          health="$(curl -sf http://localhost:5249/api/health)"
+          echo "$health"
+          node -e '
+            const health = JSON.parse(process.argv[1])
+            if (health.payments !== "live") {
+              console.error("expected payments: live, got", health.payments)
+              process.exit(1)
+            }
+          ' "$health"
+      - run: |
+          BASE=http://localhost:5249 \
+          FAKE_STRIPE=http://localhost:5312 \
+          FAKE_STRIPE_SERVE=5312 \
+          STRIPE_WEBHOOK_SECRET=whsec_fake_for_ci_only \
+          pnpm payment-gate

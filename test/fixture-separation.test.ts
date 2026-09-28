@@ -92,7 +92,7 @@ describe('the fixture table', () => {
       expect(marketNames, `${scenario} names unknown market '${spec.market}'`).toContain(
         spec.market,
       )
-      expect(['smoke', 'e2e'], `${scenario}.lane`).toContain(spec.lane)
+      expect(['smoke', 'e2e', 'payments'], `${scenario}.lane`).toContain(spec.lane)
       expect(spec.what.length, `${scenario}.what should say what it proves`).toBeGreaterThan(20)
       for (const id of spec.fixtures) {
         const coord = FIXTURE_COORDS[id]

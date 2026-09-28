@@ -1,7 +1,13 @@
 import { isChatErrorCode, MAX_CHAT_HISTORY } from '@shared/chat'
-import type { BuyerRole } from '@shared/economics'
+import { type BuyerRole, formatCents } from '@shared/economics'
 import type { LocationSource } from '@shared/location'
-import type { CellBuddy, ChatRelayMessage, MatchedMessage, ServerMessage } from '@shared/protocol'
+import type {
+  CellBuddy,
+  ChatRelayMessage,
+  MatchedMessage,
+  PaymentRequiredMessage,
+  ServerMessage,
+} from '@shared/protocol'
 import type { SauceSelection } from '@shared/sauces'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -71,6 +77,12 @@ export interface PoolState {
   /** Everyone else waiting within your radius, snapped to a coarse grid server-side. */
   buddies: CellBuddy[]
   match: MatchedMessage | null
+  /**
+   * The charge for your half, once the server has opened it with Stripe. Null
+   * both before there is anything to pay and after both halves have cleared — the
+   * pickup code arriving on `payment_cleared` is what retires it.
+   */
+  payment: PaymentRequiredMessage | null
   error: string | null
   /**
    * Why the last line you tried to say was refused, shown under the chat input.
@@ -109,6 +121,7 @@ const INITIAL: PoolState = {
   radiusMeters: null,
   buddies: [],
   match: null,
+  payment: null,
   error: null,
   chatError: null,
   notice: null,
@@ -128,6 +141,17 @@ function humanWindow(ms: number): string {
   if (seconds < 90) return `${seconds} second${seconds === 1 ? '' : 's'}`
   const mins = Math.round(seconds / 60)
   return `${mins} minute${mins === 1 ? '' : 's'}`
+}
+
+/**
+ * What to append to a teardown notice when money was collected and not returned.
+ *
+ * A refund the processor refused is not a refund, and the screen must not imply
+ * one. Empty in the ordinary case, so the common path reads exactly as before.
+ */
+function heldSuffix(heldCents: number): string {
+  if (heldCents <= 0) return ''
+  return ` ${formatCents(heldCents)} could not be refunded automatically and is being held — flagged for a human.`
 }
 
 function socketUrl({ lat, lng, demoName }: JoinRequest): string {
@@ -258,6 +282,7 @@ export function usePool() {
                 ...prev,
                 stage: 'matched',
                 match: message,
+                payment: null,
                 notice: null,
                 confirmed: [],
                 waitingOn: null,
@@ -265,6 +290,38 @@ export function usePool() {
                 // over from the last one, here or on the server.
                 chat: [],
                 // Nor does a refusal earned in the last one.
+                chatError: null,
+              }
+            case 'payment_required':
+              return { ...prev, payment: message, error: null }
+            case 'payment_cleared':
+              // The code lands on the match rather than in a field of its own, so
+              // every screen keeps reading one place for it — and for the receiver
+              // it is still null, exactly as it was on `matched`.
+              return {
+                ...prev,
+                payment: null,
+                match:
+                  prev.match === null ? null : { ...prev.match, pickupCode: message.pickupCode },
+              }
+            case 'payment_failed':
+              return {
+                ...prev,
+                // Requeued only if it was your bud who failed; if it was you, the
+                // server took you off the queue and you have to ask again.
+                stage: message.whose === 'you' ? 'idle' : 'waiting',
+                match: null,
+                payment: null,
+                confirmed: [],
+                waitingOn: null,
+                notice:
+                  message.whose === 'you'
+                    ? `Your payment did not go through, so that match is off.${heldSuffix(message.heldCents)}`
+                    : `Your bud's payment failed${
+                        message.refunded ? ` — ${formatCents(message.refundedCents)} refunded` : ''
+                      }. Back in the queue.${heldSuffix(message.heldCents)}`,
+                // A dead match takes its conversation with it.
+                chat: [],
                 chatError: null,
               }
             case 'chat_message': {
@@ -287,6 +344,7 @@ export function usePool() {
                 ...prev,
                 stage: 'waiting',
                 match: null,
+                payment: null,
                 notice: 'Your bud dropped out. Back in the queue.',
                 // Their half of the conversation left with them.
                 chat: [],
@@ -320,10 +378,19 @@ export function usePool() {
                 waitingOn: null,
                 chat: [],
                 chatError: null,
-                notice:
+                notice: `${
                   message.reason === 'buddy_left'
-                    ? 'Your bud left before confirming. This split is flagged for review.'
-                    : 'Only one of you confirmed in time. This split is flagged for review.',
+                    ? 'Your bud left before confirming.'
+                    : 'Only one of you confirmed in time.'
+                } This split is flagged for review${
+                  // A dispute holds the money on purpose — see README's "A
+                  // disputed split holds the money". Saying "flagged for review"
+                  // without saying that leaves a buyer who paid assuming a
+                  // refund is on its way.
+                  message.heldCents > 0
+                    ? `, and ${formatCents(message.heldCents)} is held until someone looks at it`
+                    : ''
+                }.`,
               }
             case 'queue_expiring':
               return {
@@ -345,13 +412,22 @@ export function usePool() {
                 ...prev,
                 stage: 'idle',
                 match: null,
+                payment: null,
                 // Never confirmed by either side, so there is no half-done
                 // handshake to keep on screen — that is the disputed stage.
                 confirmed: [],
                 waitingOn: null,
                 chat: [],
                 chatError: null,
-                notice: 'That match went unconfirmed and was called off. Nothing was charged.',
+                // Says what happened to the money rather than assuming: with
+                // payments live, a match called off after both halves cleared has
+                // real cents to give back.
+                notice:
+                  message.refundedCents > 0
+                    ? `That match went unconfirmed and was called off. ${formatCents(message.refundedCents)} refunded.${heldSuffix(message.heldCents)}`
+                    : `That match went unconfirmed and was called off.${
+                        message.heldCents > 0 ? '' : ' Nothing was charged.'
+                      }${heldSuffix(message.heldCents)}`,
               }
             case 'error':
               // Two surfaces, one socket: the code decides which one hears about

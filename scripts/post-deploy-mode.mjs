@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Prints which pairing mode the just-deployed Worker is actually running in.
+ * Prints which pairing and payment modes the just-deployed Worker is actually in.
  *
  * `pnpm run deploy` (strict) and `pnpm run deploy:demo` (`--var
  * ALLOW_DEMO_PAIRING:1`) both end in `wrangler deploy`, and until #74 neither
@@ -44,6 +44,43 @@ async function main() {
 
   console.log(`\nPost-deploy mode (${HEALTH_URL}): demoPairing=${health.demoPairing}`)
   console.log(banner)
+
+  // Same reasoning as the banner above, applied to the money: a missing Stripe
+  // secret does not break loudly, it just makes every pairing attempt refuse, so
+  // the deploy has to say so rather than leaving it to be discovered. Read back
+  // off the deployed Worker for the same reason — a local `.dev.vars` or a
+  // `wrangler secret put` that went to the wrong environment would both look
+  // fine from here otherwise.
+  console.log(
+    `Payments: ${health.payments} (Stripe API base: ${health.stripeApiBase ?? 'unknown'})`,
+  )
+  // `live` says the secrets are bound, not that the charges go to Stripe. The
+  // test lanes point STRIPE_API_BASE at a local fake; production must not.
+  if (health.stripeApiBase === 'custom') {
+    console.error(
+      'STRIPE_API_BASE IS OVERRIDDEN on a deployment — charges are being sent somewhere that is not Stripe. That var is meant for the local payment-gate check only. Clear it in the Cloudflare dashboard and redeploy.',
+    )
+    process.exitCode = 1
+  }
+  switch (health.payments) {
+    case 'live':
+      console.log('PAYMENTS ARE LIVE — both halves of a match are charged, $0.99 retained.')
+      break
+    case 'uncharged':
+      console.error(
+        'PAYMENTS ARE OFF BY REQUEST — ALLOW_UNCHARGED_PAIRING is set on a deployment. Pairs are not charged. This var is meant for local dev and CI only.',
+      )
+      process.exitCode = 1
+      break
+    default:
+      console.error(
+        'PAYMENTS ARE UNCONFIGURED — STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET are missing, so this deployment REFUSES TO PAIR (it does not pair for free). Fix with:',
+      )
+      console.error('  wrangler secret put STRIPE_SECRET_KEY')
+      console.error('  wrangler secret put STRIPE_WEBHOOK_SECRET')
+      process.exitCode = 1
+      break
+  }
 }
 
 await main()

@@ -17,6 +17,8 @@
     "cf-typegen": "wrangler types",
     "smoke": "node scripts/smoke.mjs",
     "demo-check": "node scripts/demo-pairing-check.mjs",
+    "payment-gate": "node scripts/payment-gate-check.mjs",
+    "fake-stripe": "node scripts/fake-stripe.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {

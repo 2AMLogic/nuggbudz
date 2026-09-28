@@ -62,7 +62,7 @@ console.log(`server reports demoPairing=${health.demoPairing} (protocol ${health
 /**
  * Open a demo socket the way a phone now does: a name, and no coordinates.
  *
- * Nothing is sent about where the caller is, so the Worker resolves the cell
+ * Nothing is sent about where the caller is, so the Worker resolves the position
  * itself — from `request.cf` on a deployed server, from the demo origin locally.
  * Two clients behind the same connection therefore land in the same market,
  * which is the whole point on a stage where nobody should see a location prompt.
@@ -123,9 +123,12 @@ if (!demo) {
 
   const welcome = await a.expect('welcome')
   check(
-    'demo socket is welcomed',
-    typeof welcome.cell === 'string' && welcome.cell.length === 6,
-    welcome.cell,
+    'demo socket is welcomed, placed, and told the radius it is matching in',
+    typeof welcome.cell === 'string' &&
+      welcome.cell.length > 0 &&
+      Number.isFinite(welcome.position?.lat) &&
+      welcome.radiusMeters > 0,
+    `${welcome.cell} ${JSON.stringify(welcome.position)} ${welcome.radiusMeters}m`,
   )
   check(
     'welcome carries a demo identity',
@@ -133,7 +136,7 @@ if (!demo) {
     JSON.stringify(welcome.user),
   )
   check(
-    'the cell came from the server, with no coordinates and no prompt',
+    'the position came from the server, with no coordinates and no prompt',
     welcome.locationSource === 'edge' || welcome.locationSource === 'demo',
     `${welcome.locationSource} — 'edge' from request.cf, 'demo' when there is none to read`,
   )
@@ -160,6 +163,31 @@ if (!demo) {
   )
   check('settlement still splits to $4.49', ma.share.payCents === 449 && mb.share.payCents === 449)
   check('each saves $2.50', ma.share.savingsCents === 250)
+
+  // --- a demo pair is never charged ---
+  // The ledger already refuses to book a demo split (below). This is the other
+  // half of the same rule, and the half that costs real money if it breaks: a
+  // throwaway `demo:` identity must never reach Stripe at all, not even on a
+  // fully configured production deploy. `paymentDisposition` answers `demo`
+  // before it looks at the secrets, so the tell is that the pickup code is
+  // released at match time and nobody is asked to pay.
+  //
+  // The CI job that runs this points `STRIPE_API_BASE` at an address nothing is
+  // listening on, so a demo pair that *did* try to charge would abort the match
+  // rather than quietly succeed — which is what makes these two assertions
+  // enforcement rather than decoration.
+  await new Promise((resolve) => setTimeout(resolve, 800))
+  check(
+    'a demo pair is never asked to pay',
+    [a, b].every((s) => s.inbox.every((m) => m.type !== 'payment_required')),
+    JSON.stringify([a, b].map((s) => s.inbox.map((m) => m.type))),
+  )
+  check(
+    'a demo pair gets its pickup code at match time, because no money is in play',
+    typeof ma.pickupCode === 'string' && ma.pickupCode.length === 6,
+    `${ma.pickupCode}`,
+  )
+  check('and the receiver still never gets it', mb.pickupCode === null, `${mb.pickupCode}`)
 
   // --- a demo handoff completes on screen, and books nothing ---
   // The demo is still worth running on a stage: the pair must get all the way to

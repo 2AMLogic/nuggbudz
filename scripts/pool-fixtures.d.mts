@@ -14,7 +14,7 @@ export interface Market extends LatLng {
   label: string
 }
 
-export type FixtureLane = 'smoke' | 'e2e'
+export type FixtureLane = 'smoke' | 'e2e' | 'payments'
 
 export interface Scenario {
   lane: FixtureLane

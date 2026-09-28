@@ -116,6 +116,7 @@ export function App() {
       <Shell radiusMeters={pool.radiusMeters} source={pool.locationSource}>
         <SettlementReceipt
           match={pool.match}
+          payment={pool.payment}
           yourSauces={sauces.selection}
           confirmed={pool.confirmed}
           waitingOn={pool.waitingOn}

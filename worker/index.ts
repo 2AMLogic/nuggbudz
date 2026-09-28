@@ -13,7 +13,10 @@ import {
 import { PROTOCOL_VERSION } from '../shared/protocol'
 import { clientKey as deriveClientKey } from '../shared/ratelimit'
 import { authRoutes, sessionFromRequest } from './auth'
-import { type Env, intVar } from './env'
+import { boolVar, type Env, intVar, stripeConfigured } from './env'
+import { type PaymentOutcomeRequest, serverPaymentMode } from './lib/payments'
+import { parsePaymentEvent, verifyStripeSignature } from './lib/stripe'
+import { INTERNAL_PAYMENT_PATH } from './pool'
 import { checkUpgradeRate } from './ratelimit'
 import { sauceRoutes } from './sauces'
 
@@ -29,6 +32,31 @@ app.get('/api/health', (c) =>
     // The client reads this to offer a name field instead of a sign-in button
     // that cannot work, and to say on screen that it is pairing without accounts.
     demoPairing: demoPairingEnabled(c.env.ALLOW_DEMO_PAIRING),
+    /**
+     * Whether this server can charge for a match, and therefore whether it will
+     * make one at all. Stated out loud so an operator can check a deploy with a
+     * single curl — `unconfigured` on a public URL means pairing is refused, not
+     * that it is quietly free — and so `scripts/payment-gate-check.mjs` can
+     * assert which side of the gate it is talking to before trusting anything it
+     * observes.
+     */
+    payments: serverPaymentMode({
+      stripeConfigured: stripeConfigured(c.env),
+      unchargedAllowed: boolVar(c.env.ALLOW_UNCHARGED_PAIRING),
+    }),
+    /**
+     * Whether the Stripe calls go to Stripe. `payments: "live"` says both secrets
+     * are bound; it says nothing about *where* the charges are sent, and
+     * `STRIPE_API_BASE` exists precisely to send them somewhere else. Repointing
+     * it takes deploy-equivalent credentials, so this is observability rather
+     * than a gate — but #74's whole premise is that a deploy-time var that fails
+     * silently is a var nobody notices, and this was the one var the readback
+     * could not see. `post-deploy-mode.mjs` exits non-zero on "custom".
+     */
+    stripeApiBase:
+      c.env.STRIPE_API_BASE === undefined || c.env.STRIPE_API_BASE.length === 0
+        ? 'default'
+        : 'custom',
   }),
 )
 
@@ -200,6 +228,64 @@ app.get('/api/stats', async (c) => {
     totalSavedCents: row?.total_saved_cents ?? 0,
     feesCollectedCents: row?.fees_collected_cents ?? 0,
   })
+})
+
+/**
+ * Stripe's view of whether the money moved.
+ *
+ * Payment results cannot come back over the buyer's socket — a client that says
+ * "I paid" is a client that says whatever it likes — so they arrive here, signed.
+ * This route is stateless, but the match lives in exactly one NuggPool instance,
+ * so the event is routed by the `cell` the PaymentIntent was tagged with at
+ * creation. Registered ahead of the /api/* catch-all, which would otherwise 404
+ * it.
+ */
+app.post('/api/stripe/webhook', async (c) => {
+  if (!stripeConfigured(c.env)) return c.json({ error: 'payments are not configured' }, 503)
+
+  // Verified against the exact bytes Stripe signed, so this must not be
+  // re-serialised from a parsed body.
+  const raw = await c.req.text()
+  const verified = await verifyStripeSignature(
+    raw,
+    c.req.header('Stripe-Signature') ?? null,
+    c.env.STRIPE_WEBHOOK_SECRET,
+  )
+  if (!verified.ok) return c.json({ error: verified.reason }, 400)
+
+  const event = parsePaymentEvent(verified.payload)
+  // An event type this app does not act on is still a delivery Stripe should stop
+  // retrying.
+  if (event === null) return c.json({ ok: true, handled: false })
+
+  const { match_id: matchId, role, cell } = event.metadata
+  if (
+    typeof matchId !== 'string' ||
+    matchId.length === 0 ||
+    typeof cell !== 'string' ||
+    cell.length === 0 ||
+    (role !== 'orderer' && role !== 'receiver')
+  ) {
+    return c.json({ ok: true, handled: false, reason: 'missing routing metadata' })
+  }
+
+  const outcome: PaymentOutcomeRequest = {
+    matchId,
+    role,
+    paymentIntentId: event.paymentIntentId,
+    outcome: event.type === 'payment_intent.succeeded' ? 'succeeded' : 'failed',
+  }
+
+  const stub = c.env.NUGG_POOL.get(c.env.NUGG_POOL.idFromName(cell))
+  const response = await stub.fetch(
+    new Request(`https://nugg-pool.internal${INTERNAL_PAYMENT_PATH}`, {
+      method: 'POST',
+      body: JSON.stringify(outcome),
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  )
+  if (!response.ok) return c.json({ error: 'pool rejected the payment event' }, 500)
+  return c.json({ ok: true, handled: true })
 })
 
 app.all('/api/*', (c) => c.json({ error: 'not found' }, 404))

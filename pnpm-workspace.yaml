@@ -1,0 +1,17 @@
+# Repository-level pnpm settings. This project has no workspace, so this file
+# is purely pnpm's settings home (pnpm >= 10.16 reads settings from here).
+#
+# Two default pnpm security policies break a fresh `pnpm install
+# --frozen-lockfile` of this repo while protecting nothing here:
+#
+# - minimumReleaseAge: the lockfile IS the audit (CI installs frozen against
+#   it), so rejecting packages on registry publish age only breaks clones
+#   after any single package is republished — see #50
+#   (ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION).
+# - allowBuilds: esbuild and workerd run postinstall builds that the lockfile
+#   already pins; without this list pnpm skips them and exits
+#   ERR_PNPM_IGNORED_BUILDS, taking wrangler and vitest down with it.
+allowBuilds:
+  esbuild: true
+  workerd: true
+minimumReleaseAge: 0

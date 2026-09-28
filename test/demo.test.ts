@@ -97,6 +97,26 @@ describe('sanitizeDemoName', () => {
     expect(Array.from(result)).toHaveLength(40)
   })
 
+  it('caps on grapheme boundaries, keeping a combining mark attached', () => {
+    // 'e' + combining acute accent (U+0301) is two code points but one
+    // grapheme cluster — capping by code point would strand a bare accent at
+    // the 40-character boundary; capping by grapheme keeps the pair whole.
+    const base = 'x'.repeat(39)
+    const combining = `e${String.fromCharCode(0x0301)}`
+    expect(sanitizeDemoName(`${base}${combining}Extra`)).toBe(`${base}${combining}`)
+  })
+
+  it('trims after capping rather than leaving a trailing space', () => {
+    // The 40th grapheme is the space in ' Walters'; trimming after the cap is
+    // what keeps this from ending on one.
+    expect(sanitizeDemoName(`${'x'.repeat(39)} Walters`)).toBe('x'.repeat(39))
+  })
+
+  it('strips a lone surrogate, not just a full surrogate pair', () => {
+    const loneHighSurrogate = String.fromCharCode(0xd800)
+    expect(sanitizeDemoName(`Robb${loneHighSurrogate}Walters`)).toBe('RobbWalters')
+  })
+
   it('preserves whitespace-before-control ordering (regression guard)', () => {
     // A newline must separate words, never glue them — this ordering was
     // explicitly verified in #24 and must not regress while adding the new

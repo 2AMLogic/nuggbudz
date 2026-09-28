@@ -4,6 +4,7 @@ import type { ExpiryWindows } from './expiry'
 import type { LatLng } from './geo'
 import type { LocationSource } from './location'
 import { normalizePickupCode } from './pickup'
+import type { StandingBand } from './reputation'
 import { SAUCES_PER_SELECTION, type SauceSelection } from './sauces'
 
 /** Every message `type` this wire carries, in either direction. */
@@ -317,6 +318,16 @@ export interface MatchedMessage {
      * feature: one of you is about to be standing at the counter.
      */
     sauces: SauceSelection | null
+    /**
+     * How this buddy's past handoffs have gone, as a band and never as counts.
+     *
+     * Derived on the server from `user_reputation` and sent as one of three
+     * values, so there is nothing here a buyer could be shamed with and nothing
+     * a client could compute a miss rate from. The client resolves it through
+     * `describeStanding` rather than printing it, the same division `sauces`
+     * follows.
+     */
+    standing: StandingBand
   }
   /**
    * The code your buddy has to read off you at the handoff — sent to the

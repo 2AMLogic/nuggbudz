@@ -4,6 +4,7 @@ import { formatCents } from '@shared/economics'
 import { formatDistance } from '@shared/geo'
 import { PICKUP_CODE_LENGTH } from '@shared/pickup'
 import type { MatchedMessage, PaymentRequiredMessage } from '@shared/protocol'
+import { describeStanding } from '@shared/reputation'
 import { describeSauceSelection, type SauceSelection } from '@shared/sauces'
 import { useState } from 'react'
 import type { ChatLine } from '../hooks/usePool'
@@ -76,6 +77,11 @@ export function SettlementReceipt({
   const yourOrder = describeSauceSelection(yourSauces)
   const buddyOrder = describeSauceSelection(buddy.sauces)
 
+  // A band becomes words in exactly one place, and that place is not here. There
+  // is no count to print even if this screen wanted one: the wire carries the
+  // band alone.
+  const standing = describeStanding(buddy.standing)
+
   const instruction =
     role === 'orderer'
       ? `You order the box. ${buddy.name} comes to you.`
@@ -99,7 +105,13 @@ export function SettlementReceipt({
         className="printed font-display text-[0.7rem] tracking-[0.12em] text-faded uppercase"
         style={{ animationDelay: '140ms' }}
       >
-        {formatDistance(buddy.distanceMeters)}
+        {formatDistance(buddy.distanceMeters)} · {standing.label}
+      </p>
+      <p
+        className="printed mt-1 font-body text-xs leading-snug text-faded"
+        style={{ animationDelay: '170ms' }}
+      >
+        {standing.detail}
       </p>
 
       <Perf label={deal?.merchant ?? 'Order'} />

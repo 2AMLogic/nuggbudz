@@ -69,6 +69,13 @@
     // two timers can never both be running on the same match.
     "QUEUE_IDLE_SECONDS": "900",
     "QUEUE_WARN_LEAD_SECONDS": "120",
-    "MATCH_CONFIRM_SECONDS": "600"
+    "MATCH_CONFIRM_SECONDS": "600",
+    // Standing is a tiebreak, not a queue order: a buyer who joined within this
+    // many seconds of the longest waiter counts as being at the front with them,
+    // and only then does a better standing go first. Measured from the longest
+    // waiter's own join time, so the set of buyers who can be served ahead of
+    // them is fixed when they sit down — which is what keeps the queue
+    // starvation-free however busy the cell gets (#8).
+    "STANDING_TIEBREAK_SECONDS": "45"
   }
 }

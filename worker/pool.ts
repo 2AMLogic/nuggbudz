@@ -41,6 +41,7 @@ import {
   type ServerMessage,
 } from '../shared/protocol'
 import { slidingWindow } from '../shared/ratelimit'
+import { STANDING_TIEBREAK_WINDOW_MS, type StandingBand } from '../shared/reputation'
 import { parseSauceSelection, type SauceSelection } from '../shared/sauces'
 import { boolVar, type Env, intVar, stripeConfigured } from './env'
 import { writeDisputedMatch, writeSettledMatch } from './ledger'
@@ -65,6 +66,7 @@ import {
   retireLedger,
 } from './lib/payments'
 import { createPaymentIntent, refundPaymentIntent, type StripeClientConfig } from './lib/stripe'
+import { type ReputationUpdate, readStandings, recordReputation } from './reputation'
 
 /**
  * Where the Worker forwards a signature-verified Stripe event. Not a route a
@@ -257,6 +259,12 @@ export class NuggPool extends DurableObject<Env> {
 
   private get pickupTimeoutMs(): number {
     return intVar(this.env.PICKUP_CONFIRM_TIMEOUT_MS, DEFAULT_PICKUP_TIMEOUT_MS)
+  }
+
+  /** How far behind the longest waiter standing is still allowed to decide. */
+  private get standingTiebreakMs(): number {
+    const fallbackSeconds = Math.round(STANDING_TIEBREAK_WINDOW_MS / 1_000)
+    return intVar(this.env.STANDING_TIEBREAK_SECONDS, fallbackSeconds) * 1_000
   }
 
   /** Liveness policy for this cell, read fresh so a var change takes effect. */
@@ -654,6 +662,9 @@ export class NuggPool extends DurableObject<Env> {
    * nobody claimed anything, so there is nothing for a human to look at.
    */
   private async cancelMatch(matchId: string): Promise<void> {
+    // Read before the delete below, and before the sockets are dropped back to
+    // idle: the match record is the only thing that still knows who these two
+    // were.
     const record = await this.ctx.storage.get<MatchRecord>(`match:${matchId}`)
     // Whatever was collected for a box nobody turned up for goes back. This is
     // the field `match_expired.refundedCents` was reserved for: a cancellation
@@ -668,6 +679,16 @@ export class NuggPool extends DurableObject<Env> {
       refunded = settled.refunded
       held = settled.held
       await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, retired)
+    }
+    // Only the orderer is charged with the cancellation, and the asymmetry is
+    // deliberate. The orderer can confirm a handoff on their own — they hold the
+    // code and only have to tap — so an orderer who was standing there with the
+    // box would have confirmed, and their silence is evidence. The receiver has
+    // to read the code off them, so a receiver who turned up to nobody *cannot*
+    // confirm; counting that against them would punish them for the other
+    // buddy's no-show.
+    if (record !== undefined) {
+      await this.recordStanding([{ userId: record.orderer.userId, event: 'late_cancel' }])
     }
 
     for (const peer of this.matchSockets(matchId)) {
@@ -764,10 +785,20 @@ export class NuggPool extends DurableObject<Env> {
     }
     // A second tab is not a second buyer: never pair an account with itself.
     const others = this.waitingStates().filter((o) => o.state.userId !== identity.userId)
+    // Read fresh, for the joiner and everyone they might pair with, rather than
+    // cached in the queue entry: a buyer who completed a split two minutes ago
+    // should be matched on the standing they have now, and a hibernation
+    // attachment written before that would say otherwise. One query, not one per
+    // waiting buyer — see `readStandings`.
+    const standings = await this.standingsFor([
+      identity.userId,
+      ...others.map((o) => o.state.userId),
+    ])
     const decision = findMatch(
-      toCandidate(identity),
-      others.map((o) => toCandidate(o.state)),
+      toCandidate(identity, standings),
+      others.map((o) => toCandidate(o.state, standings)),
       this.radiusMeters,
+      this.standingTiebreakMs,
     )
 
     if (decision === null) {
@@ -844,6 +875,9 @@ export class NuggPool extends DurableObject<Env> {
         name: buddyIdentity.name,
         distanceMeters: decision.distanceMeters,
         sauces: buddyIdentity.sauces,
+        // The band each buddy is told about the other, off the same read the
+        // pairing decision used, so the screen and the rule cannot disagree.
+        standing: standings.get(buddyIdentity.userId) ?? 'new',
       },
       pickupCode: codeFor(selfRole),
     })
@@ -857,6 +891,7 @@ export class NuggPool extends DurableObject<Env> {
         name: selfIdentity.name,
         distanceMeters: decision.distanceMeters,
         sauces: selfIdentity.sauces,
+        standing: standings.get(selfIdentity.userId) ?? 'new',
       },
       pickupCode: codeFor(buddyRole),
     })
@@ -1339,6 +1374,12 @@ export class NuggPool extends DurableObject<Env> {
 
     const durable = await this.persistTerminal(record)
 
+    // Both of them turned up, which is the only thing that raises a completion.
+    await this.recordStanding([
+      { userId: record.orderer.userId, event: 'completed' },
+      { userId: record.receiver.userId, event: 'completed' },
+    ])
+
     for (const peer of this.matchSockets(record.matchId)) {
       this.send(peer.ws, { type: 'pickup_complete', matchId: record.matchId, settledAt: at })
       // Free to queue for the next box.
@@ -1389,6 +1430,15 @@ export class NuggPool extends DurableObject<Env> {
     // Before either buddy is told, so a dispute is never visible on a screen
     // while being invisible to the human who has to resolve it.
     const durable = await this.persistTerminal(record)
+
+    // One side said the handoff happened and the other never answered. The
+    // silent side is the no-show — this is the one place the protocol has
+    // evidence about *which* buddy did not turn up, because the other one
+    // confirmed. A dispute with nobody confirmed does not reach here at all.
+    const missing = pendingRole(record.confirmations)
+    if (missing !== null) {
+      await this.recordStanding([{ userId: record[missing].userId, event: 'no_show' }])
+    }
 
     const confirmedBy = confirmedRole(record.confirmations)
     const heldFor = (role: BuyerRole) =>
@@ -1512,6 +1562,11 @@ export class NuggPool extends DurableObject<Env> {
       retired = { ...record, ledger: settled.ledger }
       await this.ctx.storage.put<MatchRecord>(`match:${state.matchId}`, retired)
     }
+    // Matched, nobody had confirmed anything, and this is the socket that went
+    // away: a cancellation after a match, charged to whoever walked. Unlike the
+    // expiry path above there is no guessing here — the connection that closed
+    // is the one being counted.
+    await this.recordStanding([{ userId: state.userId, event: 'late_cancel' }])
 
     for (const other of this.states()) {
       if (other.ws === ws) continue
@@ -1610,6 +1665,38 @@ export class NuggPool extends DurableObject<Env> {
       if (collectedCents(tombstone.ledger) > 0) continue
       if (now - tombstone.retiredAt < TOMBSTONE_RETENTION_MS) continue
       await this.ctx.storage.delete(key)
+    }
+  }
+
+  /**
+   * The standing bands for a set of buyers, or nothing at all.
+   *
+   * A reputation outage leaves the map empty, which makes every candidate rank as
+   * unrated and drops matching back to pure first-come-first-served — exactly
+   * what it did before standing existed. Failing that way round matters: nobody
+   * should be unable to buy nuggets because a courtesy read timed out.
+   */
+  private async standingsFor(userIds: readonly string[]): Promise<Map<string, StandingBand>> {
+    try {
+      return await readStandings(this.env.DB, userIds)
+    } catch (error) {
+      console.error('standing read failed', error)
+      return new Map()
+    }
+  }
+
+  /**
+   * Book what a match said about its buyers.
+   *
+   * Swallowed the way the ledger write is, and for a stronger reason: a split that
+   * settled is money, while a counter is a courtesy. Nothing about the handshake,
+   * the receipt or the queue depends on this landing.
+   */
+  private async recordStanding(updates: readonly ReputationUpdate[]): Promise<void> {
+    try {
+      await recordReputation(this.env.DB, updates)
+    } catch (error) {
+      console.error('reputation write failed', error)
     }
   }
 
@@ -1774,12 +1861,20 @@ function buyerOf(identity: BuyerIdentity): MatchBuyer {
   return { connId, userId, name }
 }
 
-function toCandidate(identity: BuyerIdentity): Candidate {
+function toCandidate(
+  identity: BuyerIdentity,
+  standings: ReadonlyMap<string, StandingBand>,
+): Candidate {
+  const standing = standings.get(identity.userId)
   return {
     id: identity.connId,
     dealId: identity.dealId,
     lat: identity.lat,
     lng: identity.lng,
     joinedAt: identity.joinedAt,
+    // Left off rather than defaulted when the read said nothing: absent ranks
+    // with `new` in `findMatch`, and a buyer with no history is not the same
+    // claim as a read that failed.
+    ...(standing === undefined ? {} : { standing }),
   }
 }

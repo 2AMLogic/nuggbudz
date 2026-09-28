@@ -6,7 +6,6 @@ import {
   type DeckFile,
   formatLedger,
   renderPerPieceCsv,
-  smokeFact,
 } from '../scripts/deck-ledger'
 import smokeSource from '../scripts/smoke.mjs?raw'
 
@@ -53,7 +52,7 @@ function latestDeck(): { path: string; dir: string; text: string } {
 }
 
 const deck = latestDeck()
-const ledger = [...buildLedger(), smokeFact(smokeSource)]
+const ledger = buildLedger()
 
 /**
  * Live prose around the deck: the briefs, the refs, and the current version's
@@ -99,11 +98,13 @@ describe('pitch deck figures', () => {
     expect(committed[0][1]).toBe(renderPerPieceCsv())
   })
 
-  it('counts the smoke assertions it credits itself with', () => {
-    // Not pinned to a literal count here on purpose: the deck is where the
-    // number is written down, so adding a smoke assertion fails the deck check
-    // rather than this one.
+  it('claims the smoke suite passes without pinning its size', () => {
+    // The deck deliberately does not print a check count: an exact `N/N` on a
+    // slide had to be hand-edited by every PR touching scripts/smoke.mjs, and
+    // concurrent branches bumping it to the same wrong number merged clean but
+    // red (#46). Whether the checks pass is `pnpm smoke`'s job, not the deck's.
     expect(countSmokeChecks(smokeSource)).toBeGreaterThan(0)
-    expect(deck.text).toContain(smokeFact(smokeSource).literal)
+    expect(deck.text).toMatch(/every\*{0,2} end-to-end check passes/i)
+    expect(deck.text).not.toMatch(/\b\d+\/\d+\*{0,2} end-to-end checks?/i)
   })
 })

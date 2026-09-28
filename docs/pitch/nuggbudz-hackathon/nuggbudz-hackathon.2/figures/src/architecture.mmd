@@ -1,25 +1,30 @@
-%% Cell names and the distance between phones A and B are computed with the
-%% repo's own geohash()/distanceMeters() from shared/geo.ts, not invented:
-%%   37.7955,-122.3937 -> 9q8znb   37.7969,-122.3921 -> 9q8znb (210 m apart)
-%%   37.7749,-122.4194 -> 9q8yyk   (3.2 km away, a different market)
+%% Shard names and distances are computed with the repo's own
+%% geohash()/distanceMeters() from shared/geo.ts, not invented. This figure
+%% reflects the configuration landing in #82/#89 (POOL_CELL_PRECISION 3,
+%% MATCH_RADIUS_METERS 3219 -- two miles), which replaces the geohash cell
+%% with a coarse shard and makes the radius the only thing that decides who
+%% can pair:
+%%   37.7955,-122.3937 -> shard 9q8   37.7969,-122.3921 -> shard 9q8 (210 m apart)
+%%   37.8080,-122.4177 -> shard 9q8 (2.5 km from A -- inside the 2-mile radius)
+%%   37.8280,-122.4450 -> shard 9q8 (5.8 km from A -- same shard, outside the
+%%     2-mile radius, so this buyer stays queued alone)
 %% Rendered by mmdc with -c .anvil/anvil/lib/figures/mermaid-theme.json, which
-%% is where the anvil-accent / anvil-muted node classes come from.
+%% is where the anvil-accent / anvil-muted / anvil-warning node classes come
+%% from.
 flowchart LR
     A["Phone A<br/>37.7955, -122.3937"]:::client -->|"wss /api/pool/ws"| W
     B["Phone B<br/>210 m from A"]:::client -->|"wss"| W
-    C["Phone C<br/>3.2 km away"]:::client -->|"wss"| W
+    C["Phone C<br/>2.5 km from A<br/>inside the 2-mi radius"]:::client -->|"wss"| W
+    PD["Phone D<br/>5.8 km from A<br/>same shard, outside the radius"]:::anvil-warning -->|"wss"| W
 
-    W["Cloudflare Worker (Hono)<br/>resolves cell + identity<br/>before the upgrade"]:::anvil-muted
+    W["Cloudflare Worker (Hono)<br/>resolves shard + identity<br/>before the upgrade"]:::anvil-muted
 
-    W -->|"idFromName('9q8znb')"| P1
-    W -->|"idFromName('9q8yyk')"| P2
+    W -->|"idFromName('9q8')"| P1
 
-    subgraph cells["One Durable Object per geohash cell = one matching market"]
-        P1["NuggPool 9q8znb<br/>A + B pair here<br/>one event at a time"]:::anvil-accent
-        P2["NuggPool 9q8yyk<br/>C waits in its own market"]:::anvil-accent
+    subgraph shard["One Durable Object per shard (precision-3 geohash, ~156 km) -- the shard is not the matching market"]
+        P1["NuggPool 9q8<br/>A + B + C: within 2 mi of each other, pair here<br/>D: 5.8 km away, stays queued alone<br/>one event at a time"]:::anvil-accent
     end
 
-    P1 -->|"settled split"| D[("D1 ledger")]
-    P2 --> D
+    P1 -->|"settled split"| LEDGER[("D1 ledger")]
 
     classDef client fill:#ffffff,stroke:#6b6b6b,stroke-width:2px,color:#1a1a1a

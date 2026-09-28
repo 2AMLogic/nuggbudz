@@ -53,9 +53,11 @@ baseline is an 8-piece, so per nugget the solo buyer does worst.)
 ## 4. Why now
 
 **Talk track**: Three things had to be true at once. Chains moved value into the
-bulk box. Stateful edge compute went per-object cheap, so a street corner can
-have its own matching market instead of a regional service. And phones carry
-location and payment, so a pairing settles before the food is cold.
+bulk box. Stateful edge compute went per-object cheap, so a whole metro's live
+matching fits in one addressable actor instead of a regional service with a
+queue — a 2-mile radius, not the actor's own boundary, is what decides who can
+pair inside it. And phones carry location and payment, so a pairing settles
+before the food is cold.
 
 **Anticipated questions**: Why not five years ago? (Per-object stateful compute
 with WebSocket hibernation is recent; without it, the idle cost of one actor per
@@ -66,21 +68,22 @@ neighbourhood is the whole business.)
 ## 5. The protocol
 
 **Talk track**: Sign in, pick a deal, share location once, join the pool for
-your cell — a geohash precision-6 box, about 1.2 km × 0.6 km. When another buyer
-in the same cell wants the same box, both phones pair live. The longest waiter
-orders, the other walks over, and both see the same settlement and a pickup
-code.
+your **shard** — a coarse geohash box sized so a 2-mile radius always sits
+inside it. When another buyer within that 2-mile radius wants the same box,
+both phones pair live. The longest waiter orders, the other walks over, and
+both see the same settlement and a pickup code.
 
-**Anticipated questions**: What stops someone claiming a cell they are not in?
-(The Worker derives the cell from the coordinates server-side; the client never
-names it.) Can I pretend to be someone else? (No — the display name your buddy
-sees is read off the session, not off the join message.) What if my buddy
-disappears? (The survivor is requeued at the back, and the smoke run asserts
-it.)
+**Anticipated questions**: What stops someone claiming a market they are not
+in? (The Worker derives both the shard and the radius from the coordinates
+server-side; the client never names either.) Can I pretend to be someone else?
+(No — the display name your buddy sees is read off the session, not off the
+join message.) What if my buddy disappears? (The survivor is requeued at the
+back, and the smoke run asserts it.)
 
-**Backing data**: `worker/index.ts` (cell + identity resolved before the
-upgrade), `worker/pool.ts` (`Principal` from the session), `shared/matchmaker.ts`
-(first-come-first-served), `shared/geo.ts` (precision-6 cell size).
+**Backing data**: `worker/index.ts` (shard + identity resolved before the
+upgrade), `worker/pool.ts` (`Principal` from the session, `radiusMeters` for
+match eligibility), `shared/matchmaker.ts` (first-come-first-served),
+`wrangler.jsonc` (`POOL_CELL_PRECISION`, `MATCH_RADIUS_METERS`).
 
 ## 6. Everyone else assumes you already know the other person
 
@@ -127,27 +130,35 @@ catalogue row and not a literal at a call site.)
 **Backing data**: `analyzeSpread()` per deal; ledger keys `*.spread`,
 `mcd-nuggets-20.spread.pct`.
 
-## 9. One Durable Object per geohash cell
+## 9. One Durable Object per shard — a 2-mile radius decides who pairs
 
-**Talk track**: The cell *is* the matching market, so the object's name is the
-geohash and routing is a hash rather than a query. Durable Objects process one
-event at a time, which is what makes two buyers being paired to the same third
-party impossible — there is no lock, transaction or compare-and-swap in
+**Talk track**: The object's name is a coarse geohash — a **shard**, not the
+market — chosen so a 2-mile radius always sits inside one rather than being
+clipped by it; routing is still a hash rather than a query. The **radius** is
+the matching market: it alone decides who can pair, enforced inside the shard
+rather than by the shard's own boundary. Durable Objects process one event at a
+time, which is what makes two buyers being paired to the same third party
+impossible — there is no lock, transaction or compare-and-swap in
 `worker/pool.ts`, and none is needed. Per-connection state lives in the socket's
-hibernation attachment, so an idle cell evicts between rushes without losing the
-queue.
+hibernation attachment, so an idle shard evicts between rushes without losing
+the queue.
 
-**Anticipated questions**: What about buyers near a cell boundary? (Today they
-are in different markets — an honest limitation; neighbour-cell fan-out is the
-obvious next step.) Does a hot cell become a bottleneck? (One cell is one street
-corner's worth of traffic; the sharding is the geography.) What happens on
+**Anticipated questions**: What about buyers near a shard boundary? (The shard
+is coarse enough — precision-3 geohash, roughly 156 km — that a 2-mile radius
+fits fully inside it almost everywhere; the radius, not the shard, is what
+decides pairing regardless.) Does a hot shard become a bottleneck? (One shard
+can be a whole metro's worth of traffic in one single-threaded object; the
+precision stays a var, so coarsening trades contention for correctness and is
+the first knob to turn if contention ever becomes real.) What happens on
 eviction mid-queue? (State is in the attachment, so it survives.) Where does
 identity come from? (The Worker resolves the session before the upgrade and
 passes the principal down; a `name` on the wire is ignored.)
 
-**Backing data**: `worker/pool.ts`, `worker/index.ts`, `CLAUDE.md`
-§Architecture. The cell names in the figure are computed with the repo's own
-`geohash()` — see the comment block in `figures/src/architecture.mmd`.
+**Backing data**: `worker/pool.ts` (`radiusMeters`), `worker/index.ts`,
+`wrangler.jsonc` (`POOL_CELL_PRECISION`, `MATCH_RADIUS_METERS`), `CLAUDE.md`
+§Architecture. The shard names and distances in the figure are computed with
+the repo's own `geohash()` / `distanceMeters()` — see the comment block in
+`figures/src/architecture.mmd`.
 
 ## 10. Deployed, and verified end to end
 

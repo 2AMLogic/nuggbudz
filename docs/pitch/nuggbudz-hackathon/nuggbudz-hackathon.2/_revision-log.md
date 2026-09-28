@@ -54,6 +54,20 @@ The economics are untouched: `shared/deals.ts` and `shared/economics.ts` did not
 change in that merge, so every money figure in the deck is the same one the
 ledger derived at `.1`.
 
+## Out-of-band correction: the cell became a shard, the radius became the market (#88)
+
+Issue #82 (PR #89) changed `POOL_CELL_PRECISION` 6 → 3 and `MATCH_RADIUS_METERS`
+800 → 3219 (two miles): the geohash cell is now a coarse shard sized to hold a
+whole metro, and the 2-mile radius — not the shard's own boundary — is the only
+thing that decides who can pair. The architecture figure's central claim, "the
+cell is the matching market," and the same claim repeated in the protocol slide,
+the "why now" slide and their speaker notes, and in `nuggbudz-hackathon/BRIEF.md`,
+were the one thing that had stopped being true. Corrected everywhere it appeared
+in the live deck; the Durable Object's "one event at a time, so double-pairing
+cannot happen" point — unaffected by the unit change — was kept. `test/deck.test.ts`
+does not catch this class of drift: it derives money, not prose, so the guard
+stayed green through the whole time the claim was wrong.
+
 ## Gaps carried forward
 
 - No `deck-vision` pass (vision dims v1–v6 unscored). The design critic reviewed

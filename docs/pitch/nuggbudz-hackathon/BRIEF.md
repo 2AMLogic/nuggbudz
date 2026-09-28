@@ -74,19 +74,22 @@ Three specific changes, all recent and all necessary:
    to arbitrage at all.
 2. **Stateful edge compute became per-object cheap.** Cloudflare Durable Objects
    give one addressable, single-threaded, WebSocket-terminating actor per
-   neighbourhood at zero idle cost. Matching a street corner used to mean
-   running a regional matchmaking service; it is now one object with a name.
+   metro-sized shard at zero idle cost, with a live radius search inside it
+   deciding who can actually pair. Matching a neighbourhood used to mean
+   running a regional matchmaking service with a queue; it is now one object
+   with a name.
 3. **Phones carry both halves of the transaction** — precise location and
    instant payment — so a pairing can settle before the food is cold.
 
 ## Solution
 
 A pairing protocol, not a food app. Sign in, pick a deal, share your location
-once, and you join the pool for your **cell** — a geohash precision-6 box, roughly
-1.2 km × 0.6 km. The moment another buyer in the same cell wants the same box,
-both phones are paired over a live socket: the buyer who waited longest is the
-orderer and places the order, the other walks over. Both see the identical
-itemised settlement to the cent, and a pickup code.
+once, and the server places you in a pool **shard** — a coarse geohash box sized
+so a **2-mile match radius** always sits inside it. The moment another buyer
+within that radius wants the same box, both phones are paired over a live
+socket: the buyer who waited longest is the orderer and places the order, the
+other walks over. Both see the identical itemised settlement to the cent, and a
+pickup code.
 
 The settlement is the product: $7.99 box plus a $0.99 pairing fee is $8.98
 collected, each buyer pays $4.49 and saves $2.50 against the $6.99 they would
@@ -101,9 +104,9 @@ have spent alone, the platform clears $0.99.
 | Splitting with friends | Works perfectly | Requires a friend, in the same place, hungry now |
 
 The gap is strangers. Nobody matches two people who do not know each other by
-physical cell in real time, because until edge actors got cheap the
-infrastructure was the hard part, and because most consumer apps treat
-"introduce two strangers over money" as a support problem rather than a feature.
+real-time proximity, because until edge actors got cheap the infrastructure was
+the hard part, and because most consumer apps treat "introduce two strangers
+over money" as a support problem rather than a feature.
 
 ## Product
 
@@ -112,21 +115,23 @@ Shipped and deployed: <https://nuggbudz.com>
 React 19 SPA served by a Cloudflare Worker (Hono), with Google sign-in
 (Authorization Code + PKCE) terminating in the Worker. `GET /api/deals` returns the
 catalogue with the settlement and spread computed per deal;
-`GET /api/pool/ws` upgrades to the matching socket for the caller's cell. Live
-matching runs in a Durable Object, `NuggPool`, **one instance per geohash cell**.
-D1 is provisioned as the ledger of settled splits.
+`GET /api/pool/ws` upgrades to the matching socket for the caller's shard. Live
+matching runs in a Durable Object, `NuggPool`, **one instance per geohash
+shard**, with a 2-mile radius — not the shard boundary — as the actual matching
+market inside it. D1 is provisioned as the ledger of settled splits.
 
 Architecture claims attested for the deck (all verifiable in the repo):
 
-- The cell is derived from coordinates **server-side** in `worker/index.ts`, not
-  accepted from the client, so a caller cannot park in someone else's market.
+- The shard and the 2-mile match radius are both derived from coordinates
+  **server-side** in `worker/index.ts`, not accepted from the client, so a
+  caller cannot claim a market they are not standing in.
 - Identity is resolved from the session before the socket upgrade, so the name a
   buddy sees cannot be set by a client message (`worker/pool.ts`, `Principal`).
 - Durable Objects process one event at a time, so two buyers cannot be paired to
   the same third party — there is no lock, transaction or compare-and-swap in
   `worker/pool.ts`, and none is needed.
 - Per-connection state lives in the WebSocket hibernation attachment
-  (`serializeAttachment`), not in instance fields, so an idle cell can be
+  (`serializeAttachment`), not in instance fields, so an idle shard can be
   evicted between the lunch and dinner rushes without losing the queue.
 - Matching is first-come-first-served on the waiting side
   (`shared/matchmaker.ts`), which makes the queue starvation-free and makes the

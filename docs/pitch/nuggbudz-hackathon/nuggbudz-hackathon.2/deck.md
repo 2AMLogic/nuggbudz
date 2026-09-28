@@ -44,21 +44,21 @@ _$0.40 a nugget in the 20pc against $0.70 solo — a 1.75× premium for buying s
 ## Why now
 
 - **Chains moved value into bulk bundles** — the cheap unit price is only on the box one person will not finish
-- **Stateful edge compute went per-object cheap** — a street corner can now have its own matching market
+- **Stateful edge compute went per-object cheap** — a whole metro's live matching now fits in one addressable actor with no idle cost
 - **Phones carry location and payment** — a pairing can settle before the food is cold
 
-<!-- speaker: The middle bullet is the one that changed for builders. Matching a neighbourhood used to mean a regional service with a queue; a Durable Object is one addressable actor with a name and no idle cost. -->
+<!-- speaker: The middle bullet is the one that changed for builders. Matching a neighbourhood used to mean a regional service with a queue; a Durable Object is one addressable actor with a name and no idle cost — and a live radius search inside it, not the actor's own boundary, is what decides who can pair. -->
 
 ---
 
 ## The protocol
 
 1. Sign in, pick a deal, share your location **once**
-2. You join the pool for your **cell** — a geohash precision-6 box, about 1.2 km × 0.6 km
-3. Another buyer in the same cell wants the same box → both phones are paired live
+2. The server places you in a pool **shard** — sized so your whole matching radius sits inside it
+3. Another buyer within **2 miles** wants the same box → both phones are paired live
 4. Longest waiter orders, the other walks over; both see the same settlement and a pickup code
 
-<!-- speaker: Note step 2: the cell is derived server-side from the coordinates, never accepted from the client, so nobody can park themselves in someone else's market. The name your buddy sees is read off the session, not off the join message, so a connection cannot rename itself. Step 4 is first-come-first-served on the waiting side, which is what makes the queue starvation-free. -->
+<!-- speaker: Note step 2: the server derives both the shard and the 2-mile radius from the coordinates, never accepted from the client, so nobody can claim a market they are not standing in. The name your buddy sees is read off the session, not off the join message, so a connection cannot rename itself. Step 4 is first-come-first-served on the waiting side, which is what makes the queue starvation-free. -->
 
 ---
 
@@ -72,7 +72,7 @@ _$0.40 a nugget in the 20pc against $0.70 solo — a 1.75× premium for buying s
 
 _Liquidity is cross-merchant and cross-cell — the one shape a single chain's app is worst at._
 
-<!-- speaker: Nobody matches strangers by physical cell in real time. Not because it is a bad idea, but because introducing two strangers over money reads like a support problem until the settlement is exact to the cent and neither party has to negotiate. And the chain that could copy it would only ever pool its own buyers in its own app — half the liquidity, by construction. -->
+<!-- speaker: Nobody matches strangers by real-time proximity. Not because it is a bad idea, but because introducing two strangers over money reads like a support problem until the settlement is exact to the cent and neither party has to negotiate. And the chain that could copy it would only ever pool its own buyers in its own app — half the liquidity, by construction. -->
 
 ---
 
@@ -106,13 +106,13 @@ _Gross retail spread per pairing — $5.99 is 43% of the $13.98 two solo buyers 
 
 ---
 
-## One Durable Object per geohash cell
+## One Durable Object per shard — a 2-mile radius decides who pairs
 
-![Browser to Worker to one Durable Object per cell, with D1 as the ledger](figures/architecture.png)
+![Browser to Worker to one Durable Object per shard, with D1 as the ledger](figures/architecture.png)
 
-_The cell **is** the matching market. One event at a time, so double-pairing cannot happen._
+_The **shard** holds a 2-mile radius; the **radius** is the matching market. One event at a time, so double-pairing cannot happen._
 
-<!-- speaker: Three things make this the right shape. The cell is the market, so the object's name is the geohash and routing is a hash rather than a query. Durable Objects process one event at a time, so two buyers cannot be paired to the same third party — there is no lock, transaction or compare-and-swap in pool.ts and none is needed. And per-connection state lives in the socket's hibernation attachment, so an idle cell evicts between rushes without losing the queue. The Worker resolves both the cell and the buyer's identity before the upgrade, so neither is anything the client can claim. This is also the bridge from the money slides: the spread is only worth anything if the second buyer is found while both are still hungry. -->
+<!-- speaker: Three things make this the right shape. The object's name is a coarse geohash — a shard, not the market — chosen so a 2-mile radius always sits inside one rather than being clipped by it; the radius alone decides who can pair. Durable Objects process one event at a time, so two buyers cannot be paired to the same third party — there is no lock, transaction or compare-and-swap in pool.ts and none is needed. And per-connection state lives in the socket's hibernation attachment, so an idle shard evicts between rushes without losing the queue. The Worker resolves both the shard and the buyer's identity before the upgrade, so neither is anything the client can claim. This is also the bridge from the money slides: the spread is only worth anything if the second buyer is found while both are still hungry. -->
 
 ---
 

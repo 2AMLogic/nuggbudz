@@ -121,6 +121,13 @@ export const PROTOCOL_HISTORY: readonly [ProtocolVersionNote, ...ProtocolVersion
     added: [],
     changed: ['welcome', 'waiting'],
   },
+  {
+    version: 8,
+    summary:
+      '`matched.buddy` gained `standing`, a band derived from past handoffs, so a client can render how a buddy has shown up before without seeing a count it could turn into a score.',
+    added: [],
+    changed: ['matched'],
+  },
 ]
 
 /**

@@ -189,6 +189,28 @@ state.
   resolutions are named for what they do to the money (`refund_receiver`, not
   `sided_with_receiver`), and `refunded_cents` is stamped only after Stripe
   answers — `NULL` means "not answered for", which is not `0`.
+- **A comment body is never a bare `@`-token, and a review verdict is never
+  posted by hand.** `gh pr comment --body @path` does not expand `@path`, it
+  posts the literal string — and `@-`, the stdin spelling of the same mistake,
+  is what destroyed the approving verdict on PR #30 (#52). Both of that
+  verdict's comments posted as the two characters `@-`, so the approval carried
+  no rationale *and* no `loom:verdict-sha` marker; `verdict-staleness-guard.sh`
+  read `UNVERIFIABLE`, which fails safe by **keeping** the verdict, and the PR
+  merged on a tree the head had moved off twenty seconds later. Loom's guard
+  denies `--body @path` only when the character after the `@` is path-shaped, so
+  that `@reviewer` prose stays allowed — which is exactly the carve-out `@-` fell
+  through. `scripts/guard-comment-body-at.mjs` is this repo's own `PreToolUse`
+  hook for that gap: it refuses a body that is *entirely* one `@`-token unless
+  the token is a valid GitHub handle, and refuses an empty comment. It lives in
+  `scripts/` and is wired from `.claude/settings.json` because `.loom/hooks/` and
+  `.claude/skills/repo/hooks/` are installed copies an upgrade overwrites, and
+  because the guard actually running here is neither of them but the
+  machine-level Loom install, which this checkout cannot patch. A verdict goes
+  through `.loom/scripts/post-verdict.sh` — it appends the marker itself and
+  already refuses `@-`, `@path` and an empty body — never a raw `gh pr comment`.
+  `test/verdict-guard.test.ts` drives both through the real executables, with the
+  `@mention` and `--body-file -` cases as controls, because a guard with a green
+  unit test and no wiring is this repo's recurring defect.
 
 ## Reconciling a conflicted branch: merge `origin/main` in, do not rebase onto it
 

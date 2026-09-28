@@ -90,7 +90,7 @@
 }
 
 /*
- * The cell map: same till-roll palette as the rest of the app, not a stock
+ * The radius map: same till-roll palette as the rest of the app, not a stock
  * map widget. The tile layer is desaturated in CSS rather than swapped for a
  * custom tile source, so it stays a drop-in Leaflet basemap.
  */

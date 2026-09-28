@@ -114,7 +114,9 @@ test('the map renders real tiles, not a constant placeholder', async ({ browser 
     // `src/components/RadiusMap.tsx`). A circle drawn with `fitBounds` would have
     // thrown before any of them were requested, which is why there is no
     // `getBounds()` anywhere in that component.
-    await expect(page.locator('.leaflet-interactive')).toBeVisible()
+    // `path.leaflet-interactive` is the circle itself — the radius, drawn as an
+    // SVG path — rather than the marker, which carries the same class.
+    await expect(page.locator('path.leaflet-interactive')).toBeVisible()
 
     const tiles = page.locator('img.leaflet-tile')
     await expect(tiles.first()).toBeVisible({ timeout: 20_000 })

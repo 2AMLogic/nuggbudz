@@ -12,11 +12,14 @@ before either of them gives up and orders solo.
 
 A single Cloudflare Worker (`worker/index.ts`, Hono) serves the API and the
 built SPA. Live matching lives in a Durable Object, `NuggPool`, with **one
-instance per geohash cell** — the cell is the matching market. Durable Objects
-process one event at a time, which is what makes "two buyers paired to the same
-third party" impossible without any locking. Per-connection state lives in the
-WebSocket's hibernation attachment (`serializeAttachment`), not in instance
-fields, so an idle cell can be evicted between rushes without losing the queue.
+instance per geohash cell** — the cell is a *shard*, and the market is
+`MATCH_RADIUS_METERS` (two miles) measured inside it. Durable Objects process one
+event at a time, which is what makes "two buyers paired to the same third party"
+impossible without any locking, and the shard is deliberately much wider
+(precision 3, ~156 km) than the circle it has to contain so that one object stays
+authoritative over every candidate it might pair. Per-connection state lives in
+the WebSocket's hibernation attachment (`serializeAttachment`), not in instance
+fields, so an idle shard can be evicted between rushes without losing the queue.
 D1 is the durable ledger of settled splits; the Durable Object owns only live
 state.
 
@@ -44,13 +47,34 @@ state.
   and the settlement functions. Reprice a deal and `pnpm test` goes red until
   the slides are corrected — fix the slides, never the ledger.
 - **The server derives the cell, never the client.** Otherwise a caller parks
-  themselves in someone else's market. It also derives the *coordinates* by
+  themselves in someone else's shard. It also derives the *coordinates* by
   default: `shared/location.ts` resolves client-supplied coords (opt-in only) →
   Cloudflare edge geo (`request.cf`) → a fixed demo origin, so pairing never
   needs a location prompt. `cf` is untrusted and can be missing or partial —
   parse it through `parseCoords`, never straight into `geohash()`. Miniflare
   caches a real `cf` locally, so `pnpm dev` usually gets rung 2; with no usable
-  one (offline, or unit tests) rung 3 keeps the flow alive.
+  one (offline, or unit tests) rung 3 keeps the flow alive. The buyer is told the
+  position the server used and which rung produced it, because the map needs a
+  centre on every rung and a buyer on the demo origin must never be told it is
+  where they are.
+- **The radius is the market; the cell is a shard, and no user ever sees it.**
+  `MATCH_RADIUS_METERS` decides who may pair, and it also scopes every count and
+  roster the pool broadcasts — `waiting`, `queuedAhead` and `buddies` are all
+  filtered to the recipient's circle, never to the shard, which is a region.
+  Distances are **metres everywhere in code**, the same way money is cents:
+  `shared/geo.ts` holds the one conversion (`METERS_PER_MILE`) and the only two
+  formatters (`formatDistance`, `formatMiles`), the figure reaches the client over
+  the protocol in `welcome`, and `3219` appears exactly once, in `wrangler.jsonc`.
+  Coarsening the shard is the safe direction to change this; fanning out to
+  neighbour cells is not, because it gives up the single-object invariant above.
+- **Test fixtures are isolated by distance, not by cell.** Every live-pairing
+  coordinate in the repo lives in `scripts/pool-fixtures.mjs` — smoke, e2e and the
+  payment-gate lane share one table — and each scenario owns a *market*, one metro
+  area, at least 100 km from every other and from `DEMO_ORIGIN` (where every
+  promptless socket lands). `test/fixture-separation.test.ts` derives that from
+  the table and the repo's own `distanceMeters`, because two scenarios inside each
+  other's radius fail as a race rather than as a broken test. Never add a fixture
+  coordinate at a call site.
 - **Identity comes from the session, never from a message.** The pool socket is
   authenticated at upgrade time and the display name a buddy sees is read off
   the session in KV. A `name` on the wire is ignored, not trusted.
@@ -135,12 +159,15 @@ Concretely:
   reintroduces a fixed defect is invisible to `git diff` between two "correct
   looking" resolutions; a comment that says which one was kept is not.
 - The mechanical backstop for this specific defect class —
-  `test/smoke-fixture-cells.test.ts` — checks that every fixture in
-  `scripts/smoke.mjs` occupies a geohash cell of its own, unless declared as
-  an explicit exception in `scripts/smoke-fixtures.mjs`. It exists so this
-  particular hazard no longer depends on anyone reading coordinate literals,
-  but it does not generalize to every conflict a rebase could re-litigate —
-  the rule above is the general one.
+  `test/fixture-separation.test.ts` — checks that every fixture in
+  `scripts/pool-fixtures.mjs` is more than a hundred kilometres from every other
+  scenario's, with each in-market exception declared and re-checked against the
+  coordinates. It began (#80) as a check that every scenario had a geohash cell
+  of its own; #82 made the cell a ~156 km shard, at which point cell
+  distinctness stopped meaning isolation and distance became the unit. It exists
+  so this hazard no longer depends on anyone reading coordinate literals, but it
+  does not generalize to every conflict a rebase could re-litigate — the rule
+  above is the general one.
 
 ## Commands
 

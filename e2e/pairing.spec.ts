@@ -293,13 +293,16 @@ test('two nearby buds pair, split the box evenly, and see complementary roles', 
     // `.first()` only because the badge text is also inside its wrapper's text
     // content; a miss still fails, since an empty locator is never visible.
     await expect(pageA.getByText(clientBadge).first()).toBeVisible()
+    // The map, with the circle in it, on the screen of the buyer who is waiting.
+    // Nova is the only one who can be asserted on here: Remy is matched the
+    // instant she joins, and a matched buyer is looking at a receipt.
     await expect(pageA.locator('.leaflet-container')).toBeVisible()
+    await expect(pageA.locator('path.leaflet-interactive')).toBeVisible()
     await expect(pageA.getByText(describeLocationSource('client').detail)).toBeVisible()
 
     await pageB.getByRole('button', { name: /find a bud/i }).click()
 
     await expect(pageB.getByText(clientBadge).first()).toBeVisible()
-    await expect(pageB.locator('.leaflet-container')).toBeVisible()
 
     await expect(pageA.getByText('Matched')).toBeVisible()
     await expect(pageB.getByText('Matched')).toBeVisible()
@@ -536,15 +539,15 @@ test('leaving the queue does not immediately rejoin, and a refused prompt still 
     // which rung that centre came from. A buyer on the demo origin is told it is
     // not their position.
     await expect(page.locator('.leaflet-container')).toBeVisible({ timeout: 20_000 })
+    await expect(page.locator('path.leaflet-interactive')).toBeVisible()
+    // Whichever of the two promptless rungs answered, it has to say so in words.
+    // Matched as plain text rather than a regex: this copy carries an em dash and
+    // a colon, and escaping it by hand is how a check quietly stops matching
+    // anything (it did, once, in this very spec).
     await expect(
-      page.getByText(
-        new RegExp(
-          `${describeLocationSource('edge').detail}|${describeLocationSource('demo').detail}`.replace(
-            /[.*+?^${}()|[\]\\]/g,
-            '\\$&',
-          ),
-        ),
-      ),
+      page
+        .getByText(describeLocationSource('edge').detail)
+        .or(page.getByText(describeLocationSource('demo').detail)),
     ).toBeVisible()
     await expect(page.getByText(/cell/i)).toHaveCount(0)
 

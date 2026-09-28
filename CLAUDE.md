@@ -306,10 +306,22 @@ pnpm run deploy      # strict deploy — sign-in only (`pnpm deploy` is a pnpm b
 pnpm run deploy:demo # stage deploy — adds --var ALLOW_DEMO_PAIRING:1, see README "Demo pairing"
 ```
 
-`pnpm test` does not cover the Durable Object. `pnpm smoke` does, and needs a
-dev server on port 5199. `pnpm test:e2e` boots one itself (or reuses one
-already running there) and additionally exercises the screen a person actually
-looks at. Run all three before calling a change done.
+`pnpm test` does not cover the Durable Object *in its runtime*. `pnpm smoke`
+does, and needs a dev server on port 5199. `pnpm test:e2e` boots one itself (or
+reuses one already running there) and additionally exercises the screen a person
+actually looks at. Run all three before calling a change done.
+
+The one exception is deliberate and narrow: `vitest.config.ts` aliases
+`cloudflare:workers` to `test/stubs/cloudflare-workers.ts` — a bare base class,
+nothing more — so `NuggPool`'s own methods can be driven against a fake
+`ctx`/`DB` in plain Node. It exists for the defect class the runtime lanes cannot
+see cheaply: bookkeeping *inside* one `alarm()` tick, where a wrong answer is a
+silent extra D1 write or a stale re-armed alarm rather than a broken handshake
+(#87 — a `Map` keyed by the `match:<id>` storage key while all three of its
+prunes passed a bare `matchId`, so every prune was a no-op that `tsc`, `biome`
+and a source-string assertion all read as correct). Never let a stub grow
+behaviour a test then asserts about; anything about the real runtime still
+belongs in `smoke` or `test:e2e`.
 
 Pairing needs `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars` on a checkout with no
 Stripe keys — otherwise a join is refused rather than paired for free, which is

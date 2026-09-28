@@ -1995,8 +1995,21 @@ export class NuggPool extends DurableObject<Env> {
     )
   }
 
+  /**
+   * This tick's one read of the `match:` keyspace (#87), keyed by **bare
+   * `matchId`** rather than by the `match:<id>` storage key `list()` hands back.
+   *
+   * The rekey is the whole point: every phase threaded this map (`alarm`,
+   * `reconcileTerminal`, `sweepExpired`) prunes an entry it just retired so a
+   * later phase cannot replay a write that already landed, and each of them has
+   * only a `matchId` in hand. `Map.delete` on an absent key is a silent `false`,
+   * so keying by the storage key made all three prunes no-ops that nothing —
+   * not `tsc`, not a unit test — could see. Rekeying once here is why no call
+   * site has to remember the prefix.
+   */
   private async matchRecords(): Promise<Map<string, MatchRecord>> {
-    return await this.ctx.storage.list<MatchRecord>({ prefix: 'match:' })
+    const listed = await this.ctx.storage.list<MatchRecord>({ prefix: 'match:' })
+    return new Map([...listed.values()].map((record) => [record.matchId, record]))
   }
 
   /**

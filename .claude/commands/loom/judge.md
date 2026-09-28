@@ -1329,6 +1329,20 @@ gh pr view <number> --json mergeStateStatus --jq '.mergeStateStatus'
 **When a PR has merge conflicts, attempt automated rebase before routing to
 Doctor** — this reduces the Doctor→Judge→Merge cycle for simple conflicts.
 
+> **This path is for genuinely simple/mechanical conflicts only** (config
+> entries added on both sides, lock files, etc.) — never re-litigate a
+> conflict that involves understanding real content, and never rebase a
+> branch that already contains a merge commit reconciling an earlier `main`
+> (check `git log --merges` on the branch first). On PR #73, a rebase
+> re-decided a conflict a Judge had already resolved in a merge commit, and
+> got it wrong — silently reintroducing a fixture collision that defeated a
+> Durable Object isolation guarantee, with nothing in CI able to tell. See
+> `CLAUDE.md` → "Reconciling a conflicted branch" for the incident and issue
+> #80 for the mechanical guard it motivated. If there is any real content to
+> reconcile, or any prior merge commit in the branch's history, route to
+> Doctor instead (see "For Complex Conflicts" and "When to defer to Doctor"
+> below) rather than resolving it here with a rebase.
+
 **Both `gh pr edit` fallback writes below are verdict-label writes** — run the
 Verdict-Time CAS Recheck immediately before each (see above) and abort instead
 of writing if your claim is lost or another Judge's verdict already landed.
@@ -1567,6 +1581,16 @@ FEEDBACK
 - Complex conflicts requiring code understanding
 - Any uncertainty about conflict resolution
 - Conflicts in test files (might need test updates)
+- The branch already contains a merge commit reconciling an earlier `main`
+  (`git log --merges` on the branch) — replaying that history with a rebase
+  re-decides a conflict someone already resolved, which is exactly how PR #73
+  silently reintroduced a fixed defect (#80)
+
+**If you do resolve a real conflict here (not purely mechanical), say so in
+the `gh pr comment` you post** (see the example above): name which side was
+kept and why, the same disclosure Doctor's guidance requires. A comment that
+only says "resolved merge conflict" gives the next reader nothing to check a
+later rebase against.
 
 ## CI Status Check (REQUIRED Before Approval)
 

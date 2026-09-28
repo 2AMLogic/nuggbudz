@@ -1455,7 +1455,30 @@ All CI checks passing. Ready for re-review!"
 
 ### PR Has Merge Conflicts
 
-This is a critical issue that blocks merging. Fix it immediately:
+This is a critical issue that blocks merging. Fix it immediately.
+
+> **Read this before you rebase a branch whose conflict is real content, not
+> just a stale file (#80).** A rebase re-decides *every* prior conflict
+> resolution on the branch from scratch, replaying each commit against the
+> new base with no memory of how it was resolved last time — including a
+> resolution a Judge already made and recorded in a merge commit. On PR #73,
+> exactly this happened: a Judge merged `origin/main` in and fixed a real
+> hazard (two unrelated PRs' test fixtures had landed on byte-identical
+> coordinates, silently defeating a Durable-Object isolation guarantee); a
+> later rebase of the same branch, force-pushed as one flattened commit,
+> replayed that same conflict and picked the *wrong* side, silently
+> reintroducing the defect. Nothing in CI caught it — see `CLAUDE.md` →
+> "Reconciling a conflicted branch" for the full incident and the mechanical
+> guard it motivated. So: if the branch already contains a merge commit
+> reconciling an earlier `main` (`git log --merges <branch>`), or the conflict
+> you are about to resolve is in file *content* rather than a mechanical
+> version-bearing value, prefer `git merge origin/main` over `git rebase
+> origin/main` for that resolution — the rebase recipe below remains the
+> default for ordinary "just bring the branch up to date" conflicts, but do
+> not use it to re-litigate a conflict someone already resolved. **Either
+> way, once you've resolved a real conflict (or force-pushed over a previous
+> resolution), say so in your PR comment: name which side you kept and why**,
+> so the next agent can diff intent, not just text.
 
 ```bash
 # Fetch latest main
@@ -1562,6 +1585,8 @@ EOF
 ```
 
 **Important**: The `<!-- loom:conflict-only -->` HTML comment is a machine-readable marker that enables Judge to perform a fast-track review instead of a full code review. Only add this marker when the changes are genuinely conflict-resolution-only.
+
+**When the conflict was in real content** (not whitespace/import-reordering/lock-file noise), name which side you kept per file, not just that you "resolved conflicts" — e.g. "kept the feature branch's fixture coordinates in `scripts/smoke.mjs`, not `main`'s." This is what let a later agent notice, on PR #73, that a second pass through the same conflict had picked the other side (#80) — a generic "resolved conflicts" comment gives the next reader nothing to diff against.
 
 **Why this matters:**
 - Full code reviews take 2+ minutes even for trivial changes

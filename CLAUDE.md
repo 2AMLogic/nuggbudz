@@ -74,6 +74,51 @@ state.
   times out into a dispute, and completing the handshake is the only thing that
   writes a row to the D1 ledger.
 
+## Reconciling a conflicted branch: merge `origin/main` in, do not rebase onto it
+
+On PR #73 (issue #70), a Judge merged `origin/main` into a feature branch and,
+while reconciling, found a hazard `git` never reports: that PR's chat
+"buddy leaves" test fixtures and an unrelated, already-merged PR's sauce test
+fixtures sat at byte-identical coordinates. Same coordinate → same geohash
+cell → one `NuggPool` Durable Object, silently defeating the per-cell
+isolation both files' own comments claim. The Judge moved one fixture and left
+the fix in a merge commit. A later rebase of the *same branch* onto a newer
+`main`, force-pushed as a single flattened commit, resolved that identical
+conflict a second time — and got it wrong, putting the collision straight
+back. Nothing caught it mechanically: it is not a conflict marker, not a type
+error, not a lint finding, and not even a reliable `pnpm smoke` failure (two
+scenarios sharing a cell is a *race*, not a deterministic break). The only
+reason it never reached `main` was a Doctor that happened to have the branch's
+expected parent SHA on hand and noticed the tip was wrong (see issue #80).
+
+The lesson generalizes past this one fixture: a rebase re-decides *every*
+prior conflict resolution on the branch from scratch, replaying commits
+against a new base with no memory of how a human or a Judge resolved the same
+hunk before. A merge, by contrast, only asks git to reconcile what has moved
+since the last reconciliation, and leaves the prior resolution's commit intact
+in history — nothing "shows the diff" of the stakes of getting it wrong.
+Concretely:
+
+- **Prefer `git merge origin/main` over `git rebase origin/main` whenever
+  resolving a conflicted branch that already contains resolved history** —
+  in particular a branch that already carries a merge commit reconciling an
+  earlier `main`. Squashing that history away and re-deciding its conflicts
+  in one shot is exactly what went wrong on PR #73.
+- **Whoever resolves a real (non-mechanical) conflict, or force-pushes over a
+  branch's previous conflict resolution, must say so in a PR comment**: which
+  side of the conflict was kept, and why. State it in enough specific detail
+  (file, values kept) that the next agent can diff intent against the
+  previous resolution rather than only diffing text. A rebase that silently
+  reintroduces a fixed defect is invisible to `git diff` between two "correct
+  looking" resolutions; a comment that says which one was kept is not.
+- The mechanical backstop for this specific defect class —
+  `test/smoke-fixture-cells.test.ts` — checks that every fixture in
+  `scripts/smoke.mjs` occupies a geohash cell of its own, unless declared as
+  an explicit exception in `scripts/smoke-fixtures.mjs`. It exists so this
+  particular hazard no longer depends on anyone reading coordinate literals,
+  but it does not generalize to every conflict a rebase could re-litigate —
+  the rule above is the general one.
+
 ## Commands
 
 ```bash

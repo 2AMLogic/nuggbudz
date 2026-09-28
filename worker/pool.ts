@@ -664,19 +664,28 @@ export class NuggPool extends DurableObject<Env> {
    * The dispute sweep runs first, and that ordering is load-bearing: a match one
    * side has confirmed must become a dispute, never an expiry cancellation, so
    * it is taken out of contention before the expiry sweep looks at the market.
+   *
+   * `match:` is listed exactly once here and threaded through to every phase
+   * below (#87 — `reconcileTerminal`, `sweepExpired` and `scheduleSweep` used
+   * to each list it again themselves, four full scans of a shard's dispute
+   * history per tick). A record this loop successfully disputes is deleted
+   * from the local map the moment `disputeMatch` retires it, so
+   * `reconcileTerminal` — which persists anything not `pending` — never
+   * replays a write this tick already made durable.
    */
   override async alarm(): Promise<void> {
     const now = Date.now()
-    for (const record of (await this.matchRecords()).values()) {
+    const records = await this.matchRecords()
+    for (const record of [...records.values()]) {
       if (record.status !== 'pending') continue
       if (!isPickupDisputed(record.confirmations, now, this.pickupTimeoutMs)) continue
-      await this.disputeMatch(record, now, 'timeout')
+      if (await this.disputeMatch(record, now, 'timeout')) records.delete(record.matchId)
     }
 
-    await this.reconcileTerminal()
+    await this.reconcileTerminal(records)
     await this.reconcileHolds()
-    await this.sweepExpired(now)
-    await this.scheduleSweep()
+    await this.sweepExpired(now, records)
+    await this.scheduleSweep(records)
   }
 
   /**
@@ -693,12 +702,17 @@ export class NuggPool extends DurableObject<Env> {
    * the next buyer through that shard arms one within the queue's idle window.
    * An alarm armed for the retry itself would keep waking a cell on a permanent
    * failure (an identity D1 will refuse forever) with nothing new to try.
+   *
+   * `records` is this tick's one `match:` read (see `alarm`), not a fresh list —
+   * mutated in place as entries are retired, so the caller's later phases see
+   * the same retirements.
    */
-  private async reconcileTerminal(): Promise<void> {
-    for (const record of (await this.matchRecords()).values()) {
+  private async reconcileTerminal(records: Map<string, MatchRecord>): Promise<void> {
+    for (const record of [...records.values()]) {
       if (record.status === 'pending') continue
       if (await this.persistTerminal(record)) {
         await this.retireMatch(record.matchId, record, terminalReason(record))
+        records.delete(record.matchId)
       }
     }
   }
@@ -778,14 +792,16 @@ export class NuggPool extends DurableObject<Env> {
    * One sweep per cell rather than a timer per connection — a Durable Object
    * processes one event at a time, so a single sweep sees the whole market and
    * two timers can never disagree about who is still queued.
+   *
+   * `records` is `alarm`'s one `match:` read, not a fresh list (#87).
    */
-  private async sweepExpired(now: number): Promise<void> {
+  private async sweepExpired(now: number, records: Map<string, MatchRecord>): Promise<void> {
     const windows = this.windows
     const queue = this.waitingStates()
     const plan = planSweep(
       now,
       queue.map(({ state }) => livenessOf(state)),
-      expirableMatches((await this.matchRecords()).values()),
+      expirableMatches(records.values()),
       windows,
     )
 
@@ -807,7 +823,13 @@ export class NuggPool extends DurableObject<Env> {
       this.send(entry.ws, { type: 'queue_expired', reason: 'idle', idleMs: windows.queueIdleMs })
     }
 
-    for (const matchId of plan.cancel) await this.cancelMatch(matchId)
+    for (const matchId of plan.cancel) {
+      await this.cancelMatch(matchId)
+      // `cancelMatch` deletes the storage record itself; drop it from this
+      // tick's cached map too, so `scheduleSweep` below doesn't compute a
+      // wake-up time off a match that is already gone.
+      records.delete(matchId)
+    }
 
     await this.sweepTombstones(now)
 
@@ -1702,13 +1724,18 @@ export class NuggPool extends DurableObject<Env> {
    * that nobody could see and neither buyer could be made whole from.
    *
    * Callers re-arm the alarm afterwards.
+   *
+   * Answers whether the record was retired (i.e. `persistTerminal` landed and
+   * `retireMatch` ran), so a caller iterating its own snapshot of `match:` —
+   * `alarm`'s dispute-timeout sweep — knows to drop it from that snapshot
+   * rather than have `reconcileTerminal` persist the same dispute twice.
    */
   private async disputeMatch(
     record: MatchRecord,
     at: number,
     reason: DisputeReason,
     except?: WebSocket,
-  ): Promise<void> {
+  ): Promise<boolean> {
     record.status = 'disputed'
     record.disputedAt = at
     record.disputedReason = reason
@@ -1761,6 +1788,7 @@ export class NuggPool extends DurableObject<Env> {
     // `retireMatch` is what keeps it answerable once the record is gone, and
     // it is the same money `disputes.held_cents` just told a human about.
     if (durable) await this.retireMatch(record.matchId, record, 'disputed')
+    return durable
   }
 
   /**
@@ -2028,10 +2056,15 @@ export class NuggPool extends DurableObject<Env> {
    * The two match deadlines are computed from disjoint sets and that is what
    * keeps them from competing: `disputeDeadline` is null until somebody
    * confirms, and `expirableMatches` drops a match the moment somebody does.
+   *
+   * `records` lets `alarm` pass through its one `match:` read for the tick
+   * instead of this doing a fifth list (#87); every other caller re-arms the
+   * alarm after its own single-key write and has no tick-scoped map to share,
+   * so it is optional and falls back to listing for itself.
    */
-  private async scheduleSweep(): Promise<void> {
+  private async scheduleSweep(records?: Map<string, MatchRecord>): Promise<void> {
     const now = Date.now()
-    const records = [...(await this.matchRecords()).values()]
+    const matchRecords = [...(records ?? (await this.matchRecords())).values()]
 
     let next: number | null = null
     const dueAt = (at: number | null) => {
@@ -2039,7 +2072,7 @@ export class NuggPool extends DurableObject<Env> {
       if (next === null || at < next) next = at
     }
 
-    for (const record of records) {
+    for (const record of matchRecords) {
       if (record.status !== 'pending') continue
       dueAt(disputeDeadline(record.confirmations, this.pickupTimeoutMs))
     }
@@ -2047,7 +2080,7 @@ export class NuggPool extends DurableObject<Env> {
     const plan = planSweep(
       now,
       this.waitingStates().map(({ state }) => livenessOf(state)),
-      expirableMatches(records),
+      expirableMatches(matchRecords),
       this.windows,
     )
     dueAt(nextAlarmAt(now, plan))

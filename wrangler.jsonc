@@ -33,7 +33,7 @@
   "kv_namespaces": [{ "binding": "SESSIONS", "id": "747a8578350046df8d8c3c0f80851828" }],
   "vars": {
     // The market is the radius; the cell is only the shard it is evaluated in.
-    // 3219 m is two miles, and this is the one place that number is written:
+    // Two miles, in metres, and this is the one place that number is written:
     // `shared/geo.ts` derives the same default from METERS_PER_MILE, the client
     // is told the figure in `welcome`, and nothing on screen carries its own.
     //

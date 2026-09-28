@@ -13,12 +13,7 @@ import {
   queueDeadline,
   resolveWindows,
 } from '../shared/expiry'
-import {
-  DEFAULT_MATCH_RADIUS_METERS,
-  distanceMeters,
-  type LatLng,
-  snapToGrid,
-} from '../shared/geo'
+import { DEFAULT_MATCH_RADIUS_METERS, distanceMeters, type LatLng, snapToGrid } from '../shared/geo'
 import { type LocationSource, parseCoords, parseLocationSource } from '../shared/location'
 import { type Candidate, findMatch } from '../shared/matchmaker'
 import {
@@ -885,7 +880,8 @@ export class NuggPool extends DurableObject<Env> {
     const radius = this.radiusMeters
     return this.waitingStates().filter(
       ({ state }) =>
-        state.connId !== exceptConnId && distanceMeters(at, { lat: state.lat, lng: state.lng }) <= radius,
+        state.connId !== exceptConnId &&
+        distanceMeters(at, { lat: state.lat, lng: state.lng }) <= radius,
     )
   }
 

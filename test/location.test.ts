@@ -171,7 +171,19 @@ describe('describeLocationSource', () => {
     }
   })
 
-  it('says the demo cell is a demo cell', () => {
-    expect(describeLocationSource('demo').detail).toMatch(/demo cell/i)
+  it('tells a buyer on the demo origin that the position is not theirs', () => {
+    const copy = describeLocationSource('demo')
+    expect(copy.label).toMatch(/demo/i)
+    expect(copy.detail).toMatch(/not yours/i)
+  })
+
+  it('never names the shard on screen: a cell is not a unit anybody reads', () => {
+    // Issue #82: the geohash cell is an implementation detail, and the market a
+    // buyer is told about is a distance. If the word comes back into this copy it
+    // is back on the screen, since this is the only place the rungs are worded.
+    for (const source of SOURCES) {
+      const copy = describeLocationSource(source)
+      expect(`${copy.label} ${copy.detail}`).not.toMatch(/cell/i)
+    }
   })
 })

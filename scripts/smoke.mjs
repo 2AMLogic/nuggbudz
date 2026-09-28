@@ -29,7 +29,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FIXTURE_COORDS } from './smoke-fixtures.mjs'
+import { FIXTURE_COORDS } from './pool-fixtures.mjs'
 
 const BASE = process.env.BASE ?? 'http://localhost:5199'
 const WS = BASE.replace('http', 'ws')
@@ -74,8 +74,10 @@ const BUYERS = {
   dana: { sid: sessionId('smoke-dana'), userId: accountId(2), name: 'Dana' },
   far: { sid: sessionId('smoke-faraway'), userId: accountId(3), name: 'Faraway' },
   bad: { sid: sessionId('smoke-bad'), userId: accountId(4), name: 'Bad' },
-  // Same cell, too far apart to pair, purely to prove the cell-wide roster
-  // broadcast without either of them ever actually pairing up.
+  // The roster checks. Kim opens two sockets — an account is never matched with
+  // itself, so they stay queued and appear on each other's map — and Lee stands
+  // three miles off, inside the same shard and outside the radius, which is what
+  // makes the roster's radius scoping visible.
   kim: { sid: sessionId('smoke-kim'), userId: accountId(5), name: 'Kim' },
   lee: { sid: sessionId('smoke-lee'), userId: accountId(6), name: 'Lee' },
   // Signed in only to be signed out again.
@@ -98,6 +100,10 @@ const BUYERS = {
   // the dispute path.
   halfOne: { sid: sessionId('smoke-half-one'), userId: accountId(18), name: 'Half One' },
   halfTwo: { sid: sessionId('smoke-half-two'), userId: accountId(19), name: 'Half Two' },
+  // A mile and a half apart, across a geohash-6 boundary: the pair that could
+  // never have been matched before #82, and must be now.
+  mia: { sid: sessionId('smoke-mia'), userId: accountId(31), name: 'Mia' },
+  theo: { sid: sessionId('smoke-theo'), userId: accountId(32), name: 'Theo' },
 
   // The sauce pair: one who tries ids that are not on the menu, and the buddy
   // who has to be told what the other actually wants at the counter.
@@ -426,11 +432,12 @@ const forgedMe = await fetch(`${BASE}/api/auth/me`, {
 check('a forged session id is not a session', forgedMe.status === 401, `status ${forgedMe.status}`)
 
 // An unauthenticated upgrade must be refused before any socket exists.
-const anonUpgrade = await fetch(`${BASE}/api/pool/ws?lat=37.7955&lng=-122.3937`)
+const at = FIXTURE_COORDS.robb
+const anonUpgrade = await fetch(`${BASE}/api/pool/ws?lat=${at.lat}&lng=${at.lng}`)
 check('unauthenticated pool upgrade is 401', anonUpgrade.status === 401, `${anonUpgrade.status}`)
 
 const anonSocketOpened = await new Promise((resolve) => {
-  const ws = new WebSocket(`${WS}/api/pool/ws?lat=37.7955&lng=-122.3937`)
+  const ws = new WebSocket(`${WS}/api/pool/ws?lat=${at.lat}&lng=${at.lng}`)
   ws.addEventListener('open', () => {
     ws.close()
     resolve(true)
@@ -630,9 +637,24 @@ await Promise.all([a.opened, b.opened])
 
 const welcomeA = await a.expect('welcome')
 check(
-  'welcome carries a cell',
-  typeof welcomeA.cell === 'string' && welcomeA.cell.length === 6,
+  'welcome carries a shard id',
+  typeof welcomeA.cell === 'string' && welcomeA.cell.length > 0,
   welcomeA.cell,
+)
+// The market is the radius, and the client is told it rather than assuming it:
+// nothing on the screen may carry its own idea of how far "nearby" is.
+check(
+  'welcome carries the radius the server is matching in',
+  Number.isFinite(welcomeA.radiusMeters) && welcomeA.radiusMeters > 0,
+  `${welcomeA.radiusMeters}m`,
+)
+// And the position it placed this socket at, which is what lets the map have a
+// centre on every rung instead of only when somebody answered a prompt.
+check(
+  'welcome carries the position the server placed this socket at',
+  Math.abs(welcomeA.position?.lat - FIXTURE_COORDS.robb.lat) < 1e-9 &&
+    Math.abs(welcomeA.position?.lng - FIXTURE_COORDS.robb.lng) < 1e-9,
+  JSON.stringify(welcomeA.position),
 )
 check(
   'welcome carries the authenticated identity',
@@ -705,12 +727,26 @@ check(
   `${matchA.pickupCode} vs ${matchA.matchId}`,
 )
 
-// A buyer too far away must not pair, even in the same cell region.
+// A buyer too far away must not pair, even in the same shard. `far` is five
+// kilometres from the opening pair — inside their Durable Object, outside their
+// radius — so the radius is the only thing that can be refusing this match.
 const far = open(BUYERS.far, FIXTURE_COORDS.far.lat, FIXTURE_COORDS.far.lng)
 await far.opened
+const farWelcome = await far.expect('welcome')
 far.join()
 const farWaiting = await far.expect('waiting')
-check('distant buyer waits alone', farWaiting.waiting >= 1, JSON.stringify(farWaiting))
+check(
+  'a buyer outside the radius waits alone in the same shard',
+  farWelcome.cell === welcomeA.cell && farWaiting.waiting === 1,
+  `${farWelcome.cell} vs ${welcomeA.cell} — ${JSON.stringify(farWaiting)}`,
+)
+// The other half of the same claim: the opening pair never sees them either. A
+// roster scoped to the shard would have put this buyer on their map.
+check(
+  'and never appears on the roster of anyone they cannot be matched with',
+  farWaiting.buddies.length === 0,
+  JSON.stringify(farWaiting.buddies),
+)
 
 // Abandonment returns the survivor to the queue.
 a.ws.close()
@@ -718,19 +754,17 @@ const left = await b.expect('buddy_left')
 check('survivor told their bud left', left.matchId === matchA.matchId)
 const requeued = await b.expect('waiting')
 check('survivor requeued', requeued.waiting >= 1, JSON.stringify(requeued))
-// Then leave this cell empty. Robb and Dana sit in `9q8znb`, which is the cell
-// `DEMO_ORIGIN` (37.7955, -122.3937) encodes to — and that is where the server
-// puts a socket that sent no coordinates. The promptless pair far below cannot
-// pick a cell of its own, so its isolation has to come from this side: a
-// survivor left queued here is 43m from where an unplaced buyer lands, well
-// inside MATCH_RADIUS_METERS, and would be matched with them instead of with
-// their own bud. Closing the socket dequeues them.
+// Then leave this market empty, so the protocol-hygiene socket below — which
+// deliberately reopens on Robb's coordinate — finds nobody to pair with. Since
+// #82 the promptless pair no longer depends on this: every placed fixture is a
+// hundred kilometres from `DEMO_ORIGIN`, so an unplaced socket cannot be matched
+// with a survivor left queued here. See `scripts/pool-fixtures.mjs`.
 b.ws.close()
 
 // --- the pickup handshake ---
-// A different neighbourhood (geohash `9q9p3w`, ~14m apart), so this pair cannot
-// be matched with anyone still queued above: only one deal is offered now, so
-// the cell is the axis that isolates a market, not the deal.
+// A different metro (~15m apart), so this pair cannot be matched with anyone
+// still queued above: only one deal is offered now, so distance is the axis that
+// isolates a market, not the deal.
 const g = open(BUYERS.gus, FIXTURE_COORDS.gus.lat, FIXTURE_COORDS.gus.lng)
 const h = open(BUYERS.hana, FIXTURE_COORDS.hana.lat, FIXTURE_COORDS.hana.lng)
 await Promise.all([g.opened, h.opened])
@@ -858,8 +892,8 @@ check(
 // here because it would mean holding this script open for PICKUP_CONFIRM_TIMEOUT_MS.
 // To drive it by hand, put `PICKUP_CONFIRM_TIMEOUT_MS="2000"` in `.dev.vars`,
 // restart the dev server, and half-confirm a match: the alarm disputes it.
-// Again a cell of their own (`9q9k6m`), so the dispute below is unambiguously
-// this pair's and cannot draw in a buyer left queued by an earlier scenario.
+// Again a market of their own, so the dispute below is unambiguously this pair's
+// and cannot draw in a buyer left queued by an earlier scenario.
 const i = open(BUYERS.ivy, FIXTURE_COORDS.ivy.lat, FIXTURE_COORDS.ivy.lng)
 const j = open(BUYERS.jed, FIXTURE_COORDS.jed.lat, FIXTURE_COORDS.jed.lng)
 await Promise.all([i.opened, j.opened])
@@ -901,19 +935,18 @@ check(
 // miniflare usually supplies one locally, but an offline or trimmed one has no
 // coordinates, so both answers are acceptable here as long as a cell comes out.
 //
-// Every other scenario isolates itself by choosing a cell. This one cannot:
-// choosing nothing is the point. There are exactly two cells it can land in, and
-// the suite keeps both clear instead —
-//   * `9q8yyk`, from miniflare's cached `cf` (37.77493, -122.41942), which sits
-//     108m inside the nearest edge of that cell. No scenario here is placed in
-//     it at all.
-//   * `9q8znb`, the demo origin's cell, with the origin 281m inside its nearest
-//     edge. The opening pair is the only one placed there, and both of its
-//     sockets are closed before this point.
+// Every other scenario isolates itself by choosing where to stand. This one
+// cannot: choosing nothing is the point. So the isolation runs the other way —
+// `scripts/pool-fixtures.mjs` declares this the `serverResolved` market and
+// `test/fixture-separation.test.ts` keeps every *other* fixture more than a
+// hundred kilometres from `DEMO_ORIGIN`, which is far outside the match radius
+// whichever of the two San Francisco points the runtime hands back (the demo
+// origin, or miniflare's cached `cf` a couple of kilometres away).
+//
 // The `waiting === 1` check below is what keeps that argument honest rather than
-// merely written down: a buyer left queued in whichever cell the server picks
-// would show up as a second waiter, or would be matched with one of these two
-// before the other ever joined.
+// merely written down: a buyer left queued where the server places these two
+// would show up as a second waiter, or would be matched with one of them before
+// the other ever joined.
 //
 // Isolating by a second deal id — which is what this scenario used to do — is no
 // longer available: only McDonald's is offered, and a join naming any other
@@ -923,9 +956,12 @@ const l = open(BUYERS.lex, null, null)
 await Promise.all([k.opened, l.opened])
 const welcomeK = await k.expect('welcome')
 check(
-  'a socket with no coordinates still resolves a cell',
-  typeof welcomeK.cell === 'string' && welcomeK.cell.length === 6,
-  `${welcomeK.cell}`,
+  'a socket with no coordinates is still placed and sharded',
+  typeof welcomeK.cell === 'string' &&
+    welcomeK.cell.length > 0 &&
+    Number.isFinite(welcomeK.position?.lat) &&
+    Number.isFinite(welcomeK.position?.lng),
+  `${welcomeK.cell} ${JSON.stringify(welcomeK.position)}`,
 )
 check(
   'and says which rung placed it, never claiming an exact fix',
@@ -936,7 +972,7 @@ await l.expect('welcome')
 k.join()
 const waitingK = await k.expect('waiting')
 check(
-  'a buyer the server placed has the cell it placed them in to themselves',
+  'a buyer the server placed has the market it placed them in to themselves',
   waitingK.waiting === 1 && waitingK.buddies.length === 0,
   `${welcomeK.cell} ${JSON.stringify(waitingK)}`,
 )
@@ -961,12 +997,12 @@ check(
   `${matchK.buddy.distanceMeters}m`,
 )
 
-// Protocol hygiene. This deliberately reopens a socket in the opening pair's
-// cell (FIXTURE_COORDS.badRejoin *is* FIXTURE_COORDS.robb — see
-// scripts/smoke-fixtures.mjs) now that both `a` and `b` have closed theirs, a
-// couple dozen lines up. It is the one declared exception in
-// test/smoke-fixture-cells.test.ts ('forged-rejoin'): do not give this socket
-// a coordinate of its own without also removing that exception.
+// Protocol hygiene. This deliberately reopens a socket on the opening pair's
+// exact coordinate (FIXTURE_COORDS.badRejoin *is* FIXTURE_COORDS.robb — see
+// scripts/pool-fixtures.mjs) now that both `a` and `b` have closed theirs, a
+// couple dozen lines up. It is the one declared `same-point` relation in
+// test/fixture-separation.test.ts: do not give this socket a coordinate of its
+// own without also removing that declaration.
 const c = open(BUYERS.bad, FIXTURE_COORDS.badRejoin.lat, FIXTURE_COORDS.badRejoin.lng)
 await c.opened
 await c.expect('welcome')
@@ -1013,24 +1049,25 @@ check(
 // in the pool waiting for a buddy who can never legitimately arrive.
 check('a refused gated join never queues the buyer', (await c.settles('waiting')) === false)
 
-// --- cell map roster broadcast ---
-// The cell map needs everyone's client to hear about a roster change, not just
-// the socket that caused it — so a buyer joining the cell must push a fresh
-// 'waiting' message to every buyer already queued there, with the newcomer's
-// position quantized rather than exact.
+// --- the map roster is radius-scoped ---
+// Two claims, and #82 made the second one the load-bearing half.
 //
-// Isolated by cell, like the handshake pairs above: `9q8yx1` is a neighbourhood
-// nobody else in this suite touches, so the roster kim and lee see is only ever
-// each other. Isolating by a second deal id is no longer possible — one chain is
-// offered, and a join naming any other is refused three checks above.
+// 1. Everyone already queued nearby has to hear about a roster change, not just
+//    the socket that caused it: a newcomer must push a fresh 'waiting' to every
+//    buyer within their radius, with the newcomer's position quantized rather
+//    than exact.
+// 2. A buyer in the same *shard* but outside the radius is invisible. The shard
+//    is ~156 km across now, so a shard-wide roster would put strangers two
+//    counties away on the map and leak where they are standing. `lee` stands
+//    exactly three miles from `kim` — one mile past the two-mile radius — and
+//    must appear to neither of them, while both stay queued.
 //
-// They also must not pair with each other, and the axis left for that is
-// distance: both sit inside `9q8yx1` but 1055m apart, beyond the 800m
-// MATCH_RADIUS_METERS. That is the "cell-edge buddies" case wrangler.jsonc
-// documents — same market, too far to walk — and it is what makes the roster
-// assertion below discriminating: a buddy appears on the map who this buyer
-// could not be matched with.
+// Kim opens the two sockets that *can* see each other, because with one deal
+// offered an account is the only remaining thing that stops a pair matching:
+// `handleJoin` never matches a buyer with themselves, so two tabs stay queued
+// side by side and each one is a dot on the other's map.
 const KIM_AT = FIXTURE_COORDS.kim
+const KIM_TAB_AT = FIXTURE_COORDS.kimTab
 const LEE_AT = FIXTURE_COORDS.lee
 
 const kim = open(BUYERS.kim, KIM_AT.lat, KIM_AT.lng)
@@ -1039,25 +1076,62 @@ const kimWelcome = await kim.expect('welcome')
 kim.join()
 const kimAlone = await kim.expect('waiting')
 check(
-  'the first buyer in a fresh cell has an empty roster',
-  kimWelcome.cell === '9q8yx1' && kimAlone.buddies.length === 0,
-  `${kimWelcome.cell} ${JSON.stringify(kimAlone.buddies)}`,
+  'the first buyer in a fresh market has an empty roster',
+  kimAlone.waiting === 1 && kimAlone.buddies.length === 0,
+  `${kimWelcome.cell} ${JSON.stringify(kimAlone)}`,
+)
+check(
+  'and is told the radius that market is, rather than assuming one',
+  kimWelcome.radiusMeters > 0,
+  `${kimWelcome.radiusMeters}m`,
 )
 
-const kimWaitingBefore = kim.inbox.filter((m) => m.type === 'waiting').length
+// Three miles away: same shard, outside the radius.
 const lee = open(BUYERS.lee, LEE_AT.lat, LEE_AT.lng)
 await lee.opened
 const leeWelcome = await lee.expect('welcome')
 lee.join()
 const leeWaiting = await lee.expect('waiting')
 check(
-  // Same cell and same deal, so both are queued in one market, yet too far
-  // apart to be matched — the roster still carries the other.
-  'the roster carries a cell buddy who is out of pairing range',
-  leeWelcome.cell === kimWelcome.cell &&
-    leeWaiting.waiting === 2 &&
-    leeWaiting.buddies.length === 1,
-  `${leeWelcome.cell} ${JSON.stringify(leeWaiting)}`,
+  'two buyers three miles apart land in one shard',
+  leeWelcome.cell === kimWelcome.cell,
+  `${leeWelcome.cell} vs ${kimWelcome.cell}`,
+)
+check(
+  'and are not matched: three miles is past the two-mile radius',
+  leeWaiting.waiting === 1 && (await lee.settles('matched')) === false,
+  JSON.stringify(leeWaiting),
+)
+check(
+  'a buyer outside the radius is invisible on the map, not merely unmatched',
+  leeWaiting.buddies.length === 0,
+  JSON.stringify(leeWaiting.buddies),
+)
+const kimAfterLee = kim.inbox.filter((m) => m.type === 'waiting').at(-1)
+check(
+  'and invisible in the other direction too, counts included',
+  kimAfterLee.waiting === 1 && kimAfterLee.buddies.length === 0,
+  JSON.stringify(kimAfterLee),
+)
+check('the buyer outside the radius stays queued', (await kim.settles('matched')) === false)
+
+// Now a second tab of Kim's own account, inside the radius. Never matched — an
+// account is not two buyers — so it stays queued as a roster entry.
+const kimWaitingBefore = kim.inbox.filter((m) => m.type === 'waiting').length
+const kimTab = open(BUYERS.kim, KIM_TAB_AT.lat, KIM_TAB_AT.lng)
+await kimTab.opened
+await kimTab.expect('welcome')
+kimTab.join()
+const tabWaiting = await kimTab.expect('waiting')
+check(
+  'a second tab of one account is queued beside the first, never matched with it',
+  tabWaiting.waiting === 2 && (await kimTab.settles('matched')) === false,
+  JSON.stringify(tabWaiting),
+)
+check(
+  'a buyer inside the radius does appear on the roster',
+  tabWaiting.buddies.length === 1,
+  JSON.stringify(tabWaiting.buddies),
 )
 
 const broadcastSeen = await (async () => {
@@ -1068,7 +1142,7 @@ const broadcastSeen = await (async () => {
   return false
 })()
 check(
-  'a buyer already queued gets a fresh roster broadcast when someone new joins the cell',
+  'a buyer already queued gets a fresh roster broadcast when someone new joins nearby',
   broadcastSeen,
   `${kimWaitingBefore} -> ${kim.inbox.filter((m) => m.type === 'waiting').length}`,
 )
@@ -1077,30 +1151,66 @@ const latestForKim = kim.inbox.filter((m) => m.type === 'waiting').at(-1)
 check(
   'the broadcast roster carries a position for the newcomer',
   latestForKim.buddies.some(
-    (pos) => Math.abs(pos.lat - LEE_AT.lat) < 0.01 && Math.abs(pos.lng - LEE_AT.lng) < 0.01,
+    (pos) => Math.abs(pos.lat - KIM_TAB_AT.lat) < 0.01 && Math.abs(pos.lng - KIM_TAB_AT.lng) < 0.01,
   ),
   JSON.stringify(latestForKim.buddies),
 )
 check(
   'the broadcast never carries an exact coordinate for anyone else',
-  latestForKim.buddies.every((pos) => pos.lat !== LEE_AT.lat || pos.lng !== LEE_AT.lng),
+  latestForKim.buddies.every((pos) => pos.lat !== KIM_TAB_AT.lat || pos.lng !== KIM_TAB_AT.lng),
   JSON.stringify(latestForKim.buddies),
 )
+check(
+  'and still carries nobody from outside the radius',
+  latestForKim.buddies.length === 1,
+  JSON.stringify(latestForKim.buddies),
+)
+
+// --- the walk, not the grid: a mile and a half across a geohash-6 boundary ---
+// The regression guard for #82. `mia` and `theo` are 1.5 miles apart and in
+// different precision-6 cells — under the old sharding they were in different
+// Durable Objects and could never have been matched however close they stood to
+// the boundary. They are one shard and one match now, and if fine-grained
+// sharding ever comes back this is the check that fails.
+const mia = open(BUYERS.mia, FIXTURE_COORDS.mia.lat, FIXTURE_COORDS.mia.lng)
+const theo = open(BUYERS.theo, FIXTURE_COORDS.theo.lat, FIXTURE_COORDS.theo.lng)
+await Promise.all([mia.opened, theo.opened])
+const [miaWelcome, theoWelcome] = await Promise.all([mia.expect('welcome'), theo.expect('welcome')])
+check(
+  'a mile and a half apart is one shard, not two',
+  miaWelcome.cell === theoWelcome.cell,
+  `${miaWelcome.cell} vs ${theoWelcome.cell}`,
+)
+mia.join()
+await mia.expect('waiting')
+theo.join()
+const [miaMatch, theoMatch] = await Promise.all([mia.expect('matched'), theo.expect('matched')])
+check(
+  'two buyers a mile and a half apart are matched',
+  miaMatch.matchId === theoMatch.matchId,
+  `${miaMatch.matchId} / ${theoMatch.matchId}`,
+)
+check(
+  'and the distance they are told is the walk, not a cell width',
+  miaMatch.buddy.distanceMeters > 2_400 && miaMatch.buddy.distanceMeters < 2_430,
+  `${Math.round(miaMatch.buddy.distanceMeters)}m`,
+)
+mia.ws.close()
+theo.ws.close()
 
 // --- Nuggchat: relayed to one buddy, and stored nowhere ---
 //
 // One cell (`9v6kpy`, downtown Austin — untouched by every other scenario here)
 // holding *two* live matches and a third buyer queued alone. That shape is the
-// point: relaying by cell instead of by match, or trusting a `matchId` off the
-// wire, both look correct with a single pair in a cell and both cross the wires
-// here. The five fixtures sit 11m apart, so the only thing separating the two
+// point: relaying by market instead of by match, or trusting a `matchId` off the
+// wire, both look correct with a single pair in a market and both cross the wires
+// here. The five fixtures sit ~12m apart, so the only thing separating the two
 // conversations is the match each connection belongs to.
-const CHAT_CELL = '9v6kpy'
-const chatA = open(BUYERS.chatA, 30.2676, -97.7433)
-const chatB = open(BUYERS.chatB, 30.2677, -97.7433)
-const chatC = open(BUYERS.chatC, 30.2678, -97.7433)
-const chatD = open(BUYERS.chatD, 30.2679, -97.7433)
-const chatE = open(BUYERS.chatE, 30.268, -97.7433)
+const chatA = open(BUYERS.chatA, FIXTURE_COORDS.chatA.lat, FIXTURE_COORDS.chatA.lng)
+const chatB = open(BUYERS.chatB, FIXTURE_COORDS.chatB.lat, FIXTURE_COORDS.chatB.lng)
+const chatC = open(BUYERS.chatC, FIXTURE_COORDS.chatC.lat, FIXTURE_COORDS.chatC.lng)
+const chatD = open(BUYERS.chatD, FIXTURE_COORDS.chatD.lat, FIXTURE_COORDS.chatD.lng)
+const chatE = open(BUYERS.chatE, FIXTURE_COORDS.chatE.lat, FIXTURE_COORDS.chatE.lng)
 await Promise.all([chatA, chatB, chatC, chatD, chatE].map((s) => s.opened))
 const chatWelcome = await chatA.expect('welcome')
 await Promise.all([chatB, chatC, chatD, chatE].map((s) => s.expect('welcome')))
@@ -1118,7 +1228,7 @@ chatA.join()
 const chatAlone = await chatA.expect('waiting')
 check(
   'the chat cell starts empty, so both conversations below are only this pair and that pair',
-  chatWelcome.cell === CHAT_CELL && chatAlone.waiting === 1 && chatAlone.buddies.length === 0,
+  chatAlone.waiting === 1 && chatAlone.buddies.length === 0,
   `${chatWelcome.cell} ${JSON.stringify(chatAlone)}`,
 )
 chatB.join()
@@ -1389,8 +1499,16 @@ check(
 
 // --- the channel closes on a dispute ---
 // Their own cell (`9xj64f`, Denver), so this dispute is unambiguously theirs.
-const chatDis1 = open(BUYERS.chatDisputeOne, 39.7392, -104.9903)
-const chatDis2 = open(BUYERS.chatDisputeTwo, 39.7394, -104.9905)
+const chatDis1 = open(
+  BUYERS.chatDisputeOne,
+  FIXTURE_COORDS.chatDisputeOne.lat,
+  FIXTURE_COORDS.chatDisputeOne.lng,
+)
+const chatDis2 = open(
+  BUYERS.chatDisputeTwo,
+  FIXTURE_COORDS.chatDisputeTwo.lat,
+  FIXTURE_COORDS.chatDisputeTwo.lng,
+)
 await Promise.all([chatDis1.opened, chatDis2.opened])
 await Promise.all([chatDis1.expect('welcome'), chatDis2.expect('welcome')])
 chatDis1.join()
@@ -1435,8 +1553,16 @@ check(
 // sauce-socket checks below, and two sections sharing a cell would mean sharing a
 // Durable Object instance: a buyer left queued by one is a match candidate in the
 // other.
-const chatLeft1 = open(BUYERS.chatLeaveOne, 45.5152, -122.6784)
-const chatLeft2 = open(BUYERS.chatLeaveTwo, 45.5154, -122.6786)
+const chatLeft1 = open(
+  BUYERS.chatLeaveOne,
+  FIXTURE_COORDS.chatLeaveOne.lat,
+  FIXTURE_COORDS.chatLeaveOne.lng,
+)
+const chatLeft2 = open(
+  BUYERS.chatLeaveTwo,
+  FIXTURE_COORDS.chatLeaveTwo.lat,
+  FIXTURE_COORDS.chatLeaveTwo.lng,
+)
 await Promise.all([chatLeft1.opened, chatLeft2.opened])
 await Promise.all([chatLeft1.expect('welcome'), chatLeft2.expect('welcome')])
 chatLeft1.join()
@@ -1465,10 +1591,10 @@ check(
 
 for (const s of [chatA, chatB, chatC, chatD, chatE, chatDis2, chatLeft2]) s.ws.close()
 
-for (const s of [b, far, c, g, h, j, k, l, kim, lee]) s.ws.close()
+for (const s of [b, far, c, g, h, j, k, l, kim, kimTab, lee]) s.ws.close()
 
 // --- sauces off a socket ---
-// Seattle (`c23nb`), nowhere near any pair above, so these two can only match
+// Seattle, nowhere near any pair above, so these two can only match
 // with each other. The point of these checks is that the sauce ids are validated
 // on the *request path* rather than by a unit test calling the validator: this
 // repo has shipped three predicates that existed and enforced nothing.

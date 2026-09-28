@@ -126,6 +126,13 @@ describe('sanitizeDemoName', () => {
       intl.Segmenter = original
     }
   })
+
+  // Kept from the concurrent attempt on this branch (7da2bff): a mixed
+  // all-invisible input, spanning ZWSP / ZWNJ / ZWJ / BOM / RLO at once.
+  it('collapses an all-invisible-character input to Guest', () => {
+    const invisible = [0x200b, 0x200c, 0x200d, 0xfeff, 0x202e].map((code) => cp(code))
+    expect(sanitizeDemoName(invisible.join(''))).toBe('Guest')
+  })
 })
 
 describe('demoUserId', () => {

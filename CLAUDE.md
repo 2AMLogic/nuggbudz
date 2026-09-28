@@ -97,6 +97,21 @@ state.
   to the receiver); the receiver reads it off them. One side confirming alone
   times out into a dispute, and completing the handshake is the only thing that
   writes a row to the D1 ledger.
+- **The QR is a faster way to do what the protocol already requires, not a new
+  channel.** `PickupQr` encodes the pickup code **and nothing else** — no match
+  id, no user id, no session token, no URL — because a symbol held up in a queue
+  is public to everyone standing behind you; `shared/qr.ts` refuses to encode
+  anything that is not a pickup code, so no call site can widen the payload
+  later. A scan (`CodeScanner`) fills the same field a receiver would have typed
+  into and `confirm_pickup` validates it unchanged, which is why scanning needed
+  no protocol change and no `PROTOCOL_VERSION` bump. It never auto-confirms: the
+  handshake is deliberate on both sides by design. One decode path on both
+  phones — a pure-JS decoder, because `BarcodeDetector` does not exist on iOS
+  Safari and a fallback is the untested path precisely when it runs. Typing stays
+  on equal footing: a denied camera, no camera or bad light must still complete a
+  handoff, and `e2e/scan.spec.ts` proves all of that with a *real camera* reading
+  the orderer's *real* rendered canvas, because a decoder with a green unit test
+  and no wiring to `confirm_pickup` is this repo's fifth defect of one shape.
 - **Money clears before the handshake starts, and the gate fails closed.**
   `paymentDisposition` in `worker/lib/payments.ts` decides once per match
   whether it is charged, is a demo pair, is deliberately uncharged, or cannot

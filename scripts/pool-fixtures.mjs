@@ -84,6 +84,10 @@ export const MARKETS = {
   boston: { lat: 42.3601, lng: -71.0589, label: 'Boston' },
   pittsburgh: { lat: 40.4406, lng: -79.9959, label: 'Pittsburgh' },
   minneapolis: { lat: 44.9778, lng: -93.265, label: 'Minneapolis' },
+  houston: { lat: 29.7604, lng: -95.3698, label: 'Houston' },
+  miami: { lat: 25.7617, lng: -80.1918, label: 'Miami' },
+  saltLakeCity: { lat: 40.7608, lng: -111.891, label: 'Salt Lake City' },
+  detroit: { lat: 42.3314, lng: -83.0458, label: 'Detroit' },
 }
 
 /**
@@ -156,6 +160,19 @@ export const FIXTURE_COORDS = {
   e2ePace: { lat: 42.360195, lng: -71.058771 },
   e2eQuin: { lat: 42.360291, lng: -71.058642 },
   e2eMapper: { lat: 44.9778, lng: -93.265 },
+  // The scanned-handoff lane (`e2e/scan.spec.ts`). Four pairs, each 40 m apart
+  // like `e2eBuddyA`/`e2eBuddyB`, and each in a market of its own: every one of
+  // these scenarios drives a camera through a *settled or refused* handshake, so
+  // a stray buyer wandering in from a neighbouring scenario would not merely add
+  // noise, it would pair with the wrong person and take the pickup code with it.
+  e2eScanA: { lat: 29.7604, lng: -95.3698 },
+  e2eScanB: { lat: 29.760523, lng: -95.369393 },
+  e2eWrongCodeA: { lat: 25.7617, lng: -80.1918 },
+  e2eWrongCodeB: { lat: 25.761823, lng: -80.191393 },
+  e2eNoCameraA: { lat: 40.7608, lng: -111.891 },
+  e2eNoCameraB: { lat: 40.760923, lng: -111.890593 },
+  e2eUnmountA: { lat: 42.3314, lng: -83.0458 },
+  e2eUnmountB: { lat: 42.331523, lng: -83.045393 },
 }
 
 // The "Protocol hygiene" socket (BUYERS.bad) deliberately reuses `robb`'s
@@ -295,6 +312,30 @@ export const SCENARIOS = {
     market: 'minneapolis',
     fixtures: ['e2eMapper'],
     what: 'the map draws real basemap tiles rather than a constant placeholder',
+  },
+  e2eScannedHandoff: {
+    lane: 'e2e',
+    market: 'houston',
+    fixtures: ['e2eScanA', 'e2eScanB'],
+    what: 'a code read off the orderer’s screen by a camera settles the match',
+  },
+  e2eWrongCodeScan: {
+    lane: 'e2e',
+    market: 'miami',
+    fixtures: ['e2eWrongCodeA', 'e2eWrongCodeB'],
+    what: 'a scanned QR carrying another match’s code is refused, and typing still settles',
+  },
+  e2eNoCameraHandoff: {
+    lane: 'e2e',
+    market: 'saltLakeCity',
+    fixtures: ['e2eNoCameraA', 'e2eNoCameraB'],
+    what: 'a refused camera still completes the handoff by typing the code',
+  },
+  e2eCameraUnmount: {
+    lane: 'e2e',
+    market: 'detroit',
+    fixtures: ['e2eUnmountA', 'e2eUnmountB'],
+    what: 'the camera stream is stopped when the receipt holding it goes away',
   },
   e2eRefusedPrompt: {
     lane: 'e2e',

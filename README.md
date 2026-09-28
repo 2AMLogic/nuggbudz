@@ -44,13 +44,17 @@ $8.98 collected. The gross retail spread is $5.99 per pairing.
 
 **A disputed split holds the money.** If one buddy confirms the handoff and the
 other never does, nothing is booked to the ledger and **nothing is refunded
-automatically** — the $8.98 is held against the server's record until a human
-reconciles it. That is deliberate: auto-refunding a dispute would make staying
-silent after collecting the box the cheapest way to eat for free, which is the
-same reasoning that writes no ledger row. A match that dies for any *other*
-reason — a declined card, a cancellation, a buddy who left before anybody
-confirmed — is refunded, and the screen states what came back and what (if
-Stripe refused the refund) is still being held for a human.
+automatically** — the $8.98 is held until a human reconciles it. That is
+deliberate: auto-refunding a dispute would make staying silent after collecting
+the box the cheapest way to eat for free, which is the same reasoning that writes
+no ledger row. A match that dies for any *other* reason — a declined card, a
+cancellation, a buddy who left before anybody confirmed — is refunded, and the
+screen states what came back and what (if Stripe refused the refund) is still
+being held for a human.
+
+The dispute itself is filed in D1 — who confirmed, when, why the handshake died,
+and how much is held — and an operator resolves it from there. See
+[Disputes](#disputes-and-who-resolves-them).
 
 A seat in the pool is not forever. A buyer who goes quiet for 15 minutes is
 warned and then dropped, and a match nobody confirms within 10 minutes is called
@@ -77,7 +81,7 @@ Durable Object: NuggPool  ── ONE PER GEOHASH CELL = one shard, deliberately 
    │                          so one single-threaded object sees every candidate
    │                          it might pair and double-pairing is impossible
    ▼
-D1  ── ledger of settled splits
+D1  ── ledger of settled splits, and the queue of disputed ones
 ```
 
 Sign-in is Authorization Code + PKCE and never leaves a token in the browser:
@@ -226,6 +230,57 @@ reason `worker/ledger.ts` refuses to book a demo split as revenue. The
 `demo-check` CI job proves it by contradiction — it runs with Stripe
 "configured" against an API base nothing is listening on, so a demo pair that
 tried to charge would fail the job rather than quietly succeed.
+
+### Disputes, and who resolves them
+
+A dispute is the second most likely outcome of asking two strangers to meet, so
+it is not an error path: it is a queue. The Durable Object files the dead
+handshake into D1's `disputes` table — the reason (`timeout` or `buddy_left`),
+which side confirmed and when, both buddies, and the integer cents being held —
+and **deletes its own copy only once that write has landed**. A settled split is
+booked to `matches` the same way. Neither terminal record stays in the cell.
+
+`disputes` is a table of its own rather than a status column on `matches`,
+because `matches` answers exactly one question — which splits settled — and every
+revenue figure here is a `WHERE settled_at IS NOT NULL` over it. A dispute is not
+a weaker split.
+
+```bash
+wrangler secret put OPERATOR_USER_IDS     # comma-separated users.id values
+curl -s --cookie "nb_session=…" https://nuggbudz.com/api/admin/disputes
+curl -s -X POST --cookie "nb_session=…" -H 'content-type: application/json' \
+  -d '{"resolution":"refund_receiver","note":"orderer never showed"}' \
+  https://nuggbudz.com/api/admin/disputes/<matchId>/resolve
+```
+
+Four resolutions, each named for what it does to the money, because that is the
+only part of a decision that cannot be taken back:
+
+| Resolution | Money outcome |
+|---|---|
+| `settled` | The handoff did happen; the silent buddy never tapped. Nothing is returned. |
+| `voided` | It did not happen, or cannot be established. Both halves are refunded. |
+| `refund_orderer` | The orderer turned up and the receiver did not. The orderer is made whole. |
+| `refund_receiver` | The receiver turned up and the orderer did not. The receiver is made whole. |
+
+The refund is issued against the charges the dead match left behind, and — like
+every other refund here — the row records only what Stripe *confirmed*.
+`refunded_cents` stays `NULL` until the call has been answered for at all, which
+is not the same as `0`; on a server with no Stripe secrets it is `0`, meaning
+"no charge was taken, nothing to refund". Resolving a dispute twice is refused
+(`409`) rather than silently overwriting the first decision, which is enforced in
+SQL (`WHERE resolved_at IS NULL`) rather than by a read-then-write.
+
+**Authorization is a session plus an allowlist, not a shared token.**
+`OPERATOR_USER_IDS` names `users.id` values; the caller still has to be signed in
+as one of them, and the row records `resolved_by` as that account. A bearer token
+could only ever record "whoever had the token", and could not be revoked without
+a redeploy — a session is one KV delete. Entries that are not shaped like an id a
+sign-in could mint (a wildcard, a `demo:` identity) are dropped rather than
+honoured, and with the var unset **there are no operators**: every `/api/admin/*`
+route answers the same `404` the rest of the API gives an unknown path, so a
+signed-in buyer cannot even learn the surface is there. It is deliberately absent
+from `wrangler.jsonc`, for the same reason `ALLOW_DEMO_PAIRING` is.
 
 ### Demo pairing
 

@@ -40,6 +40,15 @@ STRIPE_WEBHOOK_SECRET=""
 # intentional test mode. Ignored entirely when Stripe is configured.
 ALLOW_UNCHARGED_PAIRING="1"
 
+# Who may list and resolve disputed pickups: comma-separated `users.id` values,
+# checked *in addition to* a real signed-in session (see the README's "Disputes"
+# section). Unset means there are no operators at all and every `/api/admin/*`
+# route answers 404, which is the shape a checkout and CI are in.
+#
+# `pnpm smoke` seeds an operator fixture; uncomment this to run its
+# dispute-resolution checks instead of reporting them as SKIP.
+# OPERATOR_USER_IDS="5eed5eed-0000-4000-8000-000000000033"
+
 # Where the Stripe REST calls go. Only ever set to point at
 # `scripts/fake-stripe.mjs`, which is how the charged path is driven end to end
 # without a Stripe account. Unset means the real API.

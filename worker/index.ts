@@ -12,6 +12,7 @@ import {
 } from '../shared/location'
 import { PROTOCOL_VERSION } from '../shared/protocol'
 import { clientKey as deriveClientKey } from '../shared/ratelimit'
+import { adminRoutes } from './admin'
 import { authRoutes, sessionFromRequest } from './auth'
 import { boolVar, type Env, intVar, stripeConfigured } from './env'
 import { type PaymentOutcomeRequest, serverPaymentMode } from './lib/payments'
@@ -65,6 +66,12 @@ app.route('/api/auth', authRoutes)
 // A signed-in buyer's sauce pair. Mounted before the `/api/*` catch-all below,
 // which Hono would otherwise match first.
 app.route('/api', sauceRoutes)
+
+// The operator surface: disputed pickups, and resolving one. Behind a session
+// *and* the `OPERATOR_USER_IDS` allowlist — with the var unset there are no
+// operators, and every route here answers exactly the same 404 the catch-all
+// below does. See `worker/admin.ts`.
+app.route('/api/admin', adminRoutes)
 
 /** The deal catalogue, each with its settlement and the spread it arbitrages. */
 // Only the deals the app currently offers — see INACTIVE_DEAL_IDS in

@@ -3,10 +3,13 @@ import { findDeal } from '../shared/deals'
 import { demoUserId } from '../shared/demo'
 import { settle } from '../shared/economics'
 import {
+  type DisputedMatch,
+  disputeStatements,
   isDemoMatch,
   ledgerStatements,
   type SettledMatch,
   UnauthenticIdentityError,
+  writeDisputedMatch,
   writeSettledMatch,
 } from '../worker/ledger'
 
@@ -29,6 +32,27 @@ const settled: SettledMatch = {
   createdAt: 1_700_000_000_000,
   settledAt: 1_700_000_060_000,
   settlement: settle(deal, 2),
+  names: { orderer: 'Robb', receiver: 'Dana' },
+  userIds: { orderer: ROBB, receiver: DANA },
+}
+
+/**
+ * The same pair, on the night the receiver confirmed and the orderer never did.
+ *
+ * `heldCents` is both halves: the pickup gate means a charged match cannot reach
+ * a confirmation until Stripe has collected from both, so a dispute is always
+ * holding the full collected total.
+ */
+const disputed: DisputedMatch = {
+  matchId: 'match-2',
+  dealId: deal.id,
+  cell: '9q8yyk',
+  createdAt: 1_700_000_000_000,
+  disputedAt: 1_700_000_360_000,
+  reason: 'timeout',
+  confirmedBy: 'receiver',
+  confirmedAt: 1_700_000_060_000,
+  heldCents: 898,
   names: { orderer: 'Robb', receiver: 'Dana' },
   userIds: { orderer: ROBB, receiver: DANA },
 }
@@ -274,5 +298,130 @@ describe('writeSettledMatch', () => {
     expect(calls.attempts).toBe(0)
     expect(calls.batched).toEqual([])
     expect(slept).toEqual([])
+  })
+})
+
+describe('disputeStatements', () => {
+  it('writes exactly one row, into the disputes table and nowhere else', () => {
+    const statements = disputeStatements(disputed)
+    expect(statements).toHaveLength(1)
+    expect(statements[0].sql).toContain('INTO disputes')
+    // The invariant the whole separate table exists for: a dispute is never a
+    // row in the settled ledger, at any point in its life.
+    expect(statements[0].sql).not.toContain('INTO matches')
+    expect(statements[0].sql).not.toContain('INTO match_buyers')
+  })
+
+  it('records who confirmed, when, why it went disputed, and what is held', () => {
+    const [row] = disputeStatements(disputed)
+    expect(row.params).toEqual([
+      'match-2',
+      'mcd-nuggets-20',
+      '9q8yyk',
+      1_700_000_000_000,
+      1_700_000_360_000,
+      'timeout',
+      'receiver',
+      1_700_000_060_000,
+      ROBB,
+      'Robb',
+      DANA,
+      'Dana',
+      898,
+    ])
+  })
+
+  it('carries the held money as integer cents, never a float', () => {
+    for (const heldCents of [0, 449, 898]) {
+      const [row] = disputeStatements({ ...disputed, heldCents })
+      expect(row.params.at(-1)).toBe(heldCents)
+      expect(Number.isInteger(row.params.at(-1))).toBe(true)
+    }
+  })
+
+  it('records a buddy who walked away as its own reason', () => {
+    const [row] = disputeStatements({ ...disputed, reason: 'buddy_left', confirmedBy: 'orderer' })
+    expect(row.params).toContain('buddy_left')
+    expect(row.params).toContain('orderer')
+  })
+
+  it('is idempotent, so the write can be retried until it lands', () => {
+    // The Durable Object keeps the record and retries until D1 has it. A retry
+    // must not overwrite a row an operator may already have resolved.
+    expect(disputeStatements(disputed)[0].sql.startsWith('INSERT OR IGNORE')).toBe(true)
+  })
+
+  it('binds one parameter per placeholder', () => {
+    for (const statement of disputeStatements(disputed)) {
+      expect(statement.params).toHaveLength((statement.sql.match(/\?/g) ?? []).length)
+    }
+  })
+
+  it('files nothing for a demo pairing', () => {
+    // A demo pair holds no money — `demo` is answered before Stripe is ever
+    // consulted — so a demo dispute asks a human to decide about nothing.
+    for (const userIds of [
+      { orderer: demoUserId('a'), receiver: demoUserId('b') },
+      { orderer: demoUserId('a'), receiver: DANA },
+      { orderer: ROBB, receiver: demoUserId('b') },
+    ]) {
+      expect(disputeStatements({ ...disputed, userIds })).toEqual([])
+    }
+  })
+
+  it('refuses an identity that names nobody, rather than filing it', () => {
+    for (const userIds of [
+      { orderer: '', receiver: '' },
+      { orderer: 'user-robb', receiver: DANA },
+      { orderer: ROBB, receiver: 'demo:' },
+    ]) {
+      expect(() => disputeStatements({ ...disputed, userIds })).toThrow(UnauthenticIdentityError)
+    }
+  })
+})
+
+describe('writeDisputedMatch', () => {
+  it('files the dispute on the first try when D1 is healthy', async () => {
+    const { db, calls } = flakyDb(0)
+    await writeDisputedMatch(db, disputed)
+    expect(calls.attempts).toBe(1)
+    expect(calls.batched).toEqual([1])
+  })
+
+  it('retries a transient failure with the same backoff a settled split gets', async () => {
+    const { db, calls } = flakyDb(2)
+    const { slept, sleep } = recordingSleep()
+    await writeDisputedMatch(db, disputed, { sleep })
+    expect(calls.attempts).toBe(3)
+    expect(slept).toEqual([200, 400])
+  })
+
+  it('rethrows once the attempts are exhausted, so the caller keeps its record', async () => {
+    // The whole reason this throws rather than returning quietly: the Durable
+    // Object deletes its copy only when this resolves, and until then that copy
+    // is the only evidence two buyers are out of pocket.
+    const { db, calls } = flakyDb(Number.POSITIVE_INFINITY)
+    const { sleep } = recordingSleep()
+    await expect(writeDisputedMatch(db, disputed, { sleep })).rejects.toThrow('D1_ERROR')
+    expect(calls.attempts).toBe(3)
+  })
+
+  it('never touches D1 for a demo pairing, and does not retry its way to an error', async () => {
+    const { db, calls } = flakyDb(Number.POSITIVE_INFINITY)
+    const { slept, sleep } = recordingSleep()
+    const pairing: DisputedMatch = {
+      ...disputed,
+      userIds: { orderer: demoUserId('a'), receiver: demoUserId('b') },
+    }
+    await expect(writeDisputedMatch(db, pairing, { sleep })).resolves.toBeUndefined()
+    expect(calls.attempts).toBe(0)
+    expect(slept).toEqual([])
+  })
+
+  it('refuses an unauthentic identity without touching D1 or retrying', async () => {
+    const { db, calls } = flakyDb(0)
+    const nobody: DisputedMatch = { ...disputed, userIds: { orderer: '', receiver: '' } }
+    await expect(writeDisputedMatch(db, nobody)).rejects.toThrow(UnauthenticIdentityError)
+    expect(calls.attempts).toBe(0)
   })
 })

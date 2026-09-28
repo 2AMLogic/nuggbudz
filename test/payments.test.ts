@@ -501,6 +501,18 @@ describe('the late-refund path stays reachable from worker/pool.ts', () => {
     expect(body.indexOf('TOMBSTONE_PREFIX')).toBeLessThan(body.indexOf('storage.delete(`match:'))
   })
 
+  it('and a settled split leaves no tombstone, because its money is earned', () => {
+    // A settled match's legs are all `succeeded`, so `retireLedger` would happily
+    // build a tombstone for one — and `sweepTombstones` never drops a tombstone
+    // holding collected cents, by design. Every completed split would therefore
+    // leave a permanent record claiming this pool owes somebody money it does
+    // not. Derived from the record's own status rather than a caller's flag.
+    const retire = pool.slice(pool.indexOf('private async retireMatch('))
+    const body = retire.slice(0, retire.indexOf('\n  }\n'))
+    expect(body).toContain("const earned = record?.status === 'complete'")
+    expect(body).toMatch(/record\?\.ledger === undefined \|\| earned \? null : retireLedger\(/)
+  })
+
   it('and a payment event for a vanished match consults the tombstone', () => {
     const handler = pool.slice(pool.indexOf('private async handleLatePaymentEvent('))
     const body = handler.slice(0, handler.indexOf('\n  }\n'))

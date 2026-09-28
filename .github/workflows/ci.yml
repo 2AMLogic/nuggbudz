@@ -40,7 +40,16 @@ jobs:
       # behaviour is what the `payment-gate-closed` job below asserts. This lane
       # is about the pairing protocol rather than the money, so it opts out
       # explicitly, here, for this step's server only. Never `wrangler.jsonc`.
-      - run: echo 'ALLOW_UNCHARGED_PAIRING="1"' > .dev.vars
+      # The operator allowlist for the dispute-resolution routes, which answer
+      # 404 to everyone else -- including with the var unset, which is the shape
+      # a checkout is in. The id is `BUYERS.op` in scripts/smoke.mjs, and
+      # SMOKE_REQUIRE_ADMIN below turns "no operator configured" from a skip into
+      # a failure, so a drift between the two cannot quietly delete this lane.
+      - run: |
+          {
+            echo 'ALLOW_UNCHARGED_PAIRING="1"'
+            echo 'OPERATOR_USER_IDS="5eed5eed-0000-4000-8000-000000000033"'
+          } > .dev.vars
       # Live pairing across two WebSocket clients, against the real Worker.
       - run: pnpm dev --port 5199 &
       - run: npx wait-on http://localhost:5199/api/health --timeout 90000
@@ -57,7 +66,7 @@ jobs:
               process.exit(1)
             }
           ' "$health"
-      - run: pnpm smoke
+      - run: SMOKE_REQUIRE_ADMIN=1 pnpm smoke
       # The uncharged branch of the money gate: an opted-in server pairs and
       # releases the code at match time, and nobody is asked to pay.
       - run: BASE=http://localhost:5199 pnpm payment-gate

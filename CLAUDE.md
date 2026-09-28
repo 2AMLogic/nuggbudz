@@ -135,6 +135,22 @@ state.
   its unfinished money behind as a tombstone (`retireMatch`, the one place a
   `match:` key is removed), so a PaymentIntent that clears *after* its match died
   is still refunded rather than answered `unknown_match`.
+- **A finished match leaves the Durable Object only once D1 has it.** A settled
+  split goes to `matches`, a dead handshake to `disputes` — a table of its own,
+  never a status column, so every revenue query stays a plain `WHERE settled_at
+  IS NOT NULL`. `persistTerminal` is the one answer both paths read, and the
+  record is deleted **after** it returns true, never before; a failed write keeps
+  the record and `reconcileTerminal` replays it off the next alarm. Get that
+  order backwards and nothing looks broken until a D1 blip erases the only
+  evidence two strangers are out of pocket.
+- **The operator surface is a session plus an allowlist, never a shared token.**
+  `OPERATOR_USER_IDS` names `users.id` values and `shared/operators.ts` drops
+  anything not shaped like an id a sign-in could mint. A resolution moves money
+  and stamps `resolved_by`, which a token could not do; unset means *no*
+  operators and `/api/admin/*` answers the same 404 as an unknown path. The four
+  resolutions are named for what they do to the money (`refund_receiver`, not
+  `sided_with_receiver`), and `refunded_cents` is stamped only after Stripe
+  answers — `NULL` means "not answered for", which is not `0`.
 
 ## Reconciling a conflicted branch: merge `origin/main` in, do not rebase onto it
 

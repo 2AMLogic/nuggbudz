@@ -1,6 +1,12 @@
 import { DurableObject } from 'cloudflare:workers'
 import { CHAT_RATE_LIMIT, CHAT_RATE_WINDOW_MS, reviewChatText } from '../shared/chat'
 import { findDeal, isDealOffered } from '../shared/deals'
+import {
+  type DisputeReason,
+  parseDisputeReason,
+  parseDisputeRefundRequest,
+  refundedRoles,
+} from '../shared/disputes'
 import type { BuyerRole, Settlement } from '../shared/economics'
 import { settle } from '../shared/economics'
 import {
@@ -37,7 +43,7 @@ import {
 import { slidingWindow } from '../shared/ratelimit'
 import { parseSauceSelection, type SauceSelection } from '../shared/sauces'
 import { boolVar, type Env, intVar, stripeConfigured } from './env'
-import { writeSettledMatch } from './ledger'
+import { writeDisputedMatch, writeSettledMatch } from './ledger'
 import {
   allLegsPaid,
   applyPaymentOutcome,
@@ -65,6 +71,16 @@ import { createPaymentIntent, refundPaymentIntent, type StripeClientConfig } fro
  * browser can reach: the only way in is a Durable Object stub.
  */
 export const INTERNAL_PAYMENT_PATH = '/__internal/payment'
+
+/**
+ * Where the Worker asks this cell to act on an operator's dispute resolution.
+ *
+ * Same shape as the payment path above, and for the same reason: a resolution
+ * that refunds has to reach the money, and the money lives in whichever instance
+ * owned the match. Not a route a browser can reach — the only way in is a
+ * Durable Object stub, and the only caller is behind the operator allowlist.
+ */
+export const INTERNAL_DISPUTE_PATH = '/__internal/dispute'
 
 /**
  * Where a retired match's unfinished money lives.
@@ -177,6 +193,16 @@ interface MatchRecord {
   settledAt: number | null
   disputedAt: number | null
   /**
+   * Why this match was disputed, kept on the record rather than only on the
+   * outgoing message.
+   *
+   * The D1 write is the point: a record whose write failed is retried later by
+   * `reconcileTerminal`, from the record alone, and a reason that lived only in
+   * the call frame that produced it would be lost by then. Optional because a
+   * record written before this field existed has none.
+   */
+  disputedReason?: DisputeReason | null
+  /**
    * How this match is paid for, decided once and written before either buddy is
    * told they are matched. Persisted rather than recomputed so the answer cannot
    * change underneath a live match when a secret is rotated — and so the window
@@ -276,11 +302,13 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
-    // Two ways in: a buyer's socket, and a signature-verified Stripe event the
-    // Worker forwarded here because this instance owns the match.
-    if (new URL(request.url).pathname === INTERNAL_PAYMENT_PATH) {
-      return await this.handlePaymentEvent(request)
-    }
+    // Three ways in: a buyer's socket, a signature-verified Stripe event the
+    // Worker forwarded here because this instance owns the match, and an
+    // operator's resolution of a dispute this instance is still holding money
+    // for.
+    const path = new URL(request.url).pathname
+    if (path === INTERNAL_PAYMENT_PATH) return await this.handlePaymentEvent(request)
+    if (path === INTERNAL_DISPUTE_PATH) return await this.handleDisputeResolution(request)
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('expected websocket upgrade', { status: 426 })
     }
@@ -477,8 +505,99 @@ export class NuggPool extends DurableObject<Env> {
       await this.disputeMatch(record, now, 'timeout')
     }
 
+    await this.reconcileTerminal()
     await this.sweepExpired(now)
     await this.scheduleSweep()
+  }
+
+  /**
+   * Retry the durable write for any finished match still sitting in storage.
+   *
+   * A complete or disputed record is deleted the moment D1 has it, so reaching
+   * one here means a write failed — a D1 outage during `completeMatch`, or a
+   * dispute raised while the database was unreachable. Nothing else would ever
+   * look at it again: the expiry sweep only considers `pending` matches, and
+   * that is exactly how terminal records used to accumulate in a cell forever.
+   *
+   * Opportunistic rather than scheduled, deliberately. A cell with nothing but a
+   * stuck record arms no alarm and needs none — nobody is waiting on it — and
+   * the next buyer through that shard arms one within the queue's idle window.
+   * An alarm armed for the retry itself would keep waking a cell on a permanent
+   * failure (an identity D1 will refuse forever) with nothing new to try.
+   */
+  private async reconcileTerminal(): Promise<void> {
+    for (const record of (await this.matchRecords()).values()) {
+      if (record.status === 'pending') continue
+      if (await this.persistTerminal(record)) await this.retireMatch(record.matchId, record)
+    }
+  }
+
+  /**
+   * Put a finished match where it outlives this object, and say whether it
+   * landed.
+   *
+   * The one answer both terminal paths need, because the rule they share is the
+   * rule that matters: a record is deleted from Durable Object storage **only**
+   * after D1 has it. A false here keeps the record, which is what a
+   * reconciliation replays from.
+   *
+   * A demo pairing writes nothing and answers true. That is not a failure being
+   * swallowed — a demo handshake is neither revenue nor a dispute a human owes
+   * anybody an answer about, so there is nothing to keep the record for.
+   */
+  private async persistTerminal(record: MatchRecord): Promise<boolean> {
+    try {
+      if (record.status === 'complete') {
+        await writeSettledMatch(this.env.DB, {
+          matchId: record.matchId,
+          dealId: record.dealId,
+          cell: record.cell,
+          distanceMeters: record.distanceMeters,
+          createdAt: record.createdAt,
+          settledAt: record.settledAt ?? Date.now(),
+          settlement: record.settlement,
+          names: { orderer: record.orderer.name, receiver: record.receiver.name },
+          // The ledger decides for itself whether this is a real split; a demo
+          // pairing settles on screen and books nothing. See `isDemoMatch`.
+          userIds: { orderer: record.orderer.userId, receiver: record.receiver.userId },
+        })
+        return true
+      }
+      if (record.status === 'disputed') {
+        // Parsed rather than cast: a record written before the reason was
+        // persisted has none, and the column will not accept a guess.
+        const reason = parseDisputeReason(record.disputedReason)
+        if (reason === null) {
+          console.error('NuggPool: dispute %s has no recorded reason — not filing', record.matchId)
+          return false
+        }
+        const confirmedBy = confirmedRole(record.confirmations)
+        await writeDisputedMatch(this.env.DB, {
+          matchId: record.matchId,
+          dealId: record.dealId,
+          cell: record.cell,
+          createdAt: record.createdAt,
+          disputedAt: record.disputedAt ?? Date.now(),
+          reason,
+          confirmedBy,
+          confirmedAt: confirmedBy === null ? null : record.confirmations[confirmedBy],
+          // What Stripe is holding right now, off the payment ledger rather
+          // than recomputed from the settlement: a half-refunded match holds
+          // less than it collected, and the operator is being asked about the
+          // money that is actually there.
+          heldCents: record.ledger === undefined ? 0 : collectedCents(record.ledger),
+          names: { orderer: record.orderer.name, receiver: record.receiver.name },
+          userIds: { orderer: record.orderer.userId, receiver: record.receiver.userId },
+        })
+        return true
+      }
+    } catch (error) {
+      // Never rethrown. A D1 outage must not strand two people who already
+      // swapped nuggets, and must not swallow the evidence either: the record
+      // stays in storage and `reconcileTerminal` tries again.
+      console.error('durable write failed', record.status, record.matchId, error)
+    }
+    return false
   }
 
   /**
@@ -1024,9 +1143,18 @@ export class NuggPool extends DurableObject<Env> {
    * and would have made it unreachable again the next time a teardown path was
    * added. One chokepoint, so the tombstone cannot be forgotten;
    * `test/payments.test.ts` asserts there is still only one.
+   *
+   * A **settled** split is the one case that leaves nothing behind. Its charges
+   * are revenue, not unfinished business: every leg succeeded (that is what
+   * unlocked the pickup in the first place) and none of it is owed back, so a
+   * tombstone would be a permanent claim that this pool owes somebody money it
+   * does not. Derived from the record rather than passed in by the caller,
+   * because a flag at six call sites is a flag that will eventually be wrong.
    */
   private async retireMatch(matchId: string, record: MatchRecord | undefined): Promise<void> {
-    const tombstone = record?.ledger === undefined ? null : retireLedger(record.ledger, Date.now())
+    const earned = record?.status === 'complete'
+    const tombstone =
+      record?.ledger === undefined || earned ? null : retireLedger(record.ledger, Date.now())
     if (tombstone !== null) {
       await this.ctx.storage.put<PaymentTombstone>(`${TOMBSTONE_PREFIX}${matchId}`, tombstone)
     }
@@ -1200,59 +1328,50 @@ export class NuggPool extends DurableObject<Env> {
   /**
    * Both sides confirmed: book the split and let both buddies go.
    *
-   * This is the only place a ledger row is written. Anything that has not been
-   * confirmed by both sides is live state, and live state belongs to this
-   * object rather than to D1.
+   * This is the only place a settled ledger row is written. Anything that has
+   * not been confirmed by both sides is live state, and live state belongs to
+   * this object rather than to D1.
    */
   private async completeMatch(record: MatchRecord, at: number): Promise<void> {
     record.status = 'complete'
     record.settledAt = at
     await this.ctx.storage.put(`match:${record.matchId}`, record)
 
-    try {
-      await writeSettledMatch(this.env.DB, {
-        matchId: record.matchId,
-        dealId: record.dealId,
-        cell: record.cell,
-        distanceMeters: record.distanceMeters,
-        createdAt: record.createdAt,
-        settledAt: at,
-        settlement: record.settlement,
-        names: { orderer: record.orderer.name, receiver: record.receiver.name },
-        // The ledger decides for itself whether this is a real split; a demo
-        // pairing settles on screen and books nothing. See `isDemoMatch`.
-        userIds: { orderer: record.orderer.userId, receiver: record.receiver.userId },
-      })
-    } catch (error) {
-      // A ledger outage must not strand two people who already swapped nuggets.
-      // The completed record stays in storage, which is what a reconciliation
-      // pass replays from.
-      console.error('ledger write failed', record.matchId, error)
-    }
+    const durable = await this.persistTerminal(record)
 
     for (const peer of this.matchSockets(record.matchId)) {
       this.send(peer.ws, { type: 'pickup_complete', matchId: record.matchId, settledAt: at })
       // Free to queue for the next box.
       this.setState(peer.ws, principalOf(peer.state))
     }
+    // Only once the row exists somewhere that outlives this cell. A settled
+    // split that is still only in Durable Object storage is the one thing this
+    // object is not allowed to lose, so a failed write keeps the record and
+    // `reconcileTerminal` retries it.
+    if (durable) await this.retireMatch(record.matchId, record)
     await this.scheduleSweep()
   }
 
   /**
    * One side confirmed and the other never did.
    *
-   * Nothing is written to the ledger: a split where one buddy says the handoff
-   * happened and the other says nothing is a case for a human. Callers re-arm
-   * the alarm afterwards.
+   * Nothing is written to the settled ledger: a split where one buddy says the
+   * handoff happened and the other says nothing is not revenue. It is filed in
+   * `disputes` instead — a queue for a human, not a report — because the state
+   * this used to leave behind was a dead end: a record in one cell's storage
+   * that nobody could see and neither buyer could be made whole from.
+   *
+   * Callers re-arm the alarm afterwards.
    */
   private async disputeMatch(
     record: MatchRecord,
     at: number,
-    reason: 'timeout' | 'buddy_left',
+    reason: DisputeReason,
     except?: WebSocket,
   ): Promise<void> {
     record.status = 'disputed'
     record.disputedAt = at
+    record.disputedReason = reason
     await this.ctx.storage.put(`match:${record.matchId}`, record)
     if (record.ledger !== undefined && collectedCents(record.ledger) > 0) {
       // Deliberately NOT refunded. A dispute means one buddy says the nuggets
@@ -1266,6 +1385,10 @@ export class NuggPool extends DurableObject<Env> {
         collectedCents(record.ledger),
       )
     }
+
+    // Before either buddy is told, so a dispute is never visible on a screen
+    // while being invisible to the human who has to resolve it.
+    const durable = await this.persistTerminal(record)
 
     const confirmedBy = confirmedRole(record.confirmations)
     const heldFor = (role: BuyerRole) =>
@@ -1284,6 +1407,54 @@ export class NuggPool extends DurableObject<Env> {
       })
       this.setState(peer.ws, principalOf(peer.state))
     }
+
+    // The money stays behind as a tombstone rather than in the match record:
+    // `retireMatch` is what keeps it answerable once the record is gone, and
+    // it is the same money `disputes.held_cents` just told a human about.
+    if (durable) await this.retireMatch(record.matchId, record)
+  }
+
+  /**
+   * Act on an operator's resolution, for the one part of it this object owns:
+   * the money.
+   *
+   * The decision, who made it and when all live in D1, written before this is
+   * called. All that is left here is the refund the resolution implies, against
+   * the tombstone the disputed match left behind — which is the only place a
+   * dead match's charges still exist.
+   *
+   * Like `handleLatePaymentEvent`, this deliberately touches no socket, reads no
+   * pickup code and cannot reach `completeMatch`: a resolution must never be a
+   * second route to a code or to a settled ledger row.
+   */
+  private async handleDisputeResolution(request: Request): Promise<Response> {
+    const ask = parseDisputeRefundRequest(await request.text())
+    if (ask === null) return Response.json({ error: 'bad dispute resolution' }, { status: 400 })
+
+    const roles = new Set(refundedRoles(ask.resolution))
+    const key = `${TOMBSTONE_PREFIX}${ask.matchId}`
+    const tombstone = await this.ctx.storage.get<PaymentTombstone>(key)
+    // Nothing was ever collected — an uncharged pool, or a match whose money has
+    // already been answered for. "No charge was taken, nothing to refund" is a
+    // real outcome, not a failure.
+    if (tombstone === undefined || roles.size === 0) {
+      return Response.json({ ok: true, refundedCents: 0, heldCents: 0 })
+    }
+
+    const owed = refundableLegs(tombstone.ledger).filter((leg) => roles.has(leg.role))
+    const settled = await this.settleRefunds(ask.matchId, tombstone.ledger, owed)
+    const next = retireLedger(settled.ledger, tombstone.retiredAt)
+    // Nothing left to land and nothing left owed: the tombstone has done its job.
+    if (next === null) await this.ctx.storage.delete(key)
+    else await this.ctx.storage.put<PaymentTombstone>(key, next)
+
+    return Response.json({
+      ok: true,
+      refundedCents: settled.refunded.reduce((sum, leg) => sum + leg.amountCents, 0),
+      // What is still sitting in the account after this: a refund Stripe refused
+      // leaves money held, and saying so is the whole point of the distinction.
+      heldCents: collectedCents(settled.ledger),
+    })
   }
 
   private async handleCancel(ws: WebSocket): Promise<void> {

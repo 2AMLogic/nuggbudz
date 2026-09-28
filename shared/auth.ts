@@ -133,6 +133,8 @@ function normalizeAudience(raw: unknown): string[] | null {
 export interface PendingAuthRecord {
   state: string
   codeVerifier: string
+  /** The `nonce` sent to /authorize; the ID token must echo exactly this back. */
+  nonce: string
   redirectUri: string
   createdAt: number
 }
@@ -140,12 +142,15 @@ export interface PendingAuthRecord {
 export function parsePendingAuthRecord(raw: unknown): PendingAuthRecord | null {
   if (typeof raw !== 'object' || raw === null) return null
   const record = raw as Record<string, unknown>
-  const { state, codeVerifier, redirectUri, createdAt } = record
+  const { state, codeVerifier, nonce, redirectUri, createdAt } = record
   if (typeof state !== 'string' || state.length === 0) return null
   if (typeof codeVerifier !== 'string' || codeVerifier.length < 43) return null
+  // Required, not optional: a record without a nonce would silently skip the
+  // nonce check at callback time, which is the whole point of storing it.
+  if (typeof nonce !== 'string' || nonce.length === 0) return null
   if (typeof redirectUri !== 'string' || redirectUri.length === 0) return null
   if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) return null
-  return { state, codeVerifier, redirectUri, createdAt }
+  return { state, codeVerifier, nonce, redirectUri, createdAt }
 }
 
 export type StateRejection = 'missing_state' | 'unknown_state' | 'state_mismatch'

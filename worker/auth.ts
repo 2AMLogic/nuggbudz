@@ -121,13 +121,21 @@ authRoutes.get('/google/start', async (c) => {
   const state = randomBase64Url(32)
   // PKCE verifier: 32 random bytes is 43 base64url chars, within RFC 7636's 43..128.
   const codeVerifier = randomBase64Url(32)
+  // Bound to this one authorize request and stashed alongside the verifier, so
+  // the callback can insist the ID token echoes it back. 16 random bytes.
+  const nonce = randomBase64Url(16)
   const callback = redirectUri(c.env, c.req.url)
 
-  await c.env.SESSIONS.put(
-    `pending:${state}`,
-    JSON.stringify({ state, codeVerifier, redirectUri: callback, createdAt: Date.now() }),
-    { expirationTtl: PENDING_AUTH_TTL_SECONDS },
-  )
+  const pending: PendingAuthRecord = {
+    state,
+    codeVerifier,
+    nonce,
+    redirectUri: callback,
+    createdAt: Date.now(),
+  }
+  await c.env.SESSIONS.put(`pending:${state}`, JSON.stringify(pending), {
+    expirationTtl: PENDING_AUTH_TTL_SECONDS,
+  })
 
   return c.redirect(
     buildGoogleAuthorizeUrl({
@@ -135,7 +143,7 @@ authRoutes.get('/google/start', async (c) => {
       redirectUri: callback,
       state,
       codeChallenge: await s256Challenge(codeVerifier),
-      nonce: randomBase64Url(16),
+      nonce,
     }),
     302,
   )
@@ -177,7 +185,7 @@ authRoutes.get('/google/callback', async (c) => {
     return c.json({ error: 'authorization code could not be exchanged' }, 400)
   }
 
-  const claims = await verifyIdToken(c.env, idToken, config.clientId)
+  const claims = await verifyIdToken(c.env, idToken, config.clientId, stateCheck.pending.nonce)
   if (!claims.ok) return c.json({ error: 'id token rejected', reason: claims.reason }, 401)
 
   const session = await upsertUser(c.env, claims.claims)
@@ -238,8 +246,17 @@ export type IdTokenCheck = { ok: true; claims: GoogleIdTokenClaims } | { ok: fal
 /**
  * Verify an ID token end to end: signature against Google's JWKS first, then
  * the claims. Decoding alone would accept a token anybody could have written.
+ *
+ * `expectedNonce` is the value stashed by `/google/start`. A token that does not
+ * echo it back is rejected as `nonce_mismatch`, which binds the token to this
+ * browser's authorize request on top of what `state` and PKCE already prove.
  */
-async function verifyIdToken(env: Env, idToken: string, clientId: string): Promise<IdTokenCheck> {
+async function verifyIdToken(
+  env: Env,
+  idToken: string,
+  clientId: string,
+  expectedNonce: string,
+): Promise<IdTokenCheck> {
   const parsed = parseJwt(idToken)
   if (parsed === null) return { ok: false, reason: 'malformed_token' }
 
@@ -252,6 +269,7 @@ async function verifyIdToken(env: Env, idToken: string, clientId: string): Promi
   const check = checkGoogleIdTokenClaims(parsed.claims, {
     clientId,
     now: Math.floor(Date.now() / 1000),
+    nonce: expectedNonce,
   })
   return check.ok ? { ok: true, claims: check.claims } : { ok: false, reason: check.reason }
 }

@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest'
+import { checkGoogleIdTokenClaims, parsePendingAuthRecord } from '../shared/auth'
 import { base64UrlToBytes, base64UrlToString, bytesToBase64Url } from '../shared/base64url'
 import {
   findJwk,
@@ -191,5 +192,82 @@ describe('verifyRs256Signature', () => {
     if (parsed === null) throw new Error('unreachable')
     const broken: RsaPublicJwk = { kty: 'RSA', n: 'not-a-modulus', e: 'AQAB', kid: 'google-key-1' }
     expect(await verifyRs256Signature(parsed, [broken], crypto.subtle)).toBe(false)
+  })
+})
+
+/**
+ * The callback's nonce check, end to end on a real signature.
+ *
+ * `/google/start` stashes the nonce in the `pending:<state>` KV record; the
+ * callback parses that record back out and hands `pending.nonce` to the claim
+ * check. These drive the same two steps — signature against the published key,
+ * then claims against the stashed nonce — so the rejection path is reachable
+ * rather than merely implemented.
+ */
+describe('id token nonce round trip', () => {
+  const CLIENT_ID = '1234567890-abcdef.apps.googleusercontent.com'
+  const NOW = 1_800_000_000
+  const STASHED_NONCE = 'n'.repeat(22)
+
+  /** A pending record shaped exactly like the one `/google/start` writes to KV. */
+  const stashed = (nonce: string) =>
+    parsePendingAuthRecord({
+      state: 's'.repeat(43),
+      codeVerifier: 'v'.repeat(43),
+      nonce,
+      redirectUri: 'https://nuggbudz.example/api/auth/google/callback',
+      createdAt: NOW * 1000,
+    })
+
+  /** Sign a Google-shaped ID token, verify it, and check its claims. */
+  async function signInWith(tokenClaims: Record<string, unknown>, expected: string) {
+    const token = await google.sign(
+      { alg: 'RS256', kid: 'google-key-1' },
+      {
+        iss: 'https://accounts.google.com',
+        aud: CLIENT_ID,
+        sub: '108423991242',
+        exp: NOW + 3600,
+        iat: NOW - 5,
+        email: 'robb@example.com',
+        email_verified: true,
+        ...tokenClaims,
+      },
+    )
+    const parsed = parseJwt(token)
+    if (parsed === null) throw new Error('unreachable')
+    // The signature is still checked for real — the nonce is an extra binding,
+    // never a substitute for it.
+    expect(await verifyRs256Signature(parsed, [google.jwk], crypto.subtle)).toBe(true)
+    return checkGoogleIdTokenClaims(parsed.claims, {
+      clientId: CLIENT_ID,
+      now: NOW,
+      nonce: expected,
+    })
+  }
+
+  it('accepts a token echoing the stashed nonce', async () => {
+    const pending = stashed(STASHED_NONCE)
+    expect(pending).not.toBeNull()
+    if (pending === null) return
+    const result = await signInWith({ nonce: STASHED_NONCE }, pending.nonce)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.claims.sub).toBe('108423991242')
+  })
+
+  it('rejects a token minted against a different nonce', async () => {
+    const pending = stashed(STASHED_NONCE)
+    if (pending === null) throw new Error('unreachable')
+    expect(await signInWith({ nonce: 'x'.repeat(22) }, pending.nonce)).toEqual({
+      ok: false,
+      reason: 'nonce_mismatch',
+    })
+  })
+
+  it('rejects a token carrying no nonce at all', async () => {
+    const pending = stashed(STASHED_NONCE)
+    if (pending === null) throw new Error('unreachable')
+    expect(await signInWith({}, pending.nonce)).toEqual({ ok: false, reason: 'nonce_mismatch' })
   })
 })

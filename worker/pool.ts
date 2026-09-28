@@ -375,7 +375,78 @@ export class NuggPool extends DurableObject<Env> {
       pickupTimeoutMs: this.pickupTimeoutMs,
     })
 
+    await this.adoptLiveHandoff(server, userId, connId)
+
     return new Response(null, { status: 101, webSocket: client })
+  }
+
+  /**
+   * Seat a second socket of somebody who is already mid-handoff.
+   *
+   * This is what the handoff link needs on the server side (#101). A phone's own
+   * camera app opens `/h/<code>` in a new tab, the app there opens a socket, and
+   * that socket has to be recognised as the same buyer — otherwise the scanner
+   * arrives as a stranger and the link is decorative. Identity is what makes
+   * that possible: a signed-in buyer's session cookie and a demo buyer's demo
+   * cookie both survive a new tab, so "the same person" is a fact the server
+   * establishes rather than a claim the client makes.
+   *
+   * Deliberately narrow in three ways.
+   *
+   * - **It adopts nothing but a released handoff.** `pickupUnlocked` is the
+   *   gate, so a match still being charged is never adopted: the second socket
+   *   would need a `payment_required` carrying a client secret that belongs to
+   *   one browser session, and handing the same charge to two screens is a worse
+   *   answer than showing the code to read. Those callers stay idle, and the app
+   *   falls back to printing the six characters.
+   * - **It confirms nothing.** All that arrives here is `matched` — the same
+   *   message the first tab got. The receiver still taps, and
+   *   `handleConfirmPickup` still checks the code against the record and the
+   *   role against the socket. An opened link that settled money would be a link
+   *   a bystander can photograph across a table and tap from their seat.
+   * - **It is found from live sockets, not from storage.** The only match worth
+   *   adopting is one whose other side is still connected; a match whose sockets
+   *   have all gone has already been torn down by `handleDisconnect`. So this
+   *   costs one pass over this cell's sockets and never a storage scan.
+   */
+  private async adoptLiveHandoff(ws: WebSocket, userId: string, connId: string): Promise<void> {
+    const held = this.states().find(
+      (other) =>
+        other.ws !== ws && other.state.status === 'matched' && other.state.userId === userId,
+    )
+    if (held === undefined || held.state.status !== 'matched') return
+
+    const { matchId, role } = held.state
+    const record = await this.ctx.storage.get<MatchRecord>(`match:${matchId}`)
+    if (record === undefined || record.status !== 'pending') return
+    if (!pickupUnlocked(record)) return
+
+    // The buddy's own socket, for the name and sauces the receipt prints. Their
+    // side of a live match always has one, by the same reasoning as above.
+    const buddy = this.matchSockets(matchId).find((peer) => peer.state.role !== role)
+    if (buddy === undefined) return
+
+    // This socket's own `connId`, never the one it is copying: if this match is
+    // later torn down, both sockets are requeued, and two queue entries sharing
+    // an id would be two candidates the matcher cannot tell apart.
+    this.setState(ws, { ...identityOf(held.state), connId, status: 'matched', matchId, role })
+
+    this.send(ws, {
+      type: 'matched',
+      matchId,
+      role,
+      share: role === 'orderer' ? record.settlement.shares[0] : record.settlement.shares[1],
+      settlement: record.settlement,
+      buddy: {
+        name: buddy.state.name,
+        distanceMeters: record.distanceMeters,
+        sauces: buddy.state.sauces,
+      },
+      // The same single side, on every socket that side holds. A receiver's
+      // second tab gets null here exactly as their first one did — the code
+      // still has to travel through the air.
+      pickupCode: role === 'orderer' ? record.pickupCode : null,
+    })
   }
 
   override async webSocketMessage(ws: WebSocket, raw: ArrayBuffer | string): Promise<void> {
@@ -725,6 +796,40 @@ export class NuggPool extends DurableObject<Env> {
       return
     }
 
+    /**
+     * A second tab is not a second buyer, and since #101 it is an ordinary thing
+     * to be.
+     *
+     * Identity used to be minted per socket, so two tabs were two people and
+     * this only ever fired for two tabs of one signed-in account — an edge case
+     * that could be left to the candidate filter below, which silently left the
+     * second tab queued forever. Demo identity is per browser now, so anybody
+     * who opens the app twice lands here. Silence would read as a queue that
+     * never matches; say which tab they are already in instead.
+     */
+    const elsewhere = this.states().find(
+      (other) =>
+        other.ws !== ws &&
+        other.state.userId === state.userId &&
+        (other.state.status === 'waiting' || other.state.status === 'matched'),
+    )
+    if (elsewhere !== undefined) {
+      if (elsewhere.state.status === 'matched') {
+        this.fail(
+          ws,
+          'already_matched',
+          'you are already in a match in another tab or window — finish it there',
+        )
+      } else {
+        this.fail(
+          ws,
+          'already_waiting',
+          'you are already waiting in another tab or window — two tabs are one buyer, so this one cannot queue beside it',
+        )
+      }
+      return
+    }
+
     // This id came off a socket, so the question is "may this be chosen", not
     // "does this exist" — a gated deal still resolves in the catalogue, and
     // `findDeal` alone would let a hand-rolled `join` frame pair and settle on a
@@ -783,7 +888,8 @@ export class NuggPool extends DurableObject<Env> {
       joinedAt: Date.now(),
       sauces,
     }
-    // A second tab is not a second buyer: never pair an account with itself.
+    // Belt and braces on the refusal above: whatever route a socket took to get
+    // here, an identity is never a candidate for itself.
     const others = this.waitingStates().filter((o) => o.state.userId !== identity.userId)
     // Read fresh, for the joiner and everyone they might pair with, rather than
     // cached in the queue entry: a buyer who completed a split two minutes ago
@@ -1531,6 +1637,17 @@ export class NuggPool extends DurableObject<Env> {
   private async handleDisconnect(ws: WebSocket): Promise<void> {
     const state = this.getState(ws)
     if (state === null) return
+    if (
+      state.status === 'matched' &&
+      // One of this person's tabs closing is not a buddy walking away. Since
+      // #101 a browser can hold more than one socket on the same side of a match
+      // — the handoff link opens in a new tab — so a match is abandoned only
+      // when the *last* socket on this side goes. Without this, closing the tab
+      // the camera opened would dispute or tear down the match it just joined.
+      this.matchSockets(state.matchId, ws).some((peer) => peer.state.role === state.role)
+    ) {
+      return
+    }
     if (state.status !== 'matched') {
       // A waiting buyer who simply closed the tab still needs to fall out of
       // everyone else's roster — and may have been the last thing keeping this

@@ -53,7 +53,7 @@ _$0.40 a nugget in the 20pc against $0.70 solo — a 1.75× premium for buying s
 
 ## The protocol
 
-1. Sign in, pick a deal, share your location **once**
+1. Sign in, pick a deal — **no location prompt**, ever
 2. The server places you in a pool **shard** — sized so your whole matching radius sits inside it
 3. Another buyer within **2 miles** wants the same box → both phones are paired live
 4. Longest waiter orders, the other walks over; both see the same settlement and a pickup code
@@ -135,10 +135,10 @@ _The **shard** holds a 2-mile radius; the **radius** is the matching market. One
 | --- | --- |
 | **A** | Judges open the URL on their own phones and pair with us |
 | **B** | Our two phones on a hotspot — same flow, same cell |
-| **C** | Geolocation denied → the app falls back to the fixed demo cell and says so on screen |
+| **C** | No usable edge geo → the server places us in the fixed demo cell and says so on screen |
 | **D** | No network at all → the recorded end-to-end runs in `refs/smoke-runs.md` |
 
-<!-- speaker: Run Plan A if the room has wifi; it is the strongest version because it is their device, not ours — and demo pairing is on, so there is no account to create. Plan C is not a workaround: useCoords.ts falls back to a fixed demo origin and the UI states plainly that the fix is not real, because a hackathon venue is exactly where geolocation dies. Never fake a fix. -->
+<!-- speaker: Run Plan A if the room has wifi; it is the strongest version because it is their device, not ours — and demo pairing is on, so there is no account to create. Plan C is not a workaround, and there is nothing left to deny: the server places every socket itself, from Cloudflare's edge geo, and only when there is no usable one — offline, or a trimmed box carrying no coordinates — from a fixed demo cell (`shared/location.ts`). The screen names which of the three rungs placed you, and only the opt-in one is ever called exact, because a hackathon venue is exactly where a real fix dies. Never fake a fix. -->
 
 ---
 

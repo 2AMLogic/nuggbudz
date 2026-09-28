@@ -1,13 +1,17 @@
 import jsQR from 'jsqr'
 import { describe, expect, it } from 'vitest'
+import { pickupCodeFromScan, qrPayloadFor } from '../shared/handoff'
 import { generatePickupCode, PICKUP_CODE_ALPHABET, PICKUP_CODE_LENGTH } from '../shared/pickup'
 import {
   pickupQrMatrix,
   QR_ERROR_CORRECTION,
   QR_QUIET_ZONE_MODULES,
-  QR_TYPE_NUMBER,
+  QR_TYPE_AUTO,
   qrSpanModules,
 } from '../shared/qr'
+
+/** The origin a receipt prints against in these tests; the live one. */
+const ORIGIN = 'https://nuggbudz.com'
 
 /**
  * The encoder half of the scannable handoff.
@@ -16,9 +20,11 @@ import {
  * and no wiring to `confirm_pickup` is the fifth defect of a shape this repo has
  * produced four times. `e2e/scan.spec.ts` is what proves the path, with a real
  * camera reading the orderer's real screen. What lives here is the part that is
- * genuinely a pure function: that the symbol a receipt prints carries the pickup
- * code, carries *only* the pickup code, and survives a round trip through the
- * same decoder the receiver's phone runs.
+ * genuinely a pure function: that the symbol a receipt prints carries a handoff
+ * link for the pickup code, carries *only* that, and survives a round trip
+ * through the same decoder the receiver's phone runs.
+ *
+ * What the link costs in modules is measured in `test/handoff.test.ts`.
  */
 
 /**
@@ -52,7 +58,7 @@ function rasterize(matrix: boolean[][], scale = 8) {
 }
 
 function roundTrip(code: string) {
-  const { rgba, span } = rasterize(pickupQrMatrix(code))
+  const { rgba, span } = rasterize(pickupQrMatrix(code, ORIGIN))
   return jsQR(rgba, span, span)
 }
 
@@ -73,41 +79,52 @@ const SWEEP = Array.from(PICKUP_CODE_ALPHABET, (_char, start) =>
 )
 
 describe('the pickup code as a QR symbol', () => {
-  it('encodes into the smallest symbol at the heaviest error correction', () => {
-    // Stated because both choices are load-bearing: version 1 is what makes the
-    // modules big at receipt size, and level H is what survives a thumbprint.
-    expect(QR_TYPE_NUMBER).toBe(1)
+  it('encodes at the heaviest error correction, in the smallest version that fits', () => {
+    // Level H is what survives a thumbprint, and it is kept even though the
+    // payload grew. The version is derived rather than pinned: how long a
+    // deployment's own hostname is decides it, and a pinned number would mean a
+    // deploy whose receipt throws rather than one whose symbol is denser.
     expect(QR_ERROR_CORRECTION).toBe('H')
+    expect(QR_TYPE_AUTO).toBe(0)
     // Four is the quiet zone the QR spec requires; less and decoders start
     // refusing a symbol that is otherwise perfect.
     expect(QR_QUIET_ZONE_MODULES).toBeGreaterThanOrEqual(4)
   })
 
-  it('is a square 21x21 matrix, with the margin reported separately', () => {
-    const matrix = pickupQrMatrix('K7M2QX')
-    expect(matrix).toHaveLength(21)
-    for (const row of matrix) expect(row).toHaveLength(21)
-    expect(qrSpanModules(matrix)).toBe(21 + QR_QUIET_ZONE_MODULES * 2)
+  it('is a square matrix, with the margin reported separately', () => {
+    const matrix = pickupQrMatrix('K7M2QX', ORIGIN)
+    const side = matrix.length
+    expect(side).toBeGreaterThan(0)
+    for (const row of matrix) expect(row).toHaveLength(side)
+    expect(qrSpanModules(matrix)).toBe(side + QR_QUIET_ZONE_MODULES * 2)
   })
 
-  it('reads back as exactly the code, through the decoder the receiver runs', () => {
+  it('reads back as the handoff link for exactly that code', () => {
     for (const code of SWEEP) {
       const decoded = roundTrip(code)
       expect(decoded, `no symbol found for '${code}'`).not.toBeNull()
-      expect(decoded?.data).toBe(code)
-      expect(decoded?.version).toBe(QR_TYPE_NUMBER)
+      expect(decoded?.data).toBe(qrPayloadFor(ORIGIN, code))
+      // And the thing the receiver's scanner actually does with it.
+      expect(pickupCodeFromScan(decoded?.data ?? '')).toBe(code)
     }
   })
 
-  it('carries the code and nothing else', () => {
-    // The constraint that matters for a code held up in a queue: one chunk, whose
-    // text is the code. A match id, a user id, a session token or a URL alongside
-    // it would show up here as a second chunk or as a longer string.
+  it('carries that link and nothing else', () => {
+    // The constraint that matters for a symbol held up in a queue: one chunk,
+    // whose text is the link and nothing beside it. A match id, a user id or a
+    // session token would show up here as a second chunk or as a longer string.
+    //
+    // The link is not a secret and never was — see `shared/handoff.ts` — but a
+    // *session token* alongside it would be, which is why this is asserted
+    // exactly rather than loosely.
     const code = 'M4RK7Z'
     const decoded = roundTrip(code)
     expect(decoded?.chunks).toHaveLength(1)
-    expect(decoded?.chunks[0]).toEqual({ type: 'alphanumeric', text: code })
-    expect(decoded?.data).toHaveLength(PICKUP_CODE_LENGTH)
+    expect(decoded?.chunks[0]).toEqual({
+      type: 'alphanumeric',
+      text: qrPayloadFor(ORIGIN, code),
+    })
+    expect(decoded?.data).toHaveLength(ORIGIN.length + '/h/'.length + PICKUP_CODE_LENGTH)
   })
 
   it('round-trips codes the generator actually produces', () => {
@@ -115,12 +132,15 @@ describe('the pickup code as a QR symbol', () => {
     // the alphabet or the length has to pass through the encoder too.
     for (let attempt = 0; attempt < 20; attempt += 1) {
       const code = generatePickupCode()
-      expect(roundTrip(code)?.data, `generated code '${code}' did not round-trip`).toBe(code)
+      expect(
+        pickupCodeFromScan(roundTrip(code)?.data ?? ''),
+        `generated code '${code}' did not round-trip`,
+      ).toBe(code)
     }
   })
 
   it('is deterministic, so a receipt does not reprint a different symbol', () => {
-    expect(pickupQrMatrix('QR7X4M')).toEqual(pickupQrMatrix('QR7X4M'))
+    expect(pickupQrMatrix('QR7X4M', ORIGIN)).toEqual(pickupQrMatrix('QR7X4M', ORIGIN))
   })
 
   it('is decoded by one code path, on every phone', () => {
@@ -166,7 +186,17 @@ describe('the pickup code as a QR symbol', () => {
       'https://nuggbudz.example/p/K7M2QX',
       'match:4f9c1a2b',
     ]) {
-      expect(() => pickupQrMatrix(value), `encoded '${value}'`).toThrow(/pickup code/)
+      expect(() => pickupQrMatrix(value, ORIGIN), `encoded '${value}'`).toThrow(/pickup code/)
+    }
+  })
+
+  it('refuses to encode against an origin that is not one', () => {
+    // The other half of the payload rule now that there is a second argument: a
+    // caller cannot reach the symbol's bytes through the origin either.
+    for (const origin of ['', 'not a url', 'javascript:0', 'K7M2QX']) {
+      expect(() => pickupQrMatrix('K7M2QX', origin), `encoded against '${origin}'`).toThrow(
+        /handoff origin/,
+      )
     }
   })
 })

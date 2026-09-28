@@ -20,6 +20,7 @@ import {
   resolveWindows,
 } from '../shared/expiry'
 import { DEFAULT_MATCH_RADIUS_METERS, distanceMeters, type LatLng, snapToGrid } from '../shared/geo'
+import { type HoldReason, parseHoldReason, parseHoldRetryRequest } from '../shared/holds'
 import { type LocationSource, parseCoords, parseLocationSource } from '../shared/location'
 import { type Candidate, findMatch } from '../shared/matchmaker'
 import {
@@ -44,13 +45,14 @@ import { slidingWindow } from '../shared/ratelimit'
 import { STANDING_TIEBREAK_WINDOW_MS, type StandingBand } from '../shared/reputation'
 import { parseSauceSelection, type SauceSelection } from '../shared/sauces'
 import { boolVar, type Env, intVar, stripeConfigured } from './env'
-import { writeDisputedMatch, writeSettledMatch } from './ledger'
+import { type HeldMatch, writeDisputedMatch, writeHeldMatch, writeSettledMatch } from './ledger'
 import {
   allLegsPaid,
   applyPaymentOutcome,
   centsFor,
   codeAtMatchTime,
   collectedCents,
+  holdsCollectedMoney,
   markRefunded,
   openLedger,
   type PaymentDisposition,
@@ -85,6 +87,17 @@ export const INTERNAL_PAYMENT_PATH = '/__internal/payment'
 export const INTERNAL_DISPUTE_PATH = '/__internal/dispute'
 
 /**
+ * Where the Worker asks this cell to try a refused refund again.
+ *
+ * The non-dispute counterpart of the path above. A hold is not a decision, so
+ * this carries no resolution and takes no argument but the match: every refund
+ * is keyed on `refundIdempotencyKey`, which is exactly what makes re-asking
+ * safe any number of times. Not a route a browser can reach, and the only
+ * caller is behind the operator allowlist.
+ */
+export const INTERNAL_HOLD_PATH = '/__internal/hold'
+
+/**
  * Where a retired match's unfinished money lives.
  *
  * A separate keyspace from `match:` on purpose: `matchRecords()` lists that
@@ -92,6 +105,18 @@ export const INTERNAL_DISPUTE_PATH = '/__internal/dispute'
  * and a tombstone must not be visible to any of them. It is money, not a match.
  */
 const TOMBSTONE_PREFIX = 'paytomb:'
+
+/**
+ * A holds row D1 would not take yet, parked until it will.
+ *
+ * The same discipline `persistTerminal` follows for a settled or disputed
+ * match, in the one place that discipline could not simply be reused: a hold is
+ * filed for a match whose status is still `pending`, and `reconcileTerminal`
+ * deliberately skips those. So the row itself is kept rather than the record,
+ * and `reconcileHolds` replays it off the next alarm. Its own keyspace for the
+ * same reason the tombstone has one — nothing that lists matches may see it.
+ */
+const PENDING_HOLD_PREFIX = 'holdfile:'
 
 /**
  * How long a tombstone that holds no money is kept.
@@ -217,6 +242,52 @@ interface MatchRecord {
 }
 
 /**
+ * Why a match is being retired, stated by the path that is retiring it.
+ *
+ * A required argument to `retireMatch` rather than something derived from the
+ * record, because it genuinely cannot be derived: four different teardowns
+ * leave a record in exactly the same `pending` state, and which one it was is
+ * the only thing that tells an operator what happened to the two people whose
+ * money is stuck. Making it required is the point — a fifth teardown path
+ * cannot compile without saying which of these it is.
+ *
+ * `settled` and `disputed` are here so those two paths *name* themselves rather
+ * than opting out by omission, and they file no hold: a settled split owes
+ * nothing back, and a dispute's money is already recorded in `disputes`.
+ */
+type TeardownReason = HoldReason | 'settled' | 'disputed'
+
+/** What a terminal record's own status says its teardown was. */
+function terminalReason(record: MatchRecord): TeardownReason {
+  return record.status === 'complete' ? 'settled' : 'disputed'
+}
+
+/**
+ * The holds row a retired match and its tombstone come to, between them.
+ *
+ * The buyers and the deal come off the match record, which is about to be
+ * deleted and is the last place they exist; the money comes off the tombstone's
+ * ledger, which is the only thing that knows what Stripe actually kept.
+ */
+function heldMatchFrom(
+  record: MatchRecord,
+  tombstone: PaymentTombstone,
+  reason: HoldReason,
+): HeldMatch {
+  return {
+    matchId: record.matchId,
+    dealId: record.dealId,
+    cell: record.cell,
+    createdAt: record.createdAt,
+    retiredAt: tombstone.retiredAt,
+    reason,
+    heldCents: collectedCents(tombstone.ledger),
+    names: { orderer: record.orderer.name, receiver: record.receiver.name },
+    userIds: { orderer: record.orderer.userId, receiver: record.receiver.userId },
+  }
+}
+
+/**
  * Is this match's pickup code released yet?
  *
  * The one question that gates both the code itself and `confirm_pickup`, and
@@ -310,13 +381,14 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
-    // Three ways in: a buyer's socket, a signature-verified Stripe event the
-    // Worker forwarded here because this instance owns the match, and an
-    // operator's resolution of a dispute this instance is still holding money
-    // for.
+    // Four ways in: a buyer's socket, a signature-verified Stripe event the
+    // Worker forwarded here because this instance owns the match, an operator's
+    // resolution of a dispute this instance is still holding money for, and an
+    // operator retrying a refund this instance could not make.
     const path = new URL(request.url).pathname
     if (path === INTERNAL_PAYMENT_PATH) return await this.handlePaymentEvent(request)
     if (path === INTERNAL_DISPUTE_PATH) return await this.handleDisputeResolution(request)
+    if (path === INTERNAL_HOLD_PATH) return await this.handleHoldRetry(request)
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('expected websocket upgrade', { status: 426 })
     }
@@ -602,6 +674,7 @@ export class NuggPool extends DurableObject<Env> {
     }
 
     await this.reconcileTerminal()
+    await this.reconcileHolds()
     await this.sweepExpired(now)
     await this.scheduleSweep()
   }
@@ -624,7 +697,9 @@ export class NuggPool extends DurableObject<Env> {
   private async reconcileTerminal(): Promise<void> {
     for (const record of (await this.matchRecords()).values()) {
       if (record.status === 'pending') continue
-      if (await this.persistTerminal(record)) await this.retireMatch(record.matchId, record)
+      if (await this.persistTerminal(record)) {
+        await this.retireMatch(record.matchId, record, terminalReason(record))
+      }
     }
   }
 
@@ -789,7 +864,7 @@ export class NuggPool extends DurableObject<Env> {
         heldCents: centsFor(held, peer.state.role),
       })
     }
-    await this.retireMatch(matchId, retired)
+    await this.retireMatch(matchId, retired, 'match_expired')
   }
 
   override async webSocketClose(ws: WebSocket): Promise<void> {
@@ -1130,7 +1205,7 @@ export class NuggPool extends DurableObject<Env> {
       this.fail(peer.ws, 'payment_unavailable', why)
       this.setState(peer.ws, principalOf(peer.state))
     }
-    await this.retireMatch(matchId, retired)
+    await this.retireMatch(matchId, retired, 'payment_unavailable')
     this.broadcastWaiting()
     await this.scheduleSweep()
   }
@@ -1286,7 +1361,7 @@ export class NuggPool extends DurableObject<Env> {
       })
     }
 
-    await this.retireMatch(record.matchId, retired)
+    await this.retireMatch(record.matchId, retired, 'payment_failed')
     this.broadcastWaiting()
     await this.scheduleSweep()
   }
@@ -1308,15 +1383,116 @@ export class NuggPool extends DurableObject<Env> {
    * tombstone would be a permanent claim that this pool owes somebody money it
    * does not. Derived from the record rather than passed in by the caller,
    * because a flag at six call sites is a flag that will eventually be wrong.
+   *
+   * `reason` is the exception, and only because it is genuinely *not* derivable:
+   * every non-dispute teardown leaves the record in the identical `pending`
+   * state, and which one it was is the only thing that tells an operator what
+   * happened to the two people whose money is stuck. It is required rather than
+   * optional for the same reason the `earned` flag is derived — so a seventh
+   * call site cannot get it wrong by omission; it will not compile. And it is a
+   * *reason*, never a "file a hold" boolean: the decision itself stays here, at
+   * the chokepoint, where `holdsCollectedMoney` is also checked.
+   *
+   * The D1 write happens before the record is deleted, for the same reason
+   * `persistTerminal` runs before its delete — a tombstone lives in one cell's
+   * storage, and no query can reach across cells to find it.
    */
-  private async retireMatch(matchId: string, record: MatchRecord | undefined): Promise<void> {
+  private async retireMatch(
+    matchId: string,
+    record: MatchRecord | undefined,
+    reason: TeardownReason,
+  ): Promise<void> {
     const earned = record?.status === 'complete'
     const tombstone =
       record?.ledger === undefined || earned ? null : retireLedger(record.ledger, Date.now())
     if (tombstone !== null) {
       await this.ctx.storage.put<PaymentTombstone>(`${TOMBSTONE_PREFIX}${matchId}`, tombstone)
+      // Only a non-dispute teardown, and only one Stripe would not empty. A
+      // tombstone whose legs are all still `pending` is a webhook to wait for,
+      // not money anybody is out of pocket for, and a dispute's hold is
+      // deliberate and already recorded in `disputes` — folding it in here
+      // would put the same money in two operator queues.
+      const held = parseHoldReason(reason)
+      if (held !== null && record !== undefined && holdsCollectedMoney(tombstone.ledger)) {
+        await this.fileHold(heldMatchFrom(record, tombstone, held))
+      }
     }
     await this.ctx.storage.delete(`match:${matchId}`)
+  }
+
+  /**
+   * Mirror a hold into D1, or keep it until D1 will take it.
+   *
+   * Swallowed rather than rethrown, exactly like `persistTerminal`: a refund
+   * the processor refused must not also cost two buyers the teardown that tells
+   * them what happened. What is emphatically *not* swallowed is the record of
+   * it — the row is parked under `PENDING_HOLD_PREFIX` and replayed off the
+   * next alarm, because until D1 has it the only trace that this cell is
+   * sitting on somebody's money is this one object's storage, which no operator
+   * can enumerate.
+   */
+  private async fileHold(held: HeldMatch): Promise<void> {
+    const key = `${PENDING_HOLD_PREFIX}${held.matchId}`
+    try {
+      await writeHeldMatch(this.env.DB, held)
+      await this.ctx.storage.delete(key)
+    } catch (error) {
+      console.error('hold write failed', held.matchId, held.heldCents, error)
+      await this.ctx.storage.put<HeldMatch>(key, held)
+    }
+  }
+
+  /**
+   * Retry the D1 write for any hold still parked in storage.
+   *
+   * The holds counterpart of `reconcileTerminal`, and it needs its own pass for
+   * one reason: a hold is filed for a match whose status is still `pending`,
+   * and that reconciliation deliberately skips those. Opportunistic rather than
+   * scheduled, for the same reason — nobody is waiting on it, and an alarm
+   * armed for the retry itself would keep waking a cell on a permanent failure
+   * with nothing new to try.
+   */
+  private async reconcileHolds(): Promise<void> {
+    const parked = await this.ctx.storage.list<HeldMatch>({ prefix: PENDING_HOLD_PREFIX })
+    for (const held of parked.values()) await this.fileHold(held)
+  }
+
+  /**
+   * Try a refund this cell already failed to make, at an operator's asking.
+   *
+   * Everything about *which* money is owed comes off the tombstone, not the
+   * request: the only thing crossing this boundary is which match, because
+   * there is nothing to decide. Re-asking is safe any number of times because
+   * every refund is keyed on `refundIdempotencyKey`, and a leg Stripe has
+   * already handed back is stamped `refunded` and is no longer owed.
+   *
+   * Like `handleLatePaymentEvent` and `handleDisputeResolution`, this touches no
+   * socket, reads no pickup code and cannot reach `completeMatch`.
+   */
+  private async handleHoldRetry(request: Request): Promise<Response> {
+    const ask = parseHoldRetryRequest(await request.text())
+    if (ask === null) return Response.json({ error: 'bad hold retry' }, { status: 400 })
+
+    const key = `${TOMBSTONE_PREFIX}${ask.matchId}`
+    const tombstone = await this.ctx.storage.get<PaymentTombstone>(key)
+    // Nothing left to hand back: a late webhook already answered for it, or
+    // this cell never had it. Not a failure — the hold is simply over, and
+    // saying so is what lets the caller close the row.
+    if (tombstone === undefined) return Response.json({ ok: true, refundedCents: 0, heldCents: 0 })
+
+    const settled = await this.settleRefunds(ask.matchId, tombstone.ledger)
+    const next = retireLedger(settled.ledger, tombstone.retiredAt)
+    // Nothing left to land and nothing left owed: the tombstone has done its job.
+    if (next === null) await this.ctx.storage.delete(key)
+    else await this.ctx.storage.put<PaymentTombstone>(key, next)
+
+    return Response.json({
+      ok: true,
+      refundedCents: settled.refunded.reduce((sum, leg) => sum + leg.amountCents, 0),
+      // What is still sitting in the account after this attempt. A refund
+      // refused again leaves the figure where it was, and the row stays open.
+      heldCents: collectedCents(settled.ledger),
+    })
   }
 
   /**
@@ -1512,7 +1688,7 @@ export class NuggPool extends DurableObject<Env> {
     // split that is still only in Durable Object storage is the one thing this
     // object is not allowed to lose, so a failed write keeps the record and
     // `reconcileTerminal` retries it.
-    if (durable) await this.retireMatch(record.matchId, record)
+    if (durable) await this.retireMatch(record.matchId, record, 'settled')
     await this.scheduleSweep()
   }
 
@@ -1584,7 +1760,7 @@ export class NuggPool extends DurableObject<Env> {
     // The money stays behind as a tombstone rather than in the match record:
     // `retireMatch` is what keeps it answerable once the record is gone, and
     // it is the same money `disputes.held_cents` just told a human about.
-    if (durable) await this.retireMatch(record.matchId, record)
+    if (durable) await this.retireMatch(record.matchId, record, 'disputed')
   }
 
   /**
@@ -1730,7 +1906,7 @@ export class NuggPool extends DurableObject<Env> {
       })
     }
 
-    await this.retireMatch(state.matchId, retired)
+    await this.retireMatch(state.matchId, retired, 'buddy_left')
     // Without this the survivor's UI would keep showing the pool count (and
     // buddy dots) from before they were matched, which for an instant match
     // is zero — and it also tells everyone nearby about the buyer who just got

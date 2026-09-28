@@ -96,7 +96,20 @@ const BUYERS = {
   // refuses the survivor's refund too, so `buddy_left` has to say so (#86).
   gia: { sid: sessionId('pay-gia'), userId: accountId(10), name: 'Gia' },
   hal: { sid: sessionId('pay-hal'), userId: accountId(11), name: 'Hal' },
+  // The held-money pair: one half pays, the other walks away before anybody
+  // confirms, and the refund that teardown asks for is refused. Nobody disputed
+  // anything, so the only trace of the money is the `holds` row this proves.
+  ada: { sid: sessionId('pay-ada'), userId: accountId(12), name: 'Ada' },
+  bex: { sid: sessionId('pay-bex'), userId: accountId(13), name: 'Bex' },
+  // The operator. Never opens a pool socket and owns no coordinate — this one
+  // exists to hold a session `OPERATOR_USER_IDS` can name, which is the only
+  // way into the holds queue and the retry route. Without the var the admin
+  // checks report SKIP, unless PAYMENT_GATE_REQUIRE_ADMIN says otherwise.
+  op: { sid: sessionId('pay-operator'), userId: accountId(33), name: 'Ops' },
 }
+
+const jsonHeaders = { 'Content-Type': 'application/json' }
+const cookie = (buyer) => ({ Cookie: `nb_session=${buyer.sid}` })
 
 /** Tell the fake Stripe to refuse refunds (or, with no argument, to stop). */
 async function failRefunds(status = 0) {
@@ -689,6 +702,191 @@ if (mode === 'unconfigured') {
     check('the refund stub is restored', cleared.refunds === 0, JSON.stringify(cleared))
 
     for (const socket of [wes, zed]) socket.ws.close()
+
+    // A refused refund on a NON-dispute teardown is now durable, cross-cell.
+    // Before this, the only record that Wes was $4.49 out of pocket lived in
+    // one Durable Object's storage, and there is no registry of live cells to
+    // fan out to — so nobody could enumerate it at all.
+    await new Promise((r) => setTimeout(r, 600))
+    const failedHold = ledgerQuery(`SELECT * FROM holds WHERE match_id = '${mw.matchId}'`)
+    check(
+      'a refund the processor refused is filed as a hold, in D1',
+      failedHold.length === 1 && failedHold[0].held_cents === rw.amountCents,
+      JSON.stringify(failedHold[0] ?? null),
+    )
+    check(
+      'named after the teardown the buyers actually saw',
+      failedHold[0]?.reason === 'payment_failed',
+      `${failedHold[0]?.reason}`,
+    )
+    check(
+      'open, with nothing claiming a refund that never happened',
+      failedHold[0]?.released_at === null && failedHold[0]?.refunded_cents === null,
+      JSON.stringify(failedHold[0] ?? null),
+    )
+    check(
+      'and it is a row in `holds`, never one in `disputes`',
+      (ledgerQuery(`SELECT COUNT(*) AS n FROM disputes WHERE match_id = '${mw.matchId}'`)[0]?.n ??
+        0) === 0,
+    )
+    // The negative control the listing turns on: Rex's abandonment refunded
+    // cleanly, so it owes nobody anything and must NOT be in the queue.
+    check(
+      'a teardown whose refund succeeded files no hold at all',
+      (ledgerQuery(`SELECT COUNT(*) AS n FROM holds WHERE match_id = '${mr.matchId}'`)[0]?.n ??
+        0) === 0,
+    )
+  }
+
+  // --- money held by a buddy walking away, and an operator getting it back ---
+  //
+  // The `buddy_left` teardown, driven through a refused refund end to end. This
+  // is the path issue #85 is named for: nobody disputed anything, so there is
+  // no human in the loop by construction, and the money is invisible unless it
+  // reaches D1 at the moment the match record is deleted.
+  if (FAKE_STRIPE !== null) {
+    const ada = open(BUYERS.ada, HERE)
+    const bex = open(BUYERS.bex, NEARBY)
+    await Promise.all([ada.opened, bex.opened])
+    await checkDistinctIdentities(ada, bex)
+    ada.join()
+    await ada.expect('waiting')
+    bex.join()
+    const [ma] = await Promise.all([ada.expect('matched'), bex.expect('matched')])
+    const ra = await ada.expect('payment_required')
+    await bex.expect('payment_required')
+
+    await failRefunds(500)
+
+    // Ada pays. Bex closes the tab before either of them confirms anything, so
+    // the teardown asks for Ada's money back — and Stripe says no.
+    await deliverWebhook(intentOf(ra), 'payment_intent.succeeded', {
+      match_id: ma.matchId,
+      role: ma.role,
+      cell,
+    })
+    bex.ws.close()
+    const walked = await ada.expect('buddy_left')
+    check('the survivor of the abandoned match is told', walked.matchId === ma.matchId)
+
+    await new Promise((r) => setTimeout(r, 800))
+    const hold = ledgerQuery(`SELECT * FROM holds WHERE match_id = '${ma.matchId}'`)
+    check(
+      'money a buddy_left teardown could not return is enumerable in D1',
+      hold.length === 1 && hold[0].reason === 'buddy_left' && hold[0].held_cents === ra.amountCents,
+      JSON.stringify(hold[0] ?? null),
+    )
+    check(
+      'the row names the cell that still holds the charges, so a retry can find it',
+      hold[0]?.cell === cell,
+      `${hold[0]?.cell} vs ${cell}`,
+    )
+    check(
+      'and both buddies, so somebody is chaseable when the retry keeps failing',
+      hold[0]?.orderer_user_id === BUYERS.ada.userId ||
+        hold[0]?.receiver_user_id === BUYERS.ada.userId,
+      JSON.stringify(hold[0] ?? null),
+    )
+
+    // Now Stripe will take the refund. The retry is the whole second half of
+    // this feature: `refundIdempotencyKey` is what makes re-asking safe.
+    const restored = await failRefunds(0)
+    check('the refund stub is restored before the retry', restored.refunds === 0)
+
+    const adminProbe = await fetch(`${BASE}/api/admin/holds`, { headers: cookie(BUYERS.op) })
+    if (adminProbe.status !== 200) {
+      const why =
+        `this server has no operator for the payment-gate fixture. Add\n      ` +
+        `OPERATOR_USER_IDS="${BUYERS.op.userId}"\n      to .dev.vars and restart the dev server to run them.`
+      if (process.env.PAYMENT_GATE_REQUIRE_ADMIN) {
+        check('operator hold retry', false, `PAYMENT_GATE_REQUIRE_ADMIN is set but ${why}`)
+      } else {
+        log(`SKIP  operator hold retry — ${why}`)
+      }
+    } else {
+      const queue = await adminProbe.json()
+      const listed = queue.holds?.find((h) => h.matchId === ma.matchId)
+      check(
+        'an operator can see the held money, across every cell, in one query',
+        listed !== undefined &&
+          listed.reason === 'buddy_left' &&
+          listed.heldCents === ra.amountCents &&
+          listed.releasedAt === null &&
+          listed.refundedCents === null,
+        JSON.stringify(listed ?? queue),
+      )
+      check(
+        'and the teardown that refunded cleanly is not in the queue beside it',
+        queue.holds?.every((h) => h.matchId !== mr.matchId) === true,
+        JSON.stringify(queue.holds?.map((h) => h.matchId)),
+      )
+
+      const retried = await fetch(`${BASE}/api/admin/holds/${ma.matchId}/retry`, {
+        method: 'POST',
+        headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+      })
+      const recovered = await retried.json()
+      check(
+        'a retry recovers the money and says exactly how much',
+        retried.status === 200 &&
+          recovered.refundedCents === ra.amountCents &&
+          recovered.heldCents === 0,
+        JSON.stringify(recovered),
+      )
+
+      const afterRetry = ledgerQuery(`SELECT * FROM holds WHERE match_id = '${ma.matchId}'`)
+      check(
+        'what Stripe gave back is stamped on the row, and only after it answered',
+        afterRetry[0]?.refunded_cents === ra.amountCents && afterRetry[0]?.held_cents === 0,
+        JSON.stringify(afterRetry[0] ?? null),
+      )
+      check(
+        'and the hold is released rather than lingering as open work',
+        Number.isInteger(afterRetry[0]?.released_at),
+        `${afterRetry[0]?.released_at}`,
+      )
+
+      const stillQueued = await fetch(`${BASE}/api/admin/holds`, {
+        headers: cookie(BUYERS.op),
+      }).then((r) => r.json())
+      check(
+        'a released hold drops out of the open queue',
+        stillQueued.holds?.every((h) => h.matchId !== ma.matchId) === true,
+        JSON.stringify(stillQueued.holds?.map((h) => h.matchId)),
+      )
+
+      const again = await fetch(`${BASE}/api/admin/holds/${ma.matchId}/retry`, {
+        method: 'POST',
+        headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+      })
+      check(
+        'and retrying a released hold is refused rather than refunded twice',
+        again.status === 409,
+        `status ${again.status}`,
+      )
+
+      const recordedAfter = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
+      const mine = recordedAfter.refunds.filter((r) => r.idempotencyKey.includes(ma.matchId))
+      check(
+        'the recovered refund was issued exactly once, on the per-leg key',
+        mine.length === 1 && mine[0].idempotencyKey === `refund:${ma.matchId}:${ma.role}`,
+        JSON.stringify(mine),
+      )
+
+      const anon = await fetch(`${BASE}/api/admin/holds`)
+      check('the holds queue is not readable without a session', anon.status === 404)
+      const asBuyer = await fetch(`${BASE}/api/admin/holds/${ma.matchId}/retry`, {
+        method: 'POST',
+        headers: { ...jsonHeaders, ...cookie(BUYERS.ada) },
+      })
+      check(
+        'and a signed-in buyer cannot retry a refund of their own money',
+        asBuyer.status === 404,
+        `status ${asBuyer.status}`,
+      )
+    }
+
+    ada.ws.close()
   }
 
   // --- the survivor of an abandoned match is told when THEIR refund is refused ---

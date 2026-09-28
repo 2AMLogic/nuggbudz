@@ -8,17 +8,30 @@ import {
 import { isOperator, parseOperatorIds } from '../shared/operators'
 import { sessionFromRequest } from './auth'
 import type { Env } from './env'
-import { claimDispute, getDispute, listDisputes, stampDisputeRefund } from './ledger'
-import { INTERNAL_DISPUTE_PATH } from './pool'
+import {
+  claimDispute,
+  getDispute,
+  getHold,
+  listDisputes,
+  listHolds,
+  stampDisputeRefund,
+  stampHoldRefund,
+} from './ledger'
+import { INTERNAL_DISPUTE_PATH, INTERNAL_HOLD_PATH } from './pool'
 
 /**
- * The operator surface: list disputed pickups, and resolve one.
+ * The operator surface: list disputed pickups and resolve one; list money a
+ * teardown could not give back, and try again.
  *
  * Everything else in this app is written for two strangers at a counter. This is
  * written for the one person who has to answer for the money when the counter
  * did not happen — a dispute holds $8.98 that is deliberately never refunded
  * automatically (see the README), and a hold nobody can release is just a
  * slower way of keeping it.
+ *
+ * The two queues are parallel and never mixed. A dispute is a decision somebody
+ * owes an answer to; a hold is a refund the processor refused, which nobody
+ * decided and which has nothing to resolve — only something to retry.
  *
  * Authorization is a **session plus an allowlist**, not a shared bearer token.
  * A resolution moves money and the row it writes records `resolved_by`; a token
@@ -136,6 +149,100 @@ adminRoutes.post('/disputes/:matchId/resolve', async (c) => {
   const dispute = await getDispute(c.env.DB, matchId)
   return c.json({ dispute, refundedCents: money.refundedCents, heldCents: money.heldCents })
 })
+
+/**
+ * Every match still holding money from a teardown nobody disputed.
+ *
+ * The question this route exists to answer could not be asked before it: a
+ * refused refund left cents in one Durable Object's storage, there is no
+ * registry of live cells to fan out to, and nothing in D1 recorded that the
+ * money was stuck. This reads a table instead, so it is one query across every
+ * cell the app has ever used.
+ */
+adminRoutes.get('/holds', async (c) => {
+  const operator = await operatorOf(c.env, c.req.raw)
+  if (operator === null) return c.json(notFound, 404)
+
+  // Open by default, exactly like the disputes queue: "what money is still
+  // stuck" is the question, and `state=all` is how a closed one is audited.
+  const openOnly = c.req.query('state') !== 'all'
+  const rawLimit = c.req.query('limit')
+  const limit = rawLimit === undefined ? undefined : Number.parseInt(rawLimit, 10)
+  if (limit !== undefined && !Number.isInteger(limit)) {
+    return c.json({ error: 'limit must be an integer' }, 400)
+  }
+
+  const holds = await listHolds(c.env.DB, {
+    openOnly,
+    ...(limit === undefined ? {} : { limit }),
+  })
+  return c.json({ holds, openOnly })
+})
+
+/**
+ * Ask the cell that owns the charges to try the refund again.
+ *
+ * No claim step, unlike a resolution: there is nothing to decide and nothing
+ * one operator can take from another. Two people retrying the same hold at once
+ * both reach the Durable Object, which processes one event at a time, and the
+ * second finds every leg the first recovered already stamped `refunded` — so it
+ * asks Stripe for nothing and adds nothing to `refunded_cents`.
+ */
+adminRoutes.post('/holds/:matchId/retry', async (c) => {
+  const operator = await operatorOf(c.env, c.req.raw)
+  if (operator === null) return c.json(notFound, 404)
+
+  const matchId = c.req.param('matchId')
+  const existing = await getHold(c.env.DB, matchId)
+  if (existing === null) return c.json(notFound, 404)
+  if (existing.releasedAt !== null) {
+    return c.json({ error: 'that hold is already released', hold: existing }, 409)
+  }
+
+  const money = await retryHold(c.env, existing.cell, matchId)
+  if (money === null) {
+    // Nothing moved and nothing is claimed to have. The row is left exactly as
+    // it was — `refunded_cents` untouched, still open — because a retry that
+    // could not be attempted is not a retry that came back empty.
+    return c.json({ error: 'the refund could not be re-attempted', matchId }, 502)
+  }
+
+  // Only now, after Stripe has answered: the same rule `stampDisputeRefund`
+  // follows, and the reason a leg whose refund failed stays `succeeded`.
+  await stampHoldRefund(c.env.DB, matchId, {
+    refundedCents: money.refundedCents,
+    heldCents: money.heldCents,
+    retriedAt: Date.now(),
+  })
+  const hold = await getHold(c.env.DB, matchId)
+  return c.json({ hold, refundedCents: money.refundedCents, heldCents: money.heldCents })
+})
+
+/**
+ * Re-attempt a hold's refund, in the cell that owns the charges.
+ *
+ * Returns null when the cell could not be asked at all, which the caller turns
+ * into a 502 and an untouched row rather than a stamp claiming a refund that
+ * was never answered for.
+ */
+async function retryHold(
+  env: Env,
+  cell: string,
+  matchId: string,
+): Promise<{ refundedCents: number; heldCents: number } | null> {
+  const stub = env.NUGG_POOL.get(env.NUGG_POOL.idFromName(cell))
+  const response = await stub.fetch(
+    new Request(`https://nugg-pool.internal${INTERNAL_HOLD_PATH}`, {
+      method: 'POST',
+      body: JSON.stringify({ matchId }),
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  )
+  if (!response.ok) return null
+  const result = (await response.json()) as { refundedCents?: unknown; heldCents?: unknown }
+  if (typeof result.refundedCents !== 'number' || typeof result.heldCents !== 'number') return null
+  return { refundedCents: result.refundedCents, heldCents: result.heldCents }
+}
 
 /**
  * Carry out the money half of a resolution, in the cell that owns the charges.

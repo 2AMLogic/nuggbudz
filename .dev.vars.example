@@ -48,14 +48,20 @@ STRIPE_WEBHOOK_SECRET=""
 # intentional test mode. Ignored entirely when Stripe is configured.
 ALLOW_UNCHARGED_PAIRING="1"
 
-# Who may list and resolve disputed pickups: comma-separated `users.id` values,
-# checked *in addition to* a real signed-in session (see the README's "Disputes"
-# section). Unset means there are no operators at all and every `/api/admin/*`
-# route answers 404, which is the shape a checkout and CI are in.
+# Who may list and resolve disputed pickups, and retry a refund Stripe refused:
+# comma-separated `users.id` values, checked *in addition to* a real signed-in
+# session (see the README's "Disputes" and "Holds" sections). Unset means there
+# are no operators at all and every `/api/admin/*` route answers 404, which is
+# the shape a checkout is in.
 #
-# `pnpm smoke` seeds an operator fixture; uncomment this to run its
-# dispute-resolution checks instead of reporting them as SKIP.
+# Two lanes seed an operator fixture and each uses its OWN id, because they run
+# against different servers with different session stores. Uncomment whichever
+# you are running; both may be listed at once, comma-separated.
+#
+#   `pnpm smoke`        — dispute-resolution checks (SMOKE_REQUIRE_ADMIN)
 # OPERATOR_USER_IDS="5eed5eed-0000-4000-8000-000000000033"
+#   `pnpm payment-gate` — holds queue and refund retry (PAYMENT_GATE_REQUIRE_ADMIN)
+# OPERATOR_USER_IDS="9a1d9a1d-0000-4000-8000-000000000033"
 
 # Where the Stripe REST calls go. Only ever set to point at
 # `scripts/fake-stripe.mjs`, which is how the charged path is driven end to end

@@ -19,6 +19,13 @@ export interface Env {
   /** How long a match nobody has confirmed at all waits before it is cancelled. */
   MATCH_CONFIRM_SECONDS?: string
   /**
+   * How close behind the longest-waiting buyer a rival has to be for standing to
+   * decide between them. Widening it makes the preference stronger and the wait a
+   * low-standing buyer can face longer; it can never make that wait unbounded.
+   * See `findMatch` in `shared/matchmaker.ts`.
+   */
+  STANDING_TIEBREAK_SECONDS?: string
+  /**
    * Google OAuth client credentials. Optional so a checkout without them still
    * boots — the auth routes answer 503 instead of the Worker failing to start.
    * The secret is only ever set with `wrangler secret put GOOGLE_CLIENT_SECRET`

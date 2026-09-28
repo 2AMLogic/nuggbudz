@@ -110,6 +110,15 @@ state.
   threat. Whitespace is normalised *before* control characters are stripped, so
   a newline separates words instead of gluing them. Add rules there, never in a
   second copy.
+- **Standing is a band, never a count, and never a queue order.** D1 keeps
+  per-account completion / no-show / late-cancel counters, and
+  `shared/reputation.ts` is the only thing allowed to read them: `standingBand`
+  is the only way out, `describeStanding` is the only copy that renders one, and
+  the wire carries the band alone — there is nothing in a `matched` message a
+  buyer could be shamed with. In matching it is a *tiebreak inside a window
+  anchored to the longest waiter's own join time*, which is what keeps the queue
+  starvation-free; `test/matchmaker.test.ts` drives that as a simulation. Never
+  widen it into a score that sorts the queue.
 - **A split settles only when both sides confirm the handoff.** The orderer
   holds a random pickup code (never derived from the match id, and never sent
   to the receiver); the receiver reads it off them. One side confirming alone

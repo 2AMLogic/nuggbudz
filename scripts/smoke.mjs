@@ -310,9 +310,34 @@ function seedUsers() {
   )
 }
 
+/**
+ * Clear the standing counters these fixtures accumulate.
+ *
+ * The local D1 survives between runs, and unlike the ledger — keyed on a fresh
+ * match id every time — `user_reputation` is keyed on the account, so a second
+ * run would find Gus with two completed splits and every assertion below off by
+ * the number of times the suite has been run.
+ */
+function resetReputation() {
+  const ids = [...new Set(Object.values(BUYERS).map((buyer) => buyer.userId))]
+  ledgerQuery(
+    `DELETE FROM user_reputation WHERE user_id IN (${ids.map((id) => `'${id}'`).join(', ')})`,
+  )
+}
+
+/** One buyer's raw counters, read straight out of D1 — never off the wire. */
+function reputationRow(userId) {
+  const [row] = ledgerQuery(
+    `SELECT splits_completed, no_shows, late_cancels FROM user_reputation
+     WHERE user_id = '${userId}'`,
+  )
+  return row ?? null
+}
+
 seedSessions()
 applyMigrations()
 seedUsers()
+resetReputation()
 const cookie = (buyer) => ({ Cookie: `nb_session=${buyer.sid}` })
 
 // --- REST surface ---
@@ -748,6 +773,21 @@ check(
   matchA.buddy.distanceMeters < 100,
   `${Math.round(matchA.buddy.distanceMeters)}m`,
 )
+// Standing reaches a buddy as one of three bands and nothing else. Both of these
+// accounts have just had their counters cleared, so `new` is the honest answer —
+// and the key check is the second one: there is no count on the wire to shame
+// anybody with, whatever their history.
+check(
+  'a bud’s standing arrives as a band',
+  matchA.buddy.standing === 'new' && matchB.buddy.standing === 'new',
+  `${matchA.buddy.standing}/${matchB.buddy.standing}`,
+)
+check(
+  'no raw reputation counts are ever sent to a bud',
+  Object.keys(matchA.buddy).every((key) => !/complet|no_?show|cancel|count/i.test(key)) &&
+    !/\d/.test(String(matchA.buddy.standing)),
+  Object.keys(matchA.buddy).join(','),
+)
 check(
   'only the orderer is given the pickup code',
   typeof matchA.pickupCode === 'string' && matchA.pickupCode.length === 6,
@@ -791,6 +831,22 @@ const left = await b.expect('buddy_left')
 check('survivor told their bud left', left.matchId === matchA.matchId)
 const requeued = await b.expect('waiting')
 check('survivor requeued', requeued.waiting >= 1, JSON.stringify(requeued))
+// Robb walked away from a match nobody had confirmed. That is the one
+// cancellation the protocol has direct evidence of — the socket that closed — so
+// it is charged to him and to nobody else.
+const robbAfterWalking = reputationRow(BUYERS.robb.userId)
+const danaAfterWalking = reputationRow(BUYERS.dana.userId)
+check(
+  'walking away from a match is counted against the buyer who left',
+  robbAfterWalking?.late_cancels === 1 && robbAfterWalking?.splits_completed === 0,
+  JSON.stringify(robbAfterWalking),
+)
+check(
+  'the buddy who was left behind is not counted against',
+  danaAfterWalking === null ||
+    (danaAfterWalking.late_cancels === 0 && danaAfterWalking.no_shows === 0),
+  JSON.stringify(danaAfterWalking),
+)
 // Then leave this market empty, so the protocol-hygiene socket below — which
 // deliberately reopens on Robb's coordinate — finds nobody to pair with. Since
 // #82 the promptless pair no longer depends on this: every placed fixture is a
@@ -941,6 +997,23 @@ check(
 const unsettled = ledgerQuery(`SELECT match_id FROM matches WHERE match_id = '${matchA.matchId}'`)
 check('an abandoned match is never booked', unsettled.length === 0, JSON.stringify(unsettled))
 
+// Completion, and only completion, raises a completion count — for both of them.
+const gusStanding = reputationRow(BUYERS.gus.userId)
+const hanaStanding = reputationRow(BUYERS.hana.userId)
+check(
+  'a completed handoff counts for both buddies',
+  gusStanding?.splits_completed === 1 && hanaStanding?.splits_completed === 1,
+  `${JSON.stringify(gusStanding)} / ${JSON.stringify(hanaStanding)}`,
+)
+check(
+  'a completed handoff counts nothing against either of them',
+  gusStanding?.no_shows === 0 &&
+    gusStanding?.late_cancels === 0 &&
+    hanaStanding?.no_shows === 0 &&
+    hanaStanding?.late_cancels === 0,
+  `${JSON.stringify(gusStanding)} / ${JSON.stringify(hanaStanding)}`,
+)
+
 g.confirm()
 const afterSettled = await g.expectError()
 check(
@@ -985,6 +1058,20 @@ const disputedRows = ledgerQuery(
   `SELECT match_id FROM matches WHERE match_id = '${receiverJ.matchId}'`,
 )
 check('a disputed match is never booked', disputedRows.length === 0, JSON.stringify(disputedRows))
+// Jed confirmed and Ivy never did, which is the one case where the protocol knows
+// which buddy did not turn up. Ivy carries the no-show; Jed carries nothing.
+const ivyStanding = reputationRow(BUYERS.ivy.userId)
+const jedStanding = reputationRow(BUYERS.jed.userId)
+check(
+  'the side that never confirmed is counted as a no-show',
+  ivyStanding?.no_shows === 1 && ivyStanding?.splits_completed === 0,
+  JSON.stringify(ivyStanding),
+)
+check(
+  'the side that did confirm is not counted against',
+  jedStanding === null || (jedStanding.no_shows === 0 && jedStanding.late_cancels === 0),
+  JSON.stringify(jedStanding),
+)
 j.confirm(ordererI.pickupCode)
 const afterDispute = await j.expectError()
 check(
@@ -2069,6 +2156,25 @@ if (!shortWindows) {
     'a message sent after a match is cancelled unconfirmed is refused',
     afterCancelled.code === 'not_matched',
     afterCancelled.code,
+  )
+
+  // Slow One is the orderer, and the orderer can confirm a handoff alone — they
+  // hold the code and only have to tap. So on a match nobody confirmed, their
+  // silence is evidence and the receiver's is not: Slow Two could not have
+  // confirmed even standing at the counter, because the code is not theirs to
+  // read. The cancellation is counted against the orderer only.
+  const slowOneStanding = reputationRow(BUYERS.slowOne.userId)
+  const slowTwoStanding = reputationRow(BUYERS.slowTwo.userId)
+  check(
+    'an expired match counts a late cancel against the orderer',
+    slowOneStanding?.late_cancels === 1 && slowOneStanding?.splits_completed === 0,
+    JSON.stringify(slowOneStanding),
+  )
+  check(
+    'a receiver who could not have confirmed alone is not counted against',
+    slowTwoStanding === null ||
+      (slowTwoStanding.late_cancels === 0 && slowTwoStanding.no_shows === 0),
+    JSON.stringify(slowTwoStanding),
   )
 
   // The boundary between the two timers, which is the thing most easily broken

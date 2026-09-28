@@ -23,6 +23,14 @@ GOOGLE_CLIENT_SECRET=""
 # QUEUE_WARN_LEAD_SECONDS="3"
 # MATCH_CONFIRM_SECONDS="8"
 
+# Socket upgrades one client may make per minute. The limiter keys on
+# `CF-Connecting-IP`, which `pnpm dev` never sets, so locally EVERY client shares
+# the `unknown` bucket — and `pnpm test:e2e` opens several dozen sockets a minute
+# from one machine. Raise it here to run the suites; the production figure lives
+# in wrangler.jsonc and is sized for a venue NAT, not for a test runner. Hitting
+# it looks like "Lost the connection. Try again." rather than like a refusal.
+# POOL_UPGRADE_LIMIT="300"
+
 # Stripe. Both of these are secrets in a deployed environment
 # (`wrangler secret put`), and a pool with either of them missing REFUSES TO
 # PAIR rather than pairing for free — see the README's "Payments" section.

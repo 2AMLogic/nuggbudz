@@ -7,6 +7,7 @@ import jsQR from 'jsqr'
 import { FIXTURE_COORDS } from '../scripts/pool-fixtures.mjs'
 import { SESSION_COOKIE } from '../shared/auth'
 import { DEFAULT_POOL_CELL_PRECISION, geohash } from '../shared/geo'
+import { pickupCodeFromScan, qrPayloadFor } from '../shared/handoff'
 import { generatePickupCode } from '../shared/pickup'
 import { pickupQrMatrix, QR_QUIET_ZONE_MODULES, qrSpanModules } from '../shared/qr'
 import { FAKE_CAMERA_ARGS, type GreyscaleImage, showToFakeCamera } from './fake-camera'
@@ -102,6 +103,20 @@ const SCENARIOS = {
       userId: accountId(8),
       name: 'Pim',
       at: 'e2eUnmountB',
+    },
+  },
+  noChunk: {
+    orderer: {
+      sid: sessionId('e2e-nochnk-a'),
+      userId: accountId(9),
+      name: 'Vera',
+      at: 'e2eNoChunkA',
+    },
+    receiver: {
+      sid: sessionId('e2e-nochnk-b'),
+      userId: accountId(10),
+      name: 'Hugo',
+      at: 'e2eNoChunkB',
     },
   },
 } as const
@@ -302,10 +317,11 @@ async function photograph(page: Page): Promise<GreyscaleImage> {
  * A QR of `code` as greyscale pixels, drawn here rather than by a browser.
  *
  * Only used by the wrong-code scenario, where the picture is a prop and the thing
- * under test is the server's refusal.
+ * under test is the server's refusal. `origin` is the page's own, so the forged
+ * symbol is indistinguishable from a real receipt's apart from the code in it.
  */
-function greyscaleQr(code: string, scale = 8): GreyscaleImage {
-  const matrix = pickupQrMatrix(code)
+function greyscaleQr(code: string, origin: string, scale = 8): GreyscaleImage {
+  const matrix = pickupQrMatrix(code, origin)
   const span = qrSpanModules(matrix) * scale
   const luma = Buffer.alloc(span * span, 255)
   for (const [row, cells] of matrix.entries()) {
@@ -376,13 +392,15 @@ test('a code read off the orderer’s screen by a camera settles the match', asy
     await expect(qrOf(receiver)).toHaveCount(0)
     await expect(receiver.getByText(/^[A-Z0-9]{6}$/)).toHaveCount(0)
 
-    // What the orderer's screen is actually showing, and what it says.
+    // What the orderer's screen is actually showing, and what it says. Since
+    // #101 that is a handoff link for this code — and nothing beside it: no
+    // match id, no user id, no session token.
     const shown = await photograph(orderer)
-    expect(
-      decode(shown),
-      'the rendered QR must carry the pickup code and nothing else — no match id, no ' +
-        'user id, no session token, no URL',
-    ).toBe(code)
+    const origin = new URL(orderer.url()).origin
+    expect(decode(shown), 'the rendered QR must carry the handoff link and nothing else').toBe(
+      qrPayloadFor(origin, code),
+    )
+    expect(pickupCodeFromScan(decode(shown) ?? '')).toBe(code)
 
     // Point the synthetic camera at that picture, then let the receiver tap.
     showToFakeCamera(shown)
@@ -437,7 +455,7 @@ test('a scanned QR from another match is refused, and typing still settles it', 
     // claim there is about what the receipt renders. The claim here is about what
     // the *server* does with a foreign code, so all this picture has to be is a
     // valid QR of one.
-    const forged = greyscaleQr(stranger)
+    const forged = greyscaleQr(stranger, new URL(receiver.url()).origin)
 
     showToFakeCamera(forged)
     const field = receiver.getByPlaceholder('------')
@@ -563,5 +581,41 @@ test('the camera stream is stopped when the receipt holding it goes away', async
       .not.toContain('live')
   } finally {
     await Promise.all(contexts.map((each) => each.close().catch(() => {})))
+  }
+})
+
+test('a decoder chunk that will not load is reported, and typing still settles', async ({
+  browser,
+}) => {
+  // The one camera-failure branch nothing covered. `CodeScanner` fetches `jsqr`
+  // on the tap rather than with the app — 55 kB nobody looking at a nugget deal
+  // should download — which means a flaky network, an ad blocker or a stale
+  // service worker can leave the receiver tapping a button that silently does
+  // nothing. Aborting the chunk at the network is exactly that, and what it has
+  // to produce is a refusal in the same register as a denied camera: say what
+  // happened, and point at the path that still works.
+  const pair = SCENARIOS.noChunk
+  const { contexts, orderer, receiver, code } = await pairUp(browser, pair)
+
+  try {
+    await receiver.route(/jsqr/i, (route) => route.abort())
+
+    await receiver.getByRole('button', { name: /scan their code/i }).click()
+    await expect(receiver.getByText(/could not load the scanner/i)).toBeVisible()
+    // Not a dead end, and it says so in the same words every other refusal does.
+    await expect(receiver.getByText(/type it/i).first()).toBeVisible()
+    // And no viewfinder was opened to fail in: the chunk is fetched before
+    // `getUserMedia`, on purpose, so a decoder that cannot load never becomes a
+    // permission prompt the buyer answers for nothing.
+    await expect(receiver.getByRole('button', { name: /stop the camera/i })).toHaveCount(0)
+    await expect(receiver.locator('video')).toBeHidden()
+
+    await receiver.getByPlaceholder('------').fill(code)
+    await receiver.getByRole('button', { name: /got the box/i }).click()
+    await expect(receiver.getByText(/waiting on/i)).toBeVisible()
+    await orderer.getByRole('button', { name: /handed it over/i }).click()
+    await expect(receiver.getByText(/both of you confirmed the handoff/i)).toBeVisible()
+  } finally {
+    await Promise.all(contexts.map((context) => context.close().catch(() => {})))
   }
 })

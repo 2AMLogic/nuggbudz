@@ -19,6 +19,13 @@ const MODULE_PIXELS = 8
  * it by standing in front of them — but through the air on a camera rather than
  * spelled out loud. Same trust, no new server surface.
  *
+ * The symbol carries a **link** to that code (#101), not the bare code, so the
+ * receiver does not need this app's scanner at all: their phone's own camera app
+ * shows a tappable `nuggbudz.com/h/K7M2QX`, which either carries them into the
+ * handoff or — failing that — simply shows them six characters to type. The
+ * origin comes off this page rather than a constant, so a preview deploy prints
+ * a link back to itself.
+ *
  * Drawn to a canvas rather than an SVG so the pixels a scanner sees are readable
  * back out of the page, which is how `e2e/scan.spec.ts` feeds a real browser's
  * camera the orderer's real screen instead of a re-render of its own.
@@ -27,7 +34,7 @@ export function PickupQr({ value }: { value: string }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   // Pure and cheap, but it decides the element's attributes, so it has to be
   // known during render rather than in the effect that paints.
-  const matrix = useMemo(() => pickupQrMatrix(value), [value])
+  const matrix = useMemo(() => pickupQrMatrix(value, window.location.origin), [value])
   const span = qrSpanModules(matrix) * MODULE_PIXELS
 
   useEffect(() => {

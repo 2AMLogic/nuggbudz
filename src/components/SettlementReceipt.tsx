@@ -33,6 +33,7 @@ export function SettlementReceipt({
   onConfirm,
   onSendChat,
   onDone,
+  initialCode,
 }: {
   match: MatchedMessage
   /**
@@ -64,10 +65,18 @@ export function SettlementReceipt({
   onConfirm: (code?: string) => void
   onSendChat: (text: string) => void
   onDone: () => void
+  /**
+   * A code this browser arrived carrying, because a phone's own camera app
+   * opened the handoff link on the orderer's receipt. It seeds the field the
+   * receiver would otherwise have typed into, and does nothing else: the tap is
+   * still theirs, and the server still checks the code against the record and
+   * the role against the socket. Null on every other route to this screen.
+   */
+  initialCode?: string | null
 }) {
   const deal = findDeal(match.settlement.dealId)
   const { settlement, share, buddy, role } = match
-  const [typedCode, setTypedCode] = useState('')
+  const [typedCode, setTypedCode] = useState(initialCode ?? '')
   const iConfirmed = confirmed.includes(role)
 
   // Ids resolve to labels through the catalogue, so a buddy's pick is never a

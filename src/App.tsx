@@ -4,11 +4,13 @@ import { formatMiles } from '@shared/geo'
 import { describeLocationSource, type LocationSource } from '@shared/location'
 import { saucesForMerchant } from '@shared/sauces'
 import { useEffect, useState } from 'react'
+import { HandoffCard } from './components/HandoffCard'
 import { RadiusMap } from './components/RadiusMap'
 import { Line, Perf, Roll } from './components/Roll'
 import { SaucePicker } from './components/SaucePicker'
 import { SettlementReceipt } from './components/SettlementReceipt'
 import { useCoords } from './hooks/useCoords'
+import { useHandoff } from './hooks/useHandoff'
 import { usePool } from './hooks/usePool'
 import { useSauces } from './hooks/useSauces'
 import { useSession } from './hooks/useSession'
@@ -19,6 +21,16 @@ interface DealWithMath extends DealSpec {
 }
 
 const DEMO_NAME_KEY = 'nuggbudz.demoName'
+
+/**
+ * How long a handoff link waits before deciding nobody claimed it.
+ *
+ * The server answers on the same round trip as `welcome`, so this is a
+ * connection's worth of slack and not a retry budget. Erring long only delays a
+ * fallback; erring short would print "this device is not in that match" at a
+ * device that is.
+ */
+const HANDOFF_GRACE_MS = 2_000
 
 function readStoredDemoName(): string {
   try {
@@ -39,6 +51,20 @@ export function App() {
   const coords = useCoords()
   const pool = usePool()
   const session = useSession()
+  // Set only when this browser arrived on `/h/<code>` — a phone's own camera app
+  // opening the QR on somebody's receipt.
+  const handoff = useHandoff()
+  /**
+   * True until the server has had a moment to say whether it knows this browser
+   * as half of a live handoff.
+   *
+   * There is no "you are in no match" message, and there should not be: the
+   * server answers by *adopting* the socket at upgrade time or not, so the
+   * absence is the answer. A short wait is what turns that absence into
+   * something a screen can say, and it is bounded rather than a poll because the
+   * answer rides the same round trip as `welcome`.
+   */
+  const [handoffResolving, setHandoffResolving] = useState(handoff.code !== null)
   // Signed in, and the pair lives on the account; not, and this browser is its
   // only home — which is the whole story for a demo buyer, who has no account.
   const sauces = useSauces(session.user !== null)
@@ -81,6 +107,25 @@ export function App() {
     }
   }, [])
 
+  /**
+   * Arrived on a handoff link: open a socket and let the server decide whether
+   * this browser is in that match.
+   *
+   * No coordinates, deliberately. The upgrade needs a shard, and the server
+   * resolves one from the edge exactly as it does for a buyer who never answered
+   * a location prompt — which is the same shard the first tab was placed in,
+   * since the shard is ~156 km across. Prompting for a position here, on a
+   * screen somebody reached by pointing a camera at a receipt, would be the
+   * worst moment this app could pick to ask.
+   */
+  const attach = pool.attach
+  useEffect(() => {
+    if (handoff.code === null) return
+    attach({ demoName: readStoredDemoName().trim() || undefined })
+    const settle = window.setTimeout(() => setHandoffResolving(false), HANDOFF_GRACE_MS)
+    return () => window.clearTimeout(settle)
+  }, [handoff.code, attach])
+
   /** In demo mode an unauthenticated buyer pairs under a name they type. */
   const demoReady = demoPairing === true && session.user === null && demoName.trim().length > 0
   const identified = session.user !== null || demoReady
@@ -101,6 +146,16 @@ export function App() {
       // Only a finished pair goes up; the server validates it against the menu.
       sauces: sauces.selection ?? undefined,
     })
+  }
+
+  /**
+   * Walk away from a match. Also forgets the handoff link that led here, if
+   * there was one — otherwise leaving would drop straight back onto the screen
+   * printing that code.
+   */
+  const leaveMatch = () => {
+    handoff.dismiss()
+    pool.leave()
   }
 
   const selected = deals.find((deal) => deal.id === dealId) ?? null
@@ -127,7 +182,26 @@ export function App() {
           chatError={pool.chatError}
           onConfirm={pool.confirmPickup}
           onSendChat={pool.sendChat}
-          onDone={pool.leave}
+          onDone={leaveMatch}
+          initialCode={handoff.code}
+        />
+      </Shell>
+    )
+  }
+
+  // Reached only when the server did not recognise this browser as half of that
+  // handoff, or has not answered yet. The code is still worth showing: reading
+  // it out is the path the protocol was built on.
+  if (handoff.code !== null) {
+    return (
+      <Shell radiusMeters={pool.radiusMeters} source={pool.locationSource}>
+        <HandoffCard
+          code={handoff.code}
+          resolving={handoffResolving}
+          onDismiss={() => {
+            handoff.dismiss()
+            pool.leave()
+          }}
         />
       </Shell>
     )

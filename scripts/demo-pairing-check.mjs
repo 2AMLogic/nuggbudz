@@ -19,6 +19,14 @@
  * demo pair reaches `completeMatch()` exactly as a real pair does, so only
  * reading D1 afterwards proves the split was not booked as revenue.
  *
+ * Since #101 a demo identity is **per browser**, carried on a cookie, so this
+ * script has to behave like two browsers rather than like one process. Each side
+ * fetches its own identity from `/api/health` and carries only its own cookie on
+ * its own socket, and the check that they came back different is asserted rather
+ * than left to the accident that `undici`'s WebSocket has no cookie jar. That
+ * accident is one refactor away from collapsing both sides into one buyer and
+ * failing mysteriously.
+ *
  * Usage:  BASE=http://localhost:5199 node scripts/demo-pairing-check.mjs
  */
 import { execFileSync } from 'node:child_process'
@@ -60,16 +68,40 @@ const demo = health.demoPairing === true
 console.log(`server reports demoPairing=${health.demoPairing} (protocol ${health.protocol})\n`)
 
 /**
- * Open a demo socket the way a phone now does: a name, and no coordinates.
+ * One browser's cookie jar: fetch `/api/health` from scratch and keep whatever
+ * demo identity it hands back.
+ *
+ * Deliberately *not* shared between the two sides. Sharing it would make them
+ * one buyer, the self-match refusal would fire, and this script would stop
+ * proving anything about pairing — which is the failure mode #101 warned about
+ * and the reason each jar is separate here by construction rather than by luck.
+ */
+async function freshDemoIdentity(label) {
+  const response = await fetch(`${BASE}/api/health`)
+  const raw = response.headers.get('set-cookie') ?? ''
+  // Treated as opaque, exactly the way a browser treats it: whatever name and
+  // value the server set, sent back unread. Naming the cookie here would be a
+  // second spelling of something `shared/demo.ts` already owns, and this module
+  // is plain Node and cannot import it.
+  const pair = raw.split(';')[0].trim()
+  if (!pair.includes('=') || pair.endsWith('=')) {
+    throw new Error(`${label}: /api/health issued no demo identity cookie — got '${raw}'`)
+  }
+  return pair
+}
+
+/**
+ * Open a demo socket the way a phone now does: its own cookie, a name, and no
+ * coordinates.
  *
  * Nothing is sent about where the caller is, so the Worker resolves the position
  * itself — from `request.cf` on a deployed server, from the demo origin locally.
  * Two clients behind the same connection therefore land in the same market,
  * which is the whole point on a stage where nobody should see a location prompt.
  */
-function open(name) {
+function open(name, identity) {
   const params = new URLSearchParams({ name })
-  const ws = new WebSocket(`${WS}/api/pool/ws?${params}`)
+  const ws = new WebSocket(`${WS}/api/pool/ws?${params}`, { headers: { Cookie: identity } })
   const inbox = []
   const waiters = []
   ws.addEventListener('message', (e) => {
@@ -96,6 +128,11 @@ function open(name) {
         setTimeout(() => reject(new Error(`${name}: timed out waiting for ${type}`)), ms)
       })
     },
+    /** Has a message of this type turned up by now? Used to assert absence. */
+    async settles(type, ms = 600) {
+      await new Promise((r) => setTimeout(r, ms))
+      return inbox.some((m) => m.type === type)
+    },
     join(dealId = 'mcd-nuggets-20') {
       ws.send(JSON.stringify({ type: 'join', dealId }))
     },
@@ -117,8 +154,22 @@ if (!demo) {
   const body = await res.json().catch(() => ({}))
   check('refusal says why', body.error === 'sign in required', JSON.stringify(body))
 } else {
-  const a = open('Robb')
-  const b = open('Dana')
+  // Two browsers, two jars. Asserted before anything is opened, so a server that
+  // stopped issuing identities — or started issuing one identity to everybody —
+  // fails here rather than as a pairing timeout twenty lines down.
+  const [jarA, jarB] = await Promise.all([freshDemoIdentity('side A'), freshDemoIdentity('side B')])
+  check('each browser is issued its own demo identity', jarA !== jarB, `${jarA} vs ${jarB}`)
+  check(
+    'and a browser that already has one is not given a second',
+    await (async () => {
+      const again = await fetch(`${BASE}/api/health`, { headers: { Cookie: jarA } })
+      return (again.headers.get('set-cookie') ?? '') === ''
+    })(),
+    're-issuing one every request would be per-socket minting with extra steps',
+  )
+
+  const a = open('Robb', jarA)
+  const b = open('Dana', jarB)
   await Promise.all([a.opened, b.opened])
 
   const welcome = await a.expect('welcome')
@@ -130,10 +181,18 @@ if (!demo) {
       welcome.radiusMeters > 0,
     `${welcome.cell} ${JSON.stringify(welcome.position)} ${welcome.radiusMeters}m`,
   )
+  const welcomeB = await b.expect('welcome')
   check(
     'welcome carries a demo identity',
     typeof welcome.user?.id === 'string' && welcome.user.id.startsWith('demo:'),
     JSON.stringify(welcome.user),
+  )
+  check(
+    'the two sides are two identities, and each is its own cookie',
+    welcome.user.id !== welcomeB.user.id &&
+      jarA.endsWith(welcome.user.id.slice('demo:'.length)) &&
+      jarB.endsWith(welcomeB.user.id.slice('demo:'.length)),
+    `${welcome.user.id} / ${welcomeB.user.id}`,
   )
   check(
     'the position came from the server, with no coordinates and no prompt',
@@ -143,6 +202,33 @@ if (!demo) {
 
   a.join()
   await a.expect('waiting')
+
+  // --- a second tab of one browser is one buyer, and is told so (#101) ---
+  // The cost the operator accepted, exercised rather than described: the same
+  // cookie is the same person, so this socket cannot queue beside the one it is
+  // sharing an identity with, and it is told which tab it is already in.
+  const sameBrowser = open('Robb', jarA)
+  await sameBrowser.opened
+  const sameBrowserWelcome = await sameBrowser.expect('welcome')
+  check(
+    'a second tab of one browser is the same identity, not a new one',
+    sameBrowserWelcome.user?.id === welcome.user.id,
+    `${sameBrowserWelcome.user?.id} vs ${welcome.user.id}`,
+  )
+  sameBrowser.join()
+  const refused = await sameBrowser.expect('error')
+  check(
+    'a second tab is refused while the first is queued, with a message saying which tab',
+    refused.code === 'already_waiting' && /another tab or window/i.test(refused.message ?? ''),
+    `${refused.code}: ${refused.message}`,
+  )
+  check(
+    'and takes no seat at all',
+    (await sameBrowser.settles('waiting')) === false,
+    JSON.stringify(sameBrowser.inbox.map((m) => m.type)),
+  )
+  sameBrowser.ws.close()
+
   b.join()
   const [ma, mb] = await Promise.all([a.expect('matched'), b.expect('matched')])
 
@@ -188,6 +274,48 @@ if (!demo) {
     `${ma.pickupCode}`,
   )
   check('and the receiver still never gets it', mb.pickupCode === null, `${mb.pickupCode}`)
+
+  // --- the native-camera path, at the protocol level (#101) ---
+  // A phone's own camera app opens the handoff link in a NEW TAB, which is a new
+  // socket. This is what has to happen on that socket: the server recognises the
+  // cookie as the same buyer and seats it in the live match, as the same role,
+  // with no `join` sent and nothing confirmed. Without the sticky identity it
+  // would arrive as a stranger the match has never heard of, which is the whole
+  // reason the cookie exists.
+  const scannerTab = open('Dana', jarB)
+  await scannerTab.opened
+  const scannerWelcome = await scannerTab.expect('welcome')
+  check(
+    'a new tab of the receiver’s browser is the same identity',
+    scannerWelcome.user?.id === welcomeB.user.id,
+    `${scannerWelcome.user?.id} vs ${welcomeB.user.id}`,
+  )
+  const adopted = await scannerTab.expect('matched')
+  check(
+    'and is seated in the same live match, without sending a join',
+    adopted.matchId === ma.matchId && adopted.role === 'receiver',
+    `${adopted.matchId} as ${adopted.role}`,
+  )
+  check(
+    'the receiver’s second tab is still never handed the code',
+    adopted.pickupCode === null,
+    `${adopted.pickupCode}`,
+  )
+  check(
+    'and opening it confirmed nothing on its own',
+    (await scannerTab.settles('pickup_confirmed')) === false &&
+      [a, b].every((s) => s.inbox.every((m) => m.type !== 'pickup_confirmed')),
+    JSON.stringify([a, b].map((s) => s.inbox.map((m) => m.type))),
+  )
+  // And closing it does not tear the match down: a match is abandoned only when
+  // the last socket on that side goes.
+  scannerTab.ws.close()
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  check(
+    'closing the tab the link opened leaves the match alone',
+    [a, b].every((s) => s.inbox.every((m) => m.type !== 'buddy_left')),
+    JSON.stringify([a, b].map((s) => s.inbox.map((m) => m.type))),
+  )
 
   // --- a demo handoff completes on screen, and books nothing ---
   // The demo is still worth running on a stage: the pair must get all the way to

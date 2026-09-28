@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { demoPairingEnabled, demoUserId, isDemoUserId, sanitizeDemoName } from '../shared/demo'
+import {
+  DEMO_COOKIE,
+  DEMO_TOKEN_LENGTH,
+  DEMO_TTL_SECONDS,
+  demoCookie,
+  demoPairingEnabled,
+  demoTokenFromCookieHeader,
+  demoUserId,
+  isDemoTokenShaped,
+  isDemoUserId,
+  sanitizeDemoName,
+} from '../shared/demo'
+import { classifyUserId } from '../shared/identity'
 
 describe('demoPairingEnabled', () => {
   it('is off when the var is absent — the production default', () => {
@@ -104,7 +116,75 @@ describe('demoUserId', () => {
     expect(isDemoUserId('google:demo')).toBe(false)
   })
 
-  it('is distinct per call site input, so two tabs cannot collide', () => {
+  it('is distinct per call site input, so two buyers cannot collide', () => {
     expect(demoUserId('one')).not.toBe(demoUserId('two'))
+  })
+
+  it('is the *same* for two sockets of one browser, which is the #101 trade', () => {
+    // Stated as a test rather than only as prose, because it is the behaviour
+    // change: the same demo cookie yields the same identity, which is what lets
+    // a new tab opened by a phone's camera app be recognised as the receiver of
+    // a live match — and what makes two tabs on one laptop one buyer.
+    const token = 'a'.repeat(DEMO_TOKEN_LENGTH)
+    expect(demoUserId(token)).toBe(demoUserId(token))
+  })
+})
+
+describe('the demo identity cookie', () => {
+  const token = 'Yk7v-Zq_3'.padEnd(DEMO_TOKEN_LENGTH, 'x').slice(0, DEMO_TOKEN_LENGTH)
+
+  it('accepts only a token this server could have minted', () => {
+    expect(isDemoTokenShaped(token)).toBe(true)
+    for (const bad of [
+      undefined,
+      null,
+      42,
+      '',
+      'short',
+      'x'.repeat(DEMO_TOKEN_LENGTH - 1),
+      'x'.repeat(DEMO_TOKEN_LENGTH + 1),
+      // Not base64url. A cookie is attacker-controlled and its value is spliced
+      // into a user id, so the charset is the boundary that keeps `demo:` ids
+      // from carrying anything a log or a ledger gate would have to cope with.
+      `${'x'.repeat(DEMO_TOKEN_LENGTH - 1)}+`,
+      `${'x'.repeat(DEMO_TOKEN_LENGTH - 1)}/`,
+      `${'x'.repeat(DEMO_TOKEN_LENGTH - 1)};`,
+    ]) {
+      expect(isDemoTokenShaped(bad), `accepted ${JSON.stringify(bad)}`).toBe(false)
+    }
+  })
+
+  it('reads its own cookie back, and ignores a malformed one', () => {
+    const header = demoCookie(token, { secure: true }).split(';')[0]
+    expect(demoTokenFromCookieHeader(header)).toBe(token)
+    expect(demoTokenFromCookieHeader(`nb_session=abc; ${header}`)).toBe(token)
+    expect(demoTokenFromCookieHeader(null)).toBeNull()
+    expect(demoTokenFromCookieHeader('')).toBeNull()
+    expect(demoTokenFromCookieHeader(`${DEMO_COOKIE}=nope`)).toBeNull()
+    expect(demoTokenFromCookieHeader('nb_session=abc')).toBeNull()
+  })
+
+  it('is HttpOnly and SameSite=Lax, because the link is a top-level navigation', () => {
+    const cookie = demoCookie(token, { secure: true })
+    expect(cookie).toContain('HttpOnly')
+    // Load-bearing rather than conventional: a phone's camera app opening
+    // `/h/<code>` is a top-level navigation, which `Lax` sends the cookie on and
+    // `Strict` would not — and dropping it there is exactly the failure this
+    // cookie exists to prevent.
+    expect(cookie).toContain('SameSite=Lax')
+    expect(cookie).toContain(`Max-Age=${DEMO_TTL_SECONDS}`)
+    expect(cookie).toContain('Path=/')
+  })
+
+  it('is Secure only over TLS, so a stage laptop on http keeps its identity', () => {
+    expect(demoCookie(token, { secure: true })).toContain('Secure')
+    expect(demoCookie(token, { secure: false })).not.toContain('Secure')
+  })
+
+  it('yields a user id the ledger gate still reads as a demo one', () => {
+    // The whole point of the prefix: a cookie-backed demo identity must book no
+    // money, exactly as a per-socket one did.
+    expect(classifyUserId(demoUserId(token))).toBe('demo')
+    expect(isDemoUserId(demoUserId(token))).toBe(true)
   })
 })

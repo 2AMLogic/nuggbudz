@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { appPalette, deckPalette } from '../scripts/brand-palette-probe.mjs'
 import {
   auditDeck,
   buildLedger,
@@ -128,5 +129,77 @@ describe('pitch deck figures', () => {
         'nearly every merge, so say the checks pass and name no number —\n' +
         'see "Why the deck does not quote a check count" in refs/smoke-runs.md.\n',
     ).toEqual([])
+  })
+})
+
+describe('the orphan scan', () => {
+  it('ignores a Marp background split width, which is layout and not a claim', () => {
+    // `![bg right:34%]` is how a slide asks for a 34%-wide background panel. The
+    // viewer never reads it and no catalogue could produce it, so scanning it
+    // reports a percentage that cannot be traced and cannot be fixed — the deck
+    // renders correctly and the build goes red anyway. #124 hit this for real.
+    const slide = {
+      name: 'fixture.md',
+      text: '![bg right:34%](assets/generated/hero.png)\n\n## A slide\n',
+    }
+
+    expect(auditDeck(slide, [], ledger).orphans).toEqual([])
+  })
+
+  it('still reads a figure caption, so a number cannot hide in an alt-string', () => {
+    // The exemption is all-or-nothing on purpose: only an alt made *entirely* of
+    // Marp keywords is skipped. Prose in an alt is still prose.
+    const slide = {
+      name: 'fixture.md',
+      text: '![Margins improved 34% year on year](figures/x.png)\n\nMargin was 34%.\n',
+    }
+
+    expect(auditDeck(slide, [], ledger).orphans.map((orphan) => orphan.literal)).toEqual([
+      '34%',
+      '34%',
+    ])
+  })
+
+  it('still reads prose that trails a keyword run, not only prose that leads one', () => {
+    // Both cases above put the prose *first*, so a regex widened only at the
+    // tail — `(?:KW)(?:\s+KW)*[^\]]*\]`, accepting any junk once a keyword has
+    // matched — passes them both while leaking every number after the last
+    // keyword. This is the case that kills that mutant: the alt opens with a
+    // genuine Marp directive and only then turns into a claim.
+    const slide = {
+      name: 'fixture.md',
+      text: '![bg right:34% \u2014 the spread is 34%](assets/generated/hero.png)\n',
+    }
+
+    expect(auditDeck(slide, [], ledger).orphans.map((orphan) => orphan.literal)).toEqual([
+      '34%',
+      '34%',
+    ])
+  })
+})
+
+describe('the deck theme and the app', () => {
+  // The deck is meant to be evidence that the product looks like this. A second
+  // hand-tuned palette is the way that stops being true: someone retunes the
+  // app's horizon and the slides keep last month's magenta, and nothing says so.
+  // The theme copies globals.css by value because Marp cannot import it, so this
+  // is the only thing keeping the copy honest.
+  const app = appPalette()
+  const deck = deckPalette()
+
+  it('reads two palettes that are actually there', () => {
+    // Both readers are regexes over files on disk. If either path moves, the
+    // maps come back empty and the two assertions below pass vacuously — which
+    // is the failure mode this whole check exists to prevent elsewhere.
+    expect(Object.keys(app).length).toBeGreaterThan(8)
+    expect(Object.keys(deck).length).toBeGreaterThan(8)
+  })
+
+  it('carries every one of the app\u2019s colour tokens', () => {
+    expect(Object.keys(deck).sort()).toEqual(Object.keys(app).sort())
+  })
+
+  it('spells each one with the app\u2019s own hex', () => {
+    expect(deck).toEqual(app)
   })
 })

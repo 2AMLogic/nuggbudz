@@ -209,6 +209,42 @@ const SCANNERS: readonly { kind: string; pattern: RegExp }[] = [
   { kind: 'ratio', pattern: /\b\d+(?:\.\d+)?×/g },
 ]
 
+/**
+ * One Marp image keyword: `bg`, `bg right:34%`, `w:60%`, `brightness:0.45`, …
+ *
+ * Only the keyword grammar, not "anything with a colon in it" — the whole point
+ * is that this must not match a real alt-string.
+ */
+const MARP_IMAGE_KEYWORD =
+  /(?:bg(?:\s+(?:left|right|vertical))?|w|h|width|height|blur|brightness|contrast|drop-shadow|grayscale|hue-rotate|invert|opacity|saturate|sepia)(?::[\w.%-]+)?|fit|auto/
+    .source
+
+/**
+ * An image whose alt-string is **only** Marp layout keywords, e.g.
+ * `![bg right:34%](hero.png)`.
+ *
+ * The split width of a background image is layout, not a claim: the viewer
+ * never reads it and no catalogue could produce it, so scanning it for money
+ * shapes reports a percentage that cannot be traced and cannot be fixed. That
+ * is a check failing for a thing it does not name — a deck that renders
+ * correctly goes red, and the only ways out are to allowlist `34%` for the
+ * whole deck (which would then hide a genuinely stale `34%` in prose) or to
+ * change the layout to suit the test.
+ *
+ * The match is deliberately all-or-nothing: the alt must consist *entirely* of
+ * keywords. `![Cost per nugget, three chains](per-nugget.png)` is prose and is
+ * still scanned, so a figure caption cannot smuggle a number past the audit.
+ */
+const MARP_DIRECTIVE_IMAGE = new RegExp(
+  String.raw`!\[\s*(?:${MARP_IMAGE_KEYWORD})(?:\s+(?:${MARP_IMAGE_KEYWORD}))*\s*\]`,
+  'g',
+)
+
+/** Blank the layout-keyword alt-strings so only prose reaches the scanners. */
+function scannable(text: string): string {
+  return text.replace(MARP_DIRECTIVE_IMAGE, '![]')
+}
+
 export interface DeckFile {
   /** Display name used in failure output, e.g. `deck.md`. */
   name: string
@@ -247,8 +283,9 @@ export function auditDeck(
 
   const orphans: Orphan[] = []
   for (const file of [slides, ...supporting]) {
+    const prose = scannable(file.text)
     for (const { kind, pattern } of SCANNERS) {
-      for (const hit of file.text.match(pattern) ?? []) {
+      for (const hit of prose.match(pattern) ?? []) {
         if (!allowed.has(hit)) orphans.push({ file: file.name, kind, literal: hit })
       }
     }

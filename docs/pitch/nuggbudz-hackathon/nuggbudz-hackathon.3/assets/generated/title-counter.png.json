@@ -1,0 +1,19 @@
+{
+  "tool": "imagine 0.1.0",
+  "provider": "gemini",
+  "model": "gemini-3.1-flash-image",
+  "alias": "nano-banana",
+  "prompt": "A composite of two layers, and the contrast between them is the point. The ground is a real photograph: available light, ordinary surfaces, a plain generic setting with no signage, no branding and no recognisable storefront. Sitting on that photographic plate is an unmistakably synthetic 1996 workstation render — a 3D Studio Max r4 render at 320x240 upscaled with visible pixels, flat shaded, hard faceted polygon edges, no smoothing, no antialiasing, one blown-out specular hotspot per object, banded eight-step gradients rather than blends. Palette: deep indigo through violet to hot magenta in the synthetic layer, one warm amber object, an untinted black and white checkerboard, phosphor green for any readout. The render layer never pretends to be photographic and the photograph is never retouched to look rendered; the two meet at a hard seam. A single faceted amber polygon nugget the size of a fist resting on the scuffed stainless steel ledge of an anonymous quick-service kitchen pass. The photographic half is the steel, the crumbs, the warm overhead strip light and the out-of-focus tiled wall behind it; the synthetic half is only the nugget itself and a small black and white checkerboard mat that runs out from under it and dies at a hard straight seam where the real steel continues. There is no rectangular panel, no screen, no monitor, no backdrop flat and no floating frame anywhere in the picture: the synthetic object sits directly on the real surface and the photograph fills the whole frame behind it. Subject centred and large in the frame, shot slightly from above, with room above and below so the picture survives a tall crop. 16:9 widescreen composition suitable for a slide, with the centre kept uncluttered. No text, no lettering, no numerals, no watermarks, no logos, no brand marks or trade dress of any kind, no recognisable real-world storefront, no identifiable faces.",
+  "refs": [],
+  "aspect_ratio": "16:9",
+  "size": null,
+  "sha256": "2f5e08d22427c49c0d3e8103c06dd5beec1be3893482aea9405dc3d74c497242",
+  "created": "2026-09-28T12:36:56-0700",
+  "slot": "title-counter",
+  "thread": "nuggbudz-hackathon",
+  "version_dir": "nuggbudz-hackathon.3",
+  "style": "nugg-1996-composite",
+  "steps": null,
+  "backend": "scripts.anvil_imagery_backend:Backend",
+  "png_sha256": "cdd6c15fe6fcd492f65f4e5833611940eb385696c397f4f7f393eacc6987f943"
+}

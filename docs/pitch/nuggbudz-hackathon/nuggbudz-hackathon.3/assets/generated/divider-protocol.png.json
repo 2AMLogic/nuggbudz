@@ -1,0 +1,19 @@
+{
+  "tool": "imagine 0.1.0",
+  "provider": "gemini",
+  "model": "gemini-3.1-flash-image",
+  "alias": "nano-banana",
+  "prompt": "A composite of two layers, and the contrast between them is the point. The ground is a real photograph: available light, ordinary surfaces, a plain generic setting with no signage, no branding and no recognisable storefront. Sitting on that photographic plate is an unmistakably synthetic 1996 workstation render — a 3D Studio Max r4 render at 320x240 upscaled with visible pixels, flat shaded, hard faceted polygon edges, no smoothing, no antialiasing, one blown-out specular hotspot per object, banded eight-step gradients rather than blends. Palette: deep indigo through violet to hot magenta in the synthetic layer, one warm amber object, an untinted black and white checkerboard, phosphor green for any readout. The render layer never pretends to be photographic and the photograph is never retouched to look rendered; the two meet at a hard seam. Two ordinary unbranded phones lying face up on a real formica table top, photographed from directly above in available light. Rising out of each screen is a flat shaded amber polygon nugget half, hard faceted, one blown out specular each, and a single hard phosphor green line drawn straight between them across the table. A black and white checkerboard plane runs out from under the phones and stops at a hard straight seam where the real formica continues. Top down, symmetrical, with a lot of empty table around the pair. 16:9 widescreen composition suitable for a slide, with the centre kept uncluttered. No text, no lettering, no numerals, no watermarks, no logos, no brand marks or trade dress of any kind, no recognisable real-world storefront, no identifiable faces.",
+  "refs": [],
+  "aspect_ratio": "16:9",
+  "size": null,
+  "sha256": "4c3771f184a3798e995d5c4499cb95a0a00aba87f6afe66d5964510d6f467502",
+  "created": "2026-09-28T12:35:27-0700",
+  "slot": "divider-protocol",
+  "thread": "nuggbudz-hackathon",
+  "version_dir": "nuggbudz-hackathon.3",
+  "style": "nugg-1996-composite",
+  "steps": null,
+  "backend": "scripts.anvil_imagery_backend:Backend",
+  "png_sha256": "aeeff51d2003dbc1e801f6d699164d4426dc232499bf1e1b221406d659928fc6"
+}

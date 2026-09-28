@@ -105,3 +105,8 @@ Thumbs.db
 /.voice/
 **/*.vision/pages/
 **/*.vision/slides/
+
+# Python bytecode. `scripts/` now holds a couple of Python files — the anvil
+# imagegen adapter and its runner — and importing them leaves a cache behind.
+__pycache__/
+*.py[cod]

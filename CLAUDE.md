@@ -92,7 +92,10 @@ state.
   coordinate at a call site.
 - **Identity comes from the session, never from a message.** The pool socket is
   authenticated at upgrade time and the display name a buddy sees is read off
-  the session in KV. A `name` on the wire is ignored, not trusted.
+  the session in KV. A `name` on the wire is ignored, not trusted, and a caller
+  cannot supply a user id on any path. In demo mode only, the display name
+  itself is caller-supplied — on the upgrade query string, not on the session
+  or on any message — since there is no signed-in session to read one from.
 - **Nuggchat is relayed and never stored.** A message between matched buddies is
   handed to the other socket or refused — nothing reaches D1, Durable Object
   storage or KV, and there is no history to fetch on reconnect. That is a

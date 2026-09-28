@@ -170,7 +170,25 @@ if (!demo) {
 
   const a = open('Robb', jarA)
   const b = open('Dana', jarB)
-  await Promise.all([a.opened, b.opened])
+  try {
+    await Promise.all([a.opened, b.opened])
+  } catch (err) {
+    // A refused upgrade surfaces as a raw WebSocket `error` event, not an
+    // `Error` — reported through `check()` like every other assertion here
+    // rather than left to propagate as an uncaught rejection (a ~40-line
+    // ErrorEvent dump). The exit code is unchanged: a failed `check()` already
+    // makes `failures > 0`, which is the same non-zero exit an uncaught
+    // rejection would have produced.
+    check(
+      'both demo sockets opened',
+      false,
+      err instanceof Event
+        ? `${err.type} event on ${err.target?.url ?? 'unknown url'}`
+        : String(err),
+    )
+    console.log(`\n${failures} CHECK(S) FAILED`)
+    process.exit(1)
+  }
 
   const welcome = await a.expect('welcome')
   check(

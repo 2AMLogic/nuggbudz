@@ -24,6 +24,7 @@ export function SettlementReceipt({
   waitingOn,
   stage,
   notice,
+  error,
   chat,
   chatError,
   onConfirm,
@@ -41,8 +42,15 @@ export function SettlementReceipt({
   waitingOn: BuyerRole | null
   stage: 'matched' | 'settled' | 'disputed'
   notice: string | null
+  /**
+   * A refusal about the handoff itself — a wrong pickup code, a second
+   * confirmation. Shown beside the control that earned it, which is why it is a
+   * separate prop from `chatError` rather than one "last error" for the screen.
+   */
+  error: string | null
   /** The live conversation. Empty once the match is over, because it is gone. */
   chat: ChatLine[]
+  /** Why the last line you tried to say did not go. Belongs under the input. */
   chatError: string | null
   onConfirm: (code?: string) => void
   onSendChat: (text: string) => void
@@ -199,6 +207,12 @@ export function SettlementReceipt({
           />
 
           <Perf />
+
+          {error !== null && (
+            <p className="mt-4 font-body text-sm text-ketchup" aria-live="polite">
+              {error}
+            </p>
+          )}
 
           {iConfirmed ? (
             <p className="mt-7 font-body text-sm leading-snug text-faded" aria-live="polite">

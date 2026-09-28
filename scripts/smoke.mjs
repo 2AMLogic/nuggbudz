@@ -1109,10 +1109,16 @@ check(
 /**
  * Markers that must never reach any store. Fresh per run, ASCII, and shaped so
  * they cannot plausibly occur for any other reason — SQLite keeps TEXT as UTF-8,
- * so if either of these was ever written it is findable verbatim on disk.
+ * so if any of these was ever written it is findable verbatim on disk.
+ *
+ * Fresh per run is the load-bearing half. These become needles for a scan of
+ * `.wrangler/state`, which survives between runs: a needle that an *earlier* run
+ * could also have produced turns the scan into an assertion about how recently
+ * the state directory was wiped, not about what this run stored.
  */
 const SAID_BY_A = `NUGGCHAT-NEVER-STORED-A-${crypto.randomUUID()}`
 const SAID_BY_B = `NUGGCHAT-NEVER-STORED-B-${crypto.randomUUID()}`
+const FLOODED = `NUGGCHAT-FLOODED-${crypto.randomUUID()}`
 
 // Hostile text, sent with a forged `matchId`, `from` and `name` attached. The
 // forged match is pair two's real one, so a server that believed any of it would
@@ -1202,7 +1208,7 @@ check(
 // threshold is pinned in `test/chat.test.ts`; what matters here is that the
 // socket consults it at all, and that a limited message is not relayed.
 const FLOOD = 40
-for (let i = 0; i < FLOOD; i++) chatC.chat(`flood ${i}`)
+for (let i = 0; i < FLOOD; i++) chatC.chat(`${FLOODED} ${i}`)
 const limited = await until(
   () => chatC.inbox.find((m) => m.type === 'error' && m.code === 'chat_rate_limited') ?? null,
 )
@@ -1332,8 +1338,8 @@ for (const [who, marker] of [
 }
 // The flood is the volume case: hundreds of characters of conversation through a
 // cell whose Durable Object was writing match records the whole time.
-const floodRows = ledgerRowsContaining('flood ')
-const floodFiles = persistedFilesContaining('flood 0')
+const floodRows = ledgerRowsContaining(FLOODED)
+const floodFiles = persistedFilesContaining(`${FLOODED} 0`)
 check(
   'and forty flooded messages left no trace either',
   floodRows.hits.length === 0 && floodFiles.hits.length === 0,

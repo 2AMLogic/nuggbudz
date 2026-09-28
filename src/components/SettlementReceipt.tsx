@@ -4,6 +4,7 @@ import { formatCents } from '@shared/economics'
 import { formatDistance } from '@shared/geo'
 import { PICKUP_CODE_LENGTH } from '@shared/pickup'
 import type { MatchedMessage } from '@shared/protocol'
+import { describeSauceSelection, type SauceSelection } from '@shared/sauces'
 import { useState } from 'react'
 import type { ChatLine } from '../hooks/usePool'
 import { Barcode } from './Barcode'
@@ -18,6 +19,7 @@ import { Line, Perf } from './Roll'
  */
 export function SettlementReceipt({
   match,
+  yourSauces,
   confirmed,
   waitingOn,
   stage,
@@ -29,6 +31,11 @@ export function SettlementReceipt({
   onDone,
 }: {
   match: MatchedMessage
+  /**
+   * Your own pair, from this browser rather than off the wire — the server has no
+   * reason to echo back a choice you just made. Null if you picked none.
+   */
+  yourSauces: SauceSelection | null
   /** Sides of the handoff confirmed so far. */
   confirmed: BuyerRole[]
   waitingOn: BuyerRole | null
@@ -45,6 +52,12 @@ export function SettlementReceipt({
   const { settlement, share, buddy, role } = match
   const [typedCode, setTypedCode] = useState('')
   const iConfirmed = confirmed.includes(role)
+
+  // Ids resolve to labels through the catalogue, so a buddy's pick is never a
+  // string off the wire being rendered — and an id the menu no longer holds shows
+  // as nothing rather than as itself.
+  const yourOrder = describeSauceSelection(yourSauces)
+  const buddyOrder = describeSauceSelection(buddy.sauces)
 
   const instruction =
     role === 'orderer'
@@ -102,6 +115,16 @@ export function SettlementReceipt({
         emphasis="savings"
         delay={620}
       />
+
+      {/* The practical half of the sauce chart: whoever is standing at the counter
+          is ordering for two, so both pairs are on both receipts. */}
+      {(yourOrder !== null || buddyOrder !== null) && (
+        <>
+          <Perf label="Sauces" />
+          <Line label="Yours" value={yourOrder ?? 'Dealer’s choice'} delay={660} />
+          <Line label={`${buddy.name}’s`} value={buddyOrder ?? 'Dealer’s choice'} delay={700} />
+        </>
+      )}
 
       <Perf
         label={stage === 'settled' ? 'Settled' : stage === 'disputed' ? 'Disputed' : 'Pickup'}

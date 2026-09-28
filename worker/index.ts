@@ -15,6 +15,7 @@ import { clientKey as deriveClientKey } from '../shared/ratelimit'
 import { authRoutes, sessionFromRequest } from './auth'
 import { type Env, intVar } from './env'
 import { checkUpgradeRate } from './ratelimit'
+import { sauceRoutes } from './sauces'
 
 export { NuggPool } from './pool'
 
@@ -32,6 +33,10 @@ app.get('/api/health', (c) =>
 )
 
 app.route('/api/auth', authRoutes)
+
+// A signed-in buyer's sauce pair. Mounted before the `/api/*` catch-all below,
+// which Hono would otherwise match first.
+app.route('/api', sauceRoutes)
 
 /** The deal catalogue, each with its settlement and the spread it arbitrages. */
 // Only the deals the app currently offers — see INACTIVE_DEAL_IDS in

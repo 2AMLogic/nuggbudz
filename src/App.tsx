@@ -1,12 +1,15 @@
 import type { DealSpec, Settlement, SpreadAnalysis } from '@shared/economics'
 import { formatCents } from '@shared/economics'
 import { describeLocationSource, type LocationSource } from '@shared/location'
+import { saucesForMerchant } from '@shared/sauces'
 import { useEffect, useState } from 'react'
 import { CellMap } from './components/CellMap'
 import { Line, Perf, Roll } from './components/Roll'
+import { SaucePicker } from './components/SaucePicker'
 import { SettlementReceipt } from './components/SettlementReceipt'
 import { useCoords } from './hooks/useCoords'
 import { usePool } from './hooks/usePool'
+import { useSauces } from './hooks/useSauces'
 import { useSession } from './hooks/useSession'
 
 interface DealWithMath extends DealSpec {
@@ -35,6 +38,9 @@ export function App() {
   const coords = useCoords()
   const pool = usePool()
   const session = useSession()
+  // Signed in, and the pair lives on the account; not, and this browser is its
+  // only home — which is the whole story for a demo buyer, who has no account.
+  const sauces = useSauces(session.user !== null)
 
   useEffect(() => {
     let cancelled = false
@@ -91,6 +97,8 @@ export function App() {
       lat: coords.fix?.lat,
       lng: coords.fix?.lng,
       demoName: session.user === null ? demoName.trim() : undefined,
+      // Only a finished pair goes up; the server validates it against the menu.
+      sauces: sauces.selection ?? undefined,
     })
   }
 
@@ -107,6 +115,7 @@ export function App() {
       <Shell cell={pool.cell} source={pool.locationSource}>
         <SettlementReceipt
           match={pool.match}
+          yourSauces={sauces.selection}
           confirmed={pool.confirmed}
           waitingOn={pool.waitingOn}
           stage={pool.stage}
@@ -218,6 +227,18 @@ export function App() {
           )
         })}
       </div>
+
+      {selected !== null && (
+        <>
+          <Perf label="Sauce chart" />
+          <SaucePicker
+            sauces={saucesForMerchant(selected.merchant)}
+            picks={sauces.picks}
+            selection={sauces.selection}
+            onTap={sauces.tap}
+          />
+        </>
+      )}
 
       <Perf label="Who are you" />
 

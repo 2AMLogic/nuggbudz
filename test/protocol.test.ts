@@ -51,6 +51,41 @@ describe('parseClientMessage', () => {
     })
   })
 
+  it('carries a sauce pair through on a join', () => {
+    const raw = JSON.stringify({
+      type: 'join',
+      dealId: 'mcd-nuggets-20',
+      sauces: ['mcd-ketchup', 'mcd-hot-mustard'],
+    })
+    // Passed through as sent, not reordered: whether these name real sauces on
+    // this deal's menu is the catalogue's question, asked in `worker/pool.ts`.
+    expect(parseClientMessage(raw)).toEqual({
+      type: 'join',
+      dealId: 'mcd-nuggets-20',
+      sauces: ['mcd-ketchup', 'mcd-hot-mustard'],
+    })
+  })
+
+  it('accepts a join with no sauces — a buyer need not have picked a pair', () => {
+    expect(parseClientMessage('{"type":"join","dealId":"d","sauces":null}')).toEqual({
+      type: 'join',
+      dealId: 'd',
+    })
+  })
+
+  it('rejects a join whose sauces are not two short strings', () => {
+    const bad = (sauces: unknown) =>
+      parseClientMessage(JSON.stringify({ type: 'join', dealId: 'd', sauces }))
+    expect(bad('mcd-ketchup')).toBeNull()
+    expect(bad([])).toBeNull()
+    expect(bad(['mcd-ketchup'])).toBeNull()
+    expect(bad(['mcd-ketchup', 'mcd-ketchup', 'mcd-ketchup'])).toBeNull()
+    expect(bad(['mcd-ketchup', 7])).toBeNull()
+    expect(bad(['mcd-ketchup', ''])).toBeNull()
+    expect(bad(['mcd-ketchup', 's'.repeat(65)])).toBeNull()
+    expect(bad({ 0: 'mcd-ketchup', 1: 'mcd-ketchup' })).toBeNull()
+  })
+
   it('accepts cancel and ping', () => {
     expect(parseClientMessage('{"type":"cancel"}')).toEqual({ type: 'cancel' })
     expect(parseClientMessage('{"type":"ping","at":7}')).toEqual({ type: 'ping', at: 7 })

@@ -27,6 +27,13 @@ state.
   sum back to the total exactly. Indivisible remainders go to the orderer.
 - **Deal prices are data, not literals.** They live in `shared/deals.ts` and
   vary by market and promo. Never inline `799` at a call site.
+- **Sauces are data too, and the horoscope is derived.** `shared/sauces.ts` holds
+  the ids, labels and per-sauce traits, per merchant, and which sauces are
+  *offered* follows `ACTIVE_DEALS` rather than a second list. Never inline a sauce
+  id or label at a call site. The readout is a pure function of the chosen pair —
+  no randomness, no clock, no fetch — and `test/sauces.test.ts` enumerates the
+  whole selection space from the catalogue, so adding a sauce fails the build
+  rather than printing a blank card.
 - **`shared/` must stay runtime-free.** No Workers types, no DOM, no React. It
   is imported by the Worker, the Durable Object, the client and the tests, and
   the pairing rule has to be testable without a Workers runtime.

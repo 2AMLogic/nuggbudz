@@ -86,6 +86,13 @@ const BUYERS = {
   // the dispute path.
   halfOne: { sid: sessionId('smoke-half-one'), userId: accountId(18), name: 'Half One' },
   halfTwo: { sid: sessionId('smoke-half-two'), userId: accountId(19), name: 'Half Two' },
+  // The sauce pair: one who tries ids that are not on the menu, and the buddy
+  // who has to be told what the other actually wants at the counter.
+  sal: { sid: sessionId('smoke-sal'), userId: accountId(20), name: 'Sal' },
+  nia: { sid: sessionId('smoke-nia'), userId: accountId(21), name: 'Nia' },
+  // The same account signing in again, which is how a stored preference is asked
+  // to survive a sign-out: a different session id, the same user behind it.
+  robbAgain: { sid: sessionId('smoke-robb-again'), userId: accountId(1), name: 'Robb' },
 }
 
 /** Write the sessions into the dev server's KV namespace, in one CLI call. */
@@ -144,8 +151,35 @@ function ledgerQuery(sql) {
   return JSON.parse(out.toString())[0]?.results ?? []
 }
 
+/**
+ * Give the seeded sessions the `users` rows a real sign-in would have left behind.
+ *
+ * `user_sauces` hangs off `users` by foreign key, so a preference written for a
+ * session with no account behind it is refused — correctly. Seeding the accounts
+ * is what makes these fixtures resemble signed-in buyers rather than weakening
+ * the schema to accommodate a test.
+ */
+function seedUsers() {
+  const now = Date.now()
+  const seen = new Set()
+  const rows = []
+  for (const buyer of Object.values(BUYERS)) {
+    if (seen.has(buyer.userId)) continue
+    seen.add(buyer.userId)
+    rows.push(
+      `('${buyer.userId}', 'smoke-sub-${buyer.userId}', NULL, '${buyer.name}', NULL, ${now}, ${now})`,
+    )
+  }
+  ledgerQuery(
+    `INSERT OR IGNORE INTO users
+       (id, google_sub, email, display_name, avatar_url, created_at, updated_at)
+     VALUES ${rows.join(', ')}`,
+  )
+}
+
 seedSessions()
 applyMigrations()
+seedUsers()
 const cookie = (buyer) => ({ Cookie: `nb_session=${buyer.sid}` })
 
 // --- REST surface ---
@@ -187,6 +221,86 @@ check(
   'a gated deal is not quotable',
   gatedQuotes.every((r) => r.status === 404),
   gatedQuotes.map((r) => r.status).join('/'),
+)
+
+// --- sauce preferences ---
+const jsonHeaders = { 'content-type': 'application/json' }
+const putSauces = (buyer, sauces) =>
+  fetch(`${BASE}/api/me/sauces`, {
+    method: 'PUT',
+    headers: buyer === null ? jsonHeaders : { ...jsonHeaders, ...cookie(buyer) },
+    body: JSON.stringify({ sauces }),
+  })
+
+const anonReadSauces = await fetch(`${BASE}/api/me/sauces`)
+check(
+  'a sauce preference is nobody’s business but its owner’s',
+  anonReadSauces.status === 401,
+  `status ${anonReadSauces.status}`,
+)
+const anonWriteSauces = await putSauces(null, ['mcd-ketchup', 'mcd-ketchup'])
+check(
+  'an unauthenticated write is refused',
+  anonWriteSauces.status === 401,
+  `status ${anonWriteSauces.status}`,
+)
+
+const storedSauces = await putSauces(BUYERS.robb, ['mcd-ketchup', 'mcd-hot-mustard'])
+const storedBody = await storedSauces.json()
+check(
+  'a pair is stored and answered in catalogue order',
+  storedSauces.status === 200 &&
+    storedBody.sauces?.[0] === 'mcd-hot-mustard' &&
+    storedBody.sauces?.[1] === 'mcd-ketchup',
+  JSON.stringify(storedBody),
+)
+
+// The whole point of storing it on the account: a new session for the same buyer
+// — which is what signing back in produces — reads the pair back.
+const afterSignIn = await fetch(`${BASE}/api/me/sauces`, { headers: cookie(BUYERS.robbAgain) })
+const afterSignInBody = await afterSignIn.json()
+check(
+  'the pair survives a sign-out and a sign-in',
+  afterSignIn.status === 200 && afterSignInBody.sauces?.join() === 'mcd-hot-mustard,mcd-ketchup',
+  JSON.stringify(afterSignInBody),
+)
+
+// An id off a query string or a JSON body is hostile: refused, and not repeated
+// back in the answer.
+const hostileSauce = 'mcd-not-a-sauce"><script>alert(1)</script>'
+const refusedSauce = await putSauces(BUYERS.robb, ['mcd-ketchup', hostileSauce])
+const refusedText = await refusedSauce.text()
+check(
+  'an unknown sauce id is refused',
+  refusedSauce.status === 400,
+  `status ${refusedSauce.status}`,
+)
+check(
+  'the refusal does not echo the id back',
+  !refusedText.includes('not-a-sauce') && !refusedText.includes('<script>'),
+  refusedText,
+)
+// A real sauce belonging to a chain the app does not pair on. It resolves in the
+// catalogue, which is exactly why it has to be refused here.
+const gatedSauce = await putSauces(BUYERS.robb, ['bk-zesty', 'bk-zesty'])
+check(
+  'a gated chain’s sauce is not selectable',
+  gatedSauce.status === 400,
+  `status ${gatedSauce.status}`,
+)
+const unchanged = await fetch(`${BASE}/api/me/sauces`, { headers: cookie(BUYERS.robb) })
+const unchangedBody = await unchanged.json()
+check(
+  'a refused write changes nothing',
+  unchangedBody.sauces?.join() === 'mcd-hot-mustard,mcd-ketchup',
+  JSON.stringify(unchangedBody),
+)
+const noPairYet = await fetch(`${BASE}/api/me/sauces`, { headers: cookie(BUYERS.nia) })
+const noPairYetBody = await noPairYet.json()
+check(
+  'a buyer who never picked has no pair, not an error',
+  noPairYet.status === 200 && noPairYetBody.sauces === null,
+  JSON.stringify(noPairYetBody),
 )
 
 // --- sessions ---
@@ -352,7 +466,11 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
       await new Promise((r) => setTimeout(r, ms))
       return inbox.some((m) => m.type === type)
     },
-    join() {
+    /**
+     * Take a seat. `extra` is merged into the frame, so a check can send a sauce
+     * pair — or something that only looks like one.
+     */
+    join(extra = {}) {
       // `forgedName` proves the server ignores a client-supplied name: the buddy
       // is shown the name on the session, never this one.
       const payload = { type: 'join', dealId }
@@ -361,6 +479,7 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
         payload.lng = lng
       }
       if (forgedName !== null) payload.name = forgedName
+      Object.assign(payload, extra)
       ws.send(JSON.stringify(payload))
     },
     /** A receiver sends the code off their bud's receipt; an orderer just taps. */
@@ -422,6 +541,11 @@ check(
   'buddy names come from the session, not the join message',
   matchA.buddy.name === 'Dana' && matchB.buddy.name === 'Robb',
   `${matchA.buddy.name}/${matchB.buddy.name}`,
+)
+check(
+  'a buyer who picked no sauces has none shown to their bud',
+  matchA.buddy.sauces === null && matchB.buddy.sauces === null,
+  `${JSON.stringify(matchA.buddy.sauces)}/${JSON.stringify(matchB.buddy.sauces)}`,
 )
 check(
   'distance is a short walk',
@@ -800,6 +924,68 @@ check(
 )
 
 for (const s of [b, far, c, g, h, j, k, l, kim, lee]) s.ws.close()
+
+// --- sauces off a socket ---
+// Seattle (`c23nb`), nowhere near any pair above, so these two can only match
+// with each other. The point of these checks is that the sauce ids are validated
+// on the *request path* rather than by a unit test calling the validator: this
+// repo has shipped three predicates that existed and enforced nothing.
+const sal = open(BUYERS.sal, 47.6062, -122.3321)
+const nia = open(BUYERS.nia, 47.6063, -122.3322)
+await Promise.all([sal.opened, nia.opened])
+await Promise.all([sal.expect('welcome'), nia.expect('welcome')])
+
+sal.join({ sauces: ['mcd-ketchup', 'mcd-liquid-gold'] })
+const unknownSauce = await sal.expectError()
+check(
+  'a sauce that is not on the menu is refused',
+  unknownSauce.code === 'unknown_sauce',
+  unknownSauce.code,
+)
+check(
+  'the refusal does not echo the id back over the socket',
+  !JSON.stringify(unknownSauce).includes('liquid-gold'),
+  unknownSauce.message,
+)
+check('a refused join seats nobody', (await sal.settles('waiting')) === false)
+
+// A real sauce of a chain the app does not pair on: it resolves in the catalogue,
+// which is the reason this is the harder case and not the easy one.
+sal.join({ sauces: ['bk-zesty', 'bk-zesty'] })
+const gatedOnSocket = await sal.expectError()
+check(
+  'a gated chain’s sauce is refused on the wire too',
+  gatedOnSocket.code === 'unknown_sauce',
+  gatedOnSocket.code,
+)
+
+// Malformed is a different answer from unknown: one is a broken frame, the other
+// is a buyer asking for something that does not exist.
+sal.join({ sauces: 'mcd-ketchup' })
+const malformedSauces = await sal.expectError()
+check(
+  'a malformed sauce field is a bad message',
+  malformedSauces.code === 'bad_message',
+  malformedSauces.code,
+)
+check('none of that queued the buyer', (await sal.settles('waiting')) === false)
+
+sal.join({ sauces: ['mcd-hot-mustard', 'mcd-ketchup'] })
+const salWaiting = await sal.expect('waiting')
+check('a pair from the menu takes its seat', salWaiting.waiting >= 1, JSON.stringify(salWaiting))
+
+// The practical half: whoever is standing at the counter has to know what the
+// other one wants, and a double order of one sauce is a real answer.
+nia.join({ sauces: ['mcd-sweet-n-sour', 'mcd-sweet-n-sour'] })
+const [salMatch, niaMatch] = await Promise.all([sal.expect('matched'), nia.expect('matched')])
+check(
+  'each bud is told the other’s sauces, in catalogue order',
+  salMatch.buddy.sauces?.join() === 'mcd-sweet-n-sour,mcd-sweet-n-sour' &&
+    niaMatch.buddy.sauces?.join() === 'mcd-hot-mustard,mcd-ketchup',
+  `${JSON.stringify(salMatch.buddy.sauces)} / ${JSON.stringify(niaMatch.buddy.sauces)}`,
+)
+
+for (const s of [sal, nia]) s.ws.close()
 
 // --- liveness: stale queue entries and unconfirmed matches ---
 const windows = welcomeA.expiry ?? {}

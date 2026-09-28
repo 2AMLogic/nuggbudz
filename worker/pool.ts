@@ -33,6 +33,7 @@ import {
   parseClientMessage,
   type ServerMessage,
 } from '../shared/protocol'
+import { parseSauceSelection, type SauceSelection } from '../shared/sauces'
 import { type Env, intVar } from './env'
 import { writeSettledMatch } from './ledger'
 
@@ -61,6 +62,12 @@ interface BuyerIdentity extends Principal {
   lat: number
   lng: number
   joinedAt: number
+  /**
+   * The two sauces this buyer asked for, validated against the catalogue before
+   * it was ever put here, or null if they picked none. Shown to their buddy,
+   * because one of the two is about to stand at a counter and order.
+   */
+  sauces: SauceSelection | null
 }
 
 type ConnState =
@@ -348,6 +355,17 @@ export class NuggPool extends DurableObject<Env> {
       return
     }
 
+    // These ids came off a socket too, so they are checked against the catalogue
+    // rather than stored as sent — and against *this deal's* menu, because a
+    // Wendy's sauce with a McDonald's box is not an order anyone can place. The
+    // refusal deliberately does not repeat the id back: an unvalidated string is
+    // not something to echo, and which ids exist is not a caller's to enumerate.
+    const sauces = msg.sauces === undefined ? null : parseSauceSelection(msg.sauces, deal.merchant)
+    if (msg.sauces !== undefined && sauces === null) {
+      this.fail(ws, 'unknown_sauce', 'those are not two sauces on this menu')
+      return
+    }
+
     const identity: BuyerIdentity = {
       connId: state.connId,
       // The authenticated name, not anything the client sent.
@@ -360,6 +378,7 @@ export class NuggPool extends DurableObject<Env> {
       lat: fix.lat,
       lng: fix.lng,
       joinedAt: Date.now(),
+      sauces,
     }
     // A second tab is not a second buyer: never pair an account with itself.
     const others = this.waitingStates().filter((o) => o.state.userId !== identity.userId)
@@ -427,7 +446,11 @@ export class NuggPool extends DurableObject<Env> {
       role: selfRole,
       share: shareFor(selfRole),
       settlement,
-      buddy: { name: buddyIdentity.name, distanceMeters: decision.distanceMeters },
+      buddy: {
+        name: buddyIdentity.name,
+        distanceMeters: decision.distanceMeters,
+        sauces: buddyIdentity.sauces,
+      },
       pickupCode: codeFor(selfRole),
     })
     this.send(buddy.ws, {
@@ -436,7 +459,11 @@ export class NuggPool extends DurableObject<Env> {
       role: buddyRole,
       share: shareFor(buddyRole),
       settlement,
-      buddy: { name: selfIdentity.name, distanceMeters: decision.distanceMeters },
+      buddy: {
+        name: selfIdentity.name,
+        distanceMeters: decision.distanceMeters,
+        sauces: selfIdentity.sauces,
+      },
       pickupCode: codeFor(buddyRole),
     })
 
@@ -838,7 +865,21 @@ function expirableMatches(records: Iterable<MatchRecord>): OpenMatch[] {
 /** Strip connection status off a state, leaving just who and where the buyer is. */
 function identityOf(state: BuyerIdentity): BuyerIdentity {
   const { connId, userId, name, cell, origin, locationSource, dealId, lat, lng, joinedAt } = state
-  return { connId, userId, name, cell, origin, locationSource, dealId, lat, lng, joinedAt }
+  return {
+    connId,
+    userId,
+    name,
+    cell,
+    origin,
+    locationSource,
+    dealId,
+    lat,
+    lng,
+    joinedAt,
+    // A socket whose hibernation attachment predates this field has no sauces
+    // rather than an undefined pair.
+    sauces: state.sauces ?? null,
+  }
 }
 
 /** Drop back to an idle connection, keeping only the session-derived identity. */

@@ -56,3 +56,51 @@ jobs:
       # Drives the real UI in two browser contexts; playwright.config.ts's
       # webServer boots `pnpm dev` itself, so there is no separate wait-on step.
       - run: pnpm test:e2e
+
+  demo-check:
+    runs-on: ubuntu-latest
+    # `smoke` (above) proves the strict authenticated path and fails closed if
+    # `ALLOW_DEMO_PAIRING` is ever on — that's what makes it unsafe to also flip
+    # the flag inside that job. This is a separate job, on its own runner and
+    # its own checkout, so the two configurations never share a server.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Demo pairing (README.md "Demo pairing") is on only for THIS step's dev
+      # server, via a `.dev.vars` written here and never committed — not
+      # `wrangler.jsonc`, not a tracked `.dev.vars`, not a workflow- or
+      # job-level `env:` a sibling job could inherit. `.dev.vars` is what
+      # actually reaches `c.env` for `pnpm dev`; a bare shell env var does not.
+      - run: echo 'ALLOW_DEMO_PAIRING="1"' > .dev.vars
+      # Distinct port from `smoke` (5199) and `e2e` (playwright.config.ts,
+      # which also defaults to 5199) so a stale/foreign server from a sibling
+      # job's `reuseExistingServer`-style adoption can never be mistaken for
+      # this one's.
+      - run: pnpm dev --port 5211 &
+      - run: npx wait-on http://localhost:5211/api/health --timeout 90000
+      # A server that answered demoPairing: false would make every assertion
+      # below vacuous rather than failing — demo-pairing-check.mjs takes
+      # whichever branch /api/health reports instead of erroring on a mismatch.
+      # Assert the mode explicitly before trusting anything demo-check reports.
+      - name: Assert the server actually came up in demo mode
+        run: |
+          health="$(curl -sf http://localhost:5211/api/health)"
+          echo "$health"
+          node -e '
+            const health = JSON.parse(process.argv[1])
+            if (health.demoPairing !== true) {
+              console.error("expected demoPairing: true, got", health.demoPairing)
+              process.exit(1)
+            }
+          ' "$health"
+      # The only end-to-end proof that a completed demo handoff books nothing
+      # to the D1 ledger (issue #68) — a defect that shipped once and was only
+      # caught in review.
+      - run: BASE=http://localhost:5211 pnpm demo-check

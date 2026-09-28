@@ -67,11 +67,12 @@ neighbourhood is the whole business.)
 
 ## 5. The protocol
 
-**Talk track**: Sign in, pick a deal, share location once, join the pool for
-your **shard** — a coarse geohash box sized so a 2-mile radius always sits
-inside it. When another buyer within that 2-mile radius wants the same box,
-both phones pair live. The longest waiter orders, the other walks over, and
-both see the same settlement and a pickup code.
+**Talk track**: Sign in, pick a deal, join the pool — there is no location
+prompt anywhere in the flow. The server places you in your **shard** — a
+coarse geohash box sized so a 2-mile radius always sits inside it. When
+another buyer within that 2-mile radius wants the same box, both phones pair
+live. The longest waiter orders, the other walks over, and both see the same
+settlement and a pickup code.
 
 **Anticipated questions**: What stops someone claiming a market they are not
 in? (The Worker derives both the shard and the radius from the coordinates
@@ -194,7 +195,7 @@ runs with demo pairing enabled, so there is no account to create.
 1. **Plan A** — judges' phones on venue wifi. Both join, both pair, read the
    settlement off the screen.
 2. **Plan B** — our two phones on a personal hotspot. Same flow.
-3. **Plan C** — geolocation denied or unavailable: nothing to recover from, and
+3. **Plan C** — a refused or unavailable location: nothing to recover from, and
    nothing to click. There is no permission prompt in the pairing flow at all;
    the Worker places each socket from Cloudflare's edge geo, and from a fixed
    demo cell when there is no usable one (`shared/location.ts`). The screen names

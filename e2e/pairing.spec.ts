@@ -8,11 +8,14 @@ import { findDeal } from '../shared/deals'
 import { formatCents, settle } from '../shared/economics'
 import {
   DEFAULT_MATCH_RADIUS_METERS,
+  DEFAULT_POOL_CELL_PRECISION,
   distanceMeters,
   formatDistance,
   formatMiles,
+  geohash,
 } from '../shared/geo'
-import { describeLocationSource } from '../shared/location'
+import { DEMO_ORIGIN, describeLocationSource } from '../shared/location'
+import type { WelcomeMessage } from '../shared/protocol'
 import { describeSauceOrder, findSauce, readSauceHoroscope } from '../shared/sauces'
 
 /**
@@ -172,6 +175,15 @@ const REQUEUE_AT = [
   asGeolocation('e2ePace'),
   asGeolocation('e2eQuin'),
 ] as const
+
+/**
+ * The cell a socket lands in on the `demo` rung, derived the same way
+ * `e2e/scan.spec.ts`'s `settledRows` derives one for a different purpose:
+ * `geohash` over `DEMO_ORIGIN`, never a literal. This is what turns "the demo
+ * fallback still says so on screen" into "the demo fallback routed to the cell
+ * `DEMO_ORIGIN` actually implies" — see the denied-geolocation spec below.
+ */
+const demoCell = geohash(DEMO_ORIGIN.lat, DEMO_ORIGIN.lng, DEFAULT_POOL_CELL_PRECISION)
 
 const deal = findDeal(DEAL_ID)
 if (deal === undefined) throw new Error(`fixture deal missing: ${DEAL_ID}`)
@@ -496,6 +508,34 @@ test('leaving the queue does not immediately rejoin, and a refused prompt still 
   const context = await browser.newContext()
   const page = await context.newPage()
 
+  // The real `welcome` message off the wire, captured with Playwright's own
+  // WebSocket inspection rather than a DOM assertion -- there is nothing left
+  // in the DOM to check a cell against, since #82 removed it from the screen
+  // (`shared/protocol.ts`'s `WelcomeMessage.cell` doc comment: "the cell is
+  // only here so a test ... can say which Durable Object handled a socket").
+  // Attached before `page.goto` even though the socket itself only opens once
+  // this page's own "find a bud" click drives `usePool`'s `attach` later --
+  // a listener registered after navigation could still race that click.
+  let welcome: WelcomeMessage | undefined
+  page.on('websocket', (ws) => {
+    ws.on('framereceived', (event) => {
+      if (typeof event.payload !== 'string') return
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(event.payload)
+      } catch {
+        return
+      }
+      if (
+        parsed !== null &&
+        typeof parsed === 'object' &&
+        (parsed as { type?: unknown }).type === 'welcome'
+      ) {
+        welcome = parsed as WelcomeMessage
+      }
+    })
+  })
+
   try {
     await signIn(page, BUYERS.ivy)
     await page.goto('/')
@@ -518,8 +558,7 @@ test('leaving the queue does not immediately rejoin, and a refused prompt still 
     // Queued anyway. The server placed this socket from its own location --
     // `edge` when the runtime has a usable `request.cf`, `demo` when it does
     // not -- so the rung is one of those two and never `client`, because this
-    // page has no coordinates to send. Which point the `demo` rung lands on is
-    // not asserted here on purpose; that is 2am-nuggbudz#45.
+    // page has no coordinates to send.
     await expect(page.getByText(/looking for a bud/i)).toBeVisible()
     await expect(page.getByText(describeLocationSource('client').label)).toHaveCount(0)
     await expect(
@@ -532,6 +571,40 @@ test('leaving the queue does not immediately rejoin, and a refused prompt still 
         )
         .first(),
     ).toBeVisible()
+
+    // The gap the two checks above never closed (2am-nuggbudz#45): they prove
+    // the screen *claims* a fallback rung, never which point that rung actually
+    // routed to -- a `DEMO_ORIGIN` that drifted to another continent would say
+    // "demo location" just as convincingly as the real one. `welcome.cell` is
+    // what the Durable Object actually used to shard this socket, so read it
+    // off the wire and check it against a cell computed independently here,
+    // from `shared/geo.ts`'s `geohash` and `shared/location.ts`'s exported
+    // `DEMO_ORIGIN` -- never a literal.
+    //
+    // This dev harness cannot actually land on `demo`: `pnpm dev`'s miniflare
+    // always attaches a `request.cf` with usable coordinates, either a real one
+    // it fetches once and caches to `node_modules/.mf/cf.json` (this machine's
+    // own network location) or, failing that fetch, miniflare's own built-in
+    // placeholder -- both carry a `latitude`/`longitude`, so `resolveLocation`
+    // (`shared/location.ts`) never falls through to the `demo` rung over a real
+    // HTTP upgrade. `demo` is reachable only where there is truly no `cf` to
+    // read at all, which is `test/location.test.ts`'s territory (a direct call,
+    // no Workers runtime in the loop), not this browser-driven suite's. So this
+    // checks whichever rung the wire message actually reports, `edge` in every
+    // environment this suite has been run in, and pins the `demo` computation
+    // for the day a harness reaches it for real -- rather than asserting a rung
+    // this one cannot produce.
+    await expect.poll(() => welcome?.type).toBe('welcome')
+    const message = welcome
+    if (message === undefined) throw new Error('no welcome message captured')
+    expect(['edge', 'demo']).toContain(message.locationSource)
+    if (message.locationSource === 'demo') {
+      expect(message.cell).toBe(demoCell)
+    } else {
+      expect(message.cell).toBe(
+        geohash(message.position.lat, message.position.lng, DEFAULT_POOL_CELL_PRECISION),
+      )
+    }
 
     // The map is here too, which is the other half of #82: the server always
     // knows where it placed a socket, so a buyer who refused the prompt gets the

@@ -135,6 +135,32 @@ export interface PaymentLedger {
   platformFeeCents: number
   /** Orderer first, mirroring `settlement.shares`. */
   legs: PaymentLeg[]
+  /**
+   * When this ledger stopped belonging to a live match, if it has.
+   *
+   * Set by `retireLedger` at the moment the match record is deleted, and it is
+   * what makes `applyPaymentOutcome`'s late-success branch *reachable*: a
+   * PaymentIntent can clear seconds after its match died (3DS behind a decline
+   * on the other half), and a ledger that cannot say "this match is over" has no
+   * way to tell that money apart from money for a match still in flight.
+   */
+  closedAt?: number
+}
+
+/**
+ * What a retired match leaves behind so its money can still be answered for.
+ *
+ * Deliberately *only* the charges. No pickup code, no settlement, no buyers, no
+ * confirmations: a tombstone must never be a second route to a code or to a D1
+ * ledger row, and the cheapest way to guarantee that is for it not to contain
+ * the things those paths read. `pickupUnlocked` and `completeMatch` both take a
+ * `MatchRecord`, which this is not.
+ */
+export interface PaymentTombstone {
+  matchId: string
+  /** Closed: `closedAt` is set, so a late success folds to `late_refund`. */
+  ledger: PaymentLedger
+  retiredAt: number
 }
 
 export type PaymentOutcome = 'succeeded' | 'failed'
@@ -160,6 +186,12 @@ export type PaymentEffect =
    * buyers off this match.
    */
   | { kind: 'unwind'; failedRole: BuyerRole; refund: PaymentLeg[] }
+  /**
+   * Money that landed for a match which is already over. There is no match to
+   * fold it into and nobody to tell — refund the legs in `refund` and leave the
+   * tombstone holding whatever Stripe would not take back.
+   */
+  | { kind: 'late_refund'; refund: PaymentLeg[] }
 
 export interface PaymentTransition {
   ledger: PaymentLedger
@@ -271,9 +303,18 @@ export function applyPaymentOutcome(
   if (leg.status !== 'pending') {
     return { ledger, effect: { kind: 'noop', reason: 'already_final' } }
   }
-  // A match killed by the other half is already unwound; a late success on this
-  // half is refunded by the caller, not folded back into a live match.
-  if (ledger.legs.some((other) => other.status === 'failed' || other.status === 'refunded')) {
+  // The match this leg belonged to is over — killed by the other half's decline,
+  // by a cancellation, or by a buddy who walked away. A success arriving now is
+  // money for a box that is not happening, whatever killed the match, so it is
+  // refunded rather than folded into a match that no longer exists.
+  //
+  // Keyed on `closedAt` rather than on "some other leg looks dead": a match
+  // cancelled while *both* legs were still pending leaves no failed leg behind,
+  // and that shape used to clear a retired match's second half as if it were
+  // live. `retireLedger` sets the field, `worker/pool.ts` persists it on the
+  // tombstone, and `handleLatePaymentEvent` is what brings a webhook back here —
+  // this branch is on the live path, not a predicate waiting for a caller.
+  if (ledger.closedAt !== undefined) {
     const settledLeg: PaymentLeg = {
       ...leg,
       status: result.outcome === 'succeeded' ? 'succeeded' : 'failed',
@@ -282,10 +323,7 @@ export function applyPaymentOutcome(
     if (result.outcome !== 'succeeded') {
       return { ledger: next, effect: { kind: 'noop', reason: 'match_over' } }
     }
-    return {
-      ledger: markRefunded(next, [settledLeg]),
-      effect: { kind: 'unwind', failedRole: otherRole(result.role), refund: [settledLeg] },
-    }
+    return { ledger: next, effect: { kind: 'late_refund', refund: [settledLeg] } }
   }
 
   if (result.outcome === 'succeeded') {
@@ -295,28 +333,50 @@ export function applyPaymentOutcome(
   }
 
   const next = replaceLeg(ledger, index, { ...leg, status: 'failed' })
+  // What is *owed*, not what has been handed back: the legs stay `succeeded`
+  // until Stripe confirms a refund for them. Stamping them here — before the
+  // call — is how a failed refund used to leave a record claiming money had been
+  // returned that was in fact still sitting in the account.
   const refund = next.legs.filter((l) => l.status === 'succeeded')
-  return {
-    ledger: markRefunded(next, refund),
-    effect: { kind: 'unwind', failedRole: result.role, refund },
-  }
+  return { ledger: next, effect: { kind: 'unwind', failedRole: result.role, refund } }
 }
 
 /**
- * Tear a match down for a reason other than a declined card — a buddy who
- * walked away, or a PaymentIntent that could not be created at all. Whatever
- * has been collected is refunded, because there is no box.
+ * What a match owes back if it is torn down right now — a buddy who walked away,
+ * a cancellation nobody confirmed, or a PaymentIntent that could not be created
+ * at all. Whatever has been collected is owed back, because there is no box.
+ *
+ * Naming what is *owed* and leaving the stamping to `markRefunded` is the whole
+ * point: only the caller knows which of these Stripe actually took back.
  */
-export function unwindLedger(ledger: PaymentLedger): {
-  ledger: PaymentLedger
-  refund: PaymentLeg[]
-} {
-  const refund = ledger.legs.filter((leg) => leg.status === 'succeeded')
-  return { ledger: markRefunded(ledger, refund), refund }
+export function refundableLegs(ledger: PaymentLedger): PaymentLeg[] {
+  return ledger.legs.filter((leg) => leg.status === 'succeeded')
 }
 
-function otherRole(role: BuyerRole): BuyerRole {
-  return role === 'orderer' ? 'receiver' : 'orderer'
+/**
+ * Money this ledger has not finished with: a leg that can still land, or one
+ * that was collected and has not been handed back.
+ *
+ * The test for whether a retired match still needs a tombstone at all.
+ */
+export function hasOutstandingMoney(ledger: PaymentLedger): boolean {
+  return ledger.legs.some((leg) => leg.status === 'pending' || leg.status === 'succeeded')
+}
+
+/**
+ * Close a ledger whose match is being deleted, and say whether anything about it
+ * still has to be remembered.
+ *
+ * Returns null when nothing does — every leg failed, or every collected leg was
+ * confirmably refunded — so a clean teardown leaves no residue. Otherwise the
+ * tombstone is the *only* remaining record of two things a deleted match cannot
+ * answer for by itself: a PaymentIntent that has not resolved yet (it may still
+ * succeed, and must then be refunded), and one whose refund Stripe refused (the
+ * money is still held, and a human has to reconcile it).
+ */
+export function retireLedger(ledger: PaymentLedger, at: number): PaymentTombstone | null {
+  if (!hasOutstandingMoney(ledger)) return null
+  return { matchId: ledger.matchId, ledger: { ...ledger, closedAt: at }, retiredAt: at }
 }
 
 function replaceLeg(ledger: PaymentLedger, index: number, leg: PaymentLeg): PaymentLedger {
@@ -325,15 +385,29 @@ function replaceLeg(ledger: PaymentLedger, index: number, leg: PaymentLeg): Paym
   return { ...ledger, legs }
 }
 
-function markRefunded(ledger: PaymentLedger, refund: PaymentLeg[]): PaymentLedger {
-  if (refund.length === 0) return ledger
-  const ids = new Set(refund.map((leg) => leg.paymentIntentId))
+/**
+ * Stamp `refunded` on the legs a refund was actually *confirmed* for, and only
+ * those.
+ *
+ * Called after the Stripe round trip, never before it. A leg whose refund failed
+ * stays `succeeded`, which is the truth — the money is still collected — and is
+ * what keeps `collectedCents` reporting it as held rather than erasing the
+ * evidence a reconciliation would need.
+ */
+export function markRefunded(ledger: PaymentLedger, refunded: PaymentLeg[]): PaymentLedger {
+  if (refunded.length === 0) return ledger
+  const ids = new Set(refunded.map((leg) => leg.paymentIntentId))
   return {
     ...ledger,
     legs: ledger.legs.map((leg) =>
       ids.has(leg.paymentIntentId) ? { ...leg, status: 'refunded' } : leg,
     ),
   }
+}
+
+/** The sum of one role's share across a set of legs, in cents. */
+export function centsFor(legs: PaymentLeg[], role: BuyerRole): number {
+  return legs.reduce((sum, leg) => (leg.role === role ? sum + leg.amountCents : sum), 0)
 }
 
 /** The idempotency key for unwinding one leg. One refund per leg, ever. */

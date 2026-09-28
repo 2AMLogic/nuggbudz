@@ -44,6 +44,19 @@ app.get('/api/health', (c) =>
       stripeConfigured: stripeConfigured(c.env),
       unchargedAllowed: boolVar(c.env.ALLOW_UNCHARGED_PAIRING),
     }),
+    /**
+     * Whether the Stripe calls go to Stripe. `payments: "live"` says both secrets
+     * are bound; it says nothing about *where* the charges are sent, and
+     * `STRIPE_API_BASE` exists precisely to send them somewhere else. Repointing
+     * it takes deploy-equivalent credentials, so this is observability rather
+     * than a gate — but #74's whole premise is that a deploy-time var that fails
+     * silently is a var nobody notices, and this was the one var the readback
+     * could not see. `post-deploy-mode.mjs` exits non-zero on "custom".
+     */
+    stripeApiBase:
+      c.env.STRIPE_API_BASE === undefined || c.env.STRIPE_API_BASE.length === 0
+        ? 'default'
+        : 'custom',
   }),
 )
 

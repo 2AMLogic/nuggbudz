@@ -6,16 +6,33 @@ import {
   applyPaymentOutcome,
   codeAtMatchTime,
   collectedCents,
+  hasOutstandingMoney,
+  markRefunded,
   openLedger,
   type PaymentLedger,
+  type PaymentLeg,
   parsePaymentOutcome,
   paymentDisposition,
   paymentIntentSpecs,
+  refundableLegs,
   refundIdempotencyKey,
   retainedFeeCents,
+  retireLedger,
   serverPaymentMode,
-  unwindLedger,
 } from '../worker/lib/payments'
+import poolSource from '../worker/pool.ts?raw'
+
+const RETIRED_AT = 1_700_000_000_000
+
+/**
+ * A ledger as it exists after its match record has been deleted — the only shape
+ * a late payment event is ever folded into.
+ */
+function retired(ledger: PaymentLedger): PaymentLedger {
+  const tombstone = retireLedger(ledger, RETIRED_AT)
+  if (tombstone === null) throw new Error('fixture: expected a tombstone worth keeping')
+  return tombstone.ledger
+}
 
 function dealOrThrow(dealId: string) {
   const deal = findDeal(dealId)
@@ -180,11 +197,44 @@ describe('applyPaymentOutcome', () => {
     expect(effect.refund.map((leg) => leg.paymentIntentId)).toEqual(['pi_orderer'])
     expect(effect.refund[0].amountCents).toBe(449)
 
-    // Nothing is retained from a one-sided collection.
-    expect(after.legs.find((l) => l.role === 'orderer')?.status).toBe('refunded')
+    // What is OWED, not what has been handed back. The leg stays `succeeded`
+    // until Stripe confirms, because until then the money really is still
+    // collected — a ledger that says `refunded` before the call is a ledger that
+    // lies whenever the call fails.
+    expect(after.legs.find((l) => l.role === 'orderer')?.status).toBe('succeeded')
     expect(after.legs.find((l) => l.role === 'receiver')?.status).toBe('failed')
-    expect(collectedCents(after)).toBe(0)
-    expect(retainedFeeCents(after)).toBe(0)
+    expect(collectedCents(after)).toBe(449)
+
+    // Nothing is retained from a one-sided collection, and once the refund is
+    // confirmed nothing is collected either.
+    const settled = markRefunded(after, effect.refund)
+    expect(settled.legs.find((l) => l.role === 'orderer')?.status).toBe('refunded')
+    expect(collectedCents(settled)).toBe(0)
+    expect(retainedFeeCents(settled)).toBe(0)
+  })
+
+  it('leaves a leg whose refund the processor refused looking like money owed', () => {
+    const paid = applyPaymentOutcome(ledger(), {
+      matchId: MATCH_ID,
+      role: 'orderer',
+      paymentIntentId: 'pi_orderer',
+      outcome: 'succeeded',
+    }).ledger
+    const { ledger: after, effect } = applyPaymentOutcome(paid, {
+      matchId: MATCH_ID,
+      role: 'receiver',
+      paymentIntentId: 'pi_receiver',
+      outcome: 'failed',
+    })
+    if (effect.kind !== 'unwind') throw new Error('expected an unwind')
+
+    // Stripe confirmed nothing: `markRefunded` is handed an empty set, which is
+    // what `NuggPool.refund` returns when every call throws.
+    const stuck = markRefunded(after, [])
+    expect(stuck.legs.find((l) => l.role === 'orderer')?.status).toBe('succeeded')
+    expect(collectedCents(stuck)).toBe(449)
+    // And the tombstone is kept, because that 449 is the evidence of money held.
+    expect(retireLedger(stuck, RETIRED_AT)).not.toBeNull()
   })
 
   it('has nothing to refund when the first half is the one that fails', () => {
@@ -198,6 +248,13 @@ describe('applyPaymentOutcome', () => {
   })
 
   it('refunds a payment that lands after the match is already dead', () => {
+    // The orderer's card declines, the match is unwound, and the record is
+    // deleted — leaving the tombstone `retireLedger` produced. Driven through
+    // that shape deliberately: this used to be asserted against a hand-built
+    // ledger with a failed leg in it, which no live path could ever produce
+    // because the record was gone, so the test stayed green while the branch it
+    // covered was unreachable from its only caller. If `retireLedger` stops
+    // closing the ledger, this goes red instead of staying quietly correct.
     const dead = applyPaymentOutcome(ledger(), {
       matchId: MATCH_ID,
       role: 'orderer',
@@ -205,16 +262,44 @@ describe('applyPaymentOutcome', () => {
       outcome: 'failed',
     }).ledger
 
-    const late = applyPaymentOutcome(dead, {
+    const late = applyPaymentOutcome(retired(dead), {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
       outcome: 'succeeded',
     })
-    expect(late.effect.kind).toBe('unwind')
-    if (late.effect.kind !== 'unwind') throw new Error('expected an unwind')
-    expect(late.effect.refund.map((l) => l.paymentIntentId)).toEqual(['pi_receiver'])
-    expect(collectedCents(late.ledger)).toBe(0)
+    expect(late.effect.kind).toBe('late_refund')
+    if (late.effect.kind !== 'late_refund') throw new Error('expected a late refund')
+    expect(late.effect.refund.map((l: PaymentLeg) => l.paymentIntentId)).toEqual(['pi_receiver'])
+    // Owed, and collected until the refund is confirmed.
+    expect(collectedCents(late.ledger)).toBe(449)
+    expect(collectedCents(markRefunded(late.ledger, late.effect.refund))).toBe(0)
+  })
+
+  it('refunds a leg that lands after a match was cancelled with both halves pending', () => {
+    // The shape a cancellation leaves: no leg failed, so "some other leg looks
+    // dead" would miss it — and this half would have been folded into a match
+    // that no longer exists, then the second one would have CLEARED it.
+    const tombstone = retired(ledger())
+    const first = applyPaymentOutcome(tombstone, {
+      matchId: MATCH_ID,
+      role: 'orderer',
+      paymentIntentId: 'pi_orderer',
+      outcome: 'succeeded',
+    })
+    expect(first.effect.kind).toBe('late_refund')
+
+    const second = applyPaymentOutcome(first.ledger, {
+      matchId: MATCH_ID,
+      role: 'receiver',
+      paymentIntentId: 'pi_receiver',
+      outcome: 'succeeded',
+    })
+    expect(second.effect.kind).toBe('late_refund')
+    expect(allLegsPaid(second.ledger)).toBe(true)
+    // Both halves landed, and neither cleared anything: a retired match has no
+    // code to release and no row to book.
+    expect(second.effect).not.toEqual({ kind: 'cleared' })
   })
 
   it('absorbs a replayed webhook instead of clearing or refunding twice', () => {
@@ -260,12 +345,14 @@ describe('applyPaymentOutcome', () => {
   })
 
   it('ignores a second failure on an already-dead match', () => {
-    const dead = applyPaymentOutcome(ledger(), {
-      matchId: MATCH_ID,
-      role: 'orderer',
-      paymentIntentId: 'pi_orderer',
-      outcome: 'failed',
-    }).ledger
+    const dead = retired(
+      applyPaymentOutcome(ledger(), {
+        matchId: MATCH_ID,
+        role: 'orderer',
+        paymentIntentId: 'pi_orderer',
+        outcome: 'failed',
+      }).ledger,
+    )
     const second = applyPaymentOutcome(dead, {
       matchId: MATCH_ID,
       role: 'receiver',
@@ -276,23 +363,161 @@ describe('applyPaymentOutcome', () => {
   })
 })
 
-describe('unwindLedger', () => {
-  it('refunds whatever was collected when a buddy walks away', () => {
+describe('refundableLegs', () => {
+  it('names what was collected when a buddy walks away', () => {
     const paid = applyPaymentOutcome(ledger(), {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
       outcome: 'succeeded',
     }).ledger
-    const { ledger: after, refund } = unwindLedger(paid)
-    expect(refund.map((l) => l.role)).toEqual(['orderer'])
-    expect(collectedCents(after)).toBe(0)
-    expect(retainedFeeCents(after)).toBe(0)
+    const owed = refundableLegs(paid)
+    expect(owed.map((l) => l.role)).toEqual(['orderer'])
+    // Naming what is owed does not itself hand anything back.
+    expect(collectedCents(paid)).toBe(449)
+    expect(collectedCents(markRefunded(paid, owed))).toBe(0)
+    expect(retainedFeeCents(markRefunded(paid, owed))).toBe(0)
   })
 
-  it('is a no-op when nobody has paid yet', () => {
-    const { refund } = unwindLedger(ledger())
-    expect(refund).toEqual([])
+  it('is empty when nobody has paid yet', () => {
+    expect(refundableLegs(ledger())).toEqual([])
+  })
+})
+
+describe('markRefunded', () => {
+  it('stamps only the legs a refund was confirmed for', () => {
+    const both = applyPaymentOutcome(
+      applyPaymentOutcome(ledger(), {
+        matchId: MATCH_ID,
+        role: 'orderer',
+        paymentIntentId: 'pi_orderer',
+        outcome: 'succeeded',
+      }).ledger,
+      {
+        matchId: MATCH_ID,
+        role: 'receiver',
+        paymentIntentId: 'pi_receiver',
+        outcome: 'succeeded',
+      },
+    ).ledger
+
+    const owed = refundableLegs(both)
+    expect(owed).toHaveLength(2)
+    // One call succeeded, the other threw. Only the confirmed leg moves.
+    const partial = markRefunded(
+      both,
+      owed.filter((leg) => leg.role === 'orderer'),
+    )
+    expect(partial.legs.find((l) => l.role === 'orderer')?.status).toBe('refunded')
+    expect(partial.legs.find((l) => l.role === 'receiver')?.status).toBe('succeeded')
+    expect(collectedCents(partial)).toBe(449)
+  })
+})
+
+describe('retireLedger', () => {
+  it('keeps a tombstone while a leg can still land', () => {
+    const dead = applyPaymentOutcome(ledger(), {
+      matchId: MATCH_ID,
+      role: 'orderer',
+      paymentIntentId: 'pi_orderer',
+      outcome: 'failed',
+    }).ledger
+    const tombstone = retireLedger(dead, RETIRED_AT)
+    expect(tombstone).not.toBeNull()
+    expect(tombstone?.matchId).toBe(MATCH_ID)
+    expect(tombstone?.ledger.closedAt).toBe(RETIRED_AT)
+    expect(hasOutstandingMoney(dead)).toBe(true)
+  })
+
+  it('keeps nothing when every leg is final and nothing is held', () => {
+    const paid = applyPaymentOutcome(ledger(), {
+      matchId: MATCH_ID,
+      role: 'orderer',
+      paymentIntentId: 'pi_orderer',
+      outcome: 'succeeded',
+    }).ledger
+    const { effect } = applyPaymentOutcome(paid, {
+      matchId: MATCH_ID,
+      role: 'receiver',
+      paymentIntentId: 'pi_receiver',
+      outcome: 'failed',
+    })
+    if (effect.kind !== 'unwind') throw new Error('expected an unwind')
+    const failedAndRefunded = markRefunded(
+      applyPaymentOutcome(paid, {
+        matchId: MATCH_ID,
+        role: 'receiver',
+        paymentIntentId: 'pi_receiver',
+        outcome: 'failed',
+      }).ledger,
+      effect.refund,
+    )
+    expect(hasOutstandingMoney(failedAndRefunded)).toBe(false)
+    expect(retireLedger(failedAndRefunded, RETIRED_AT)).toBeNull()
+  })
+
+  it('carries the charges and nothing that could reach a code or a ledger row', () => {
+    const tombstone = retireLedger(ledger(), RETIRED_AT)
+    // The shape is the guarantee: a tombstone is money, never a match. There is
+    // no pickupCode to leak, no disposition for `pickupUnlocked` to read, and no
+    // settlement for `writeSettledMatch` to book.
+    expect(Object.keys(tombstone ?? {}).sort()).toEqual(['ledger', 'matchId', 'retiredAt'])
+    expect(JSON.stringify(tombstone)).not.toContain('pickupCode')
+    expect(JSON.stringify(tombstone)).not.toContain('settlement')
+  })
+})
+
+/**
+ * The half of this that a pure function cannot see.
+ *
+ * `applyPaymentOutcome`'s late-refund branch was correct, unit-tested and green
+ * for the whole life of the payment feature while being unreachable from its only
+ * caller — every teardown path deleted the match record, so the webhook that
+ * would have reached it was answered `unknown_match` and a real buyer kept losing
+ * $4.49. That is the fourth predicate in this repo to enforce nothing because
+ * nobody called it, and a test that asserts behaviour without asserting
+ * reachability is how all four survived review.
+ *
+ * So: the behaviour is proved end-to-end through a socket by
+ * `scripts/payment-gate-check.mjs` (the charged lane), and the *structure* that
+ * keeps it reachable is asserted here. This goes red if a new teardown path
+ * deletes a match record without leaving its money behind.
+ */
+describe('the late-refund path stays reachable from worker/pool.ts', () => {
+  const pool = poolSource
+
+  it('deletes a match record in exactly one place', () => {
+    const deletions = pool.match(/storage\.delete\(`match:/g) ?? []
+    expect(deletions).toHaveLength(1)
+  })
+
+  it('and that place is retireMatch, which writes the tombstone first', () => {
+    const retire = pool.slice(pool.indexOf('private async retireMatch('))
+    const body = retire.slice(0, retire.indexOf('\n  }\n'))
+    expect(body).toContain('retireLedger(')
+    expect(body).toContain('TOMBSTONE_PREFIX')
+    expect(body).toContain('storage.delete(`match:')
+    // The tombstone is written before the record goes, not after.
+    expect(body.indexOf('TOMBSTONE_PREFIX')).toBeLessThan(body.indexOf('storage.delete(`match:'))
+  })
+
+  it('and a payment event for a vanished match consults the tombstone', () => {
+    const handler = pool.slice(pool.indexOf('private async handleLatePaymentEvent('))
+    const body = handler.slice(0, handler.indexOf('\n  }\n'))
+    expect(body).toContain('TOMBSTONE_PREFIX')
+    expect(body).toContain('applyPaymentOutcome(')
+    // Reached rather than merely defined: the live handler hands off to it before
+    // it can answer `unknown_match`.
+    const live = pool.slice(pool.indexOf('private async handlePaymentEvent('))
+    expect(live.slice(0, live.indexOf('\n  }\n'))).toContain('this.handleLatePaymentEvent(outcome)')
+  })
+
+  it('and a tombstone can never release a pickup code', () => {
+    const handler = pool.slice(pool.indexOf('private async handleLatePaymentEvent('))
+    const body = handler.slice(0, handler.indexOf('\n  }\n'))
+    expect(body).not.toContain('releasePickupCode')
+    expect(body).not.toContain('pickupCode')
+    expect(body).not.toContain('matchSockets')
   })
 })
 
@@ -501,7 +726,7 @@ describe('allLegsPaid', () => {
       paymentIntentId: 'pi_orderer',
       outcome: 'succeeded',
     })
-    const { ledger: unwound } = unwindLedger(paid.ledger)
+    const unwound = markRefunded(paid.ledger, refundableLegs(paid.ledger))
     expect(allLegsPaid(unwound)).toBe(false)
   })
 

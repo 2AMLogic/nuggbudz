@@ -40,6 +40,16 @@ $8.98 collected. The gross retail spread is $5.99 per pairing.
    receiver reads it off them at the handoff and types it in; the orderer taps
    to agree. Only that two-sided confirmation writes a row to the ledger.
 
+**A disputed split holds the money.** If one buddy confirms the handoff and the
+other never does, nothing is booked to the ledger and **nothing is refunded
+automatically** — the $8.98 is held against the server's record until a human
+reconciles it. That is deliberate: auto-refunding a dispute would make staying
+silent after collecting the box the cheapest way to eat for free, which is the
+same reasoning that writes no ledger row. A match that dies for any *other*
+reason — a declined card, a cancellation, a buddy who left before anybody
+confirmed — is refunded, and the screen states what came back and what (if
+Stripe refused the refund) is still being held for a human.
+
 A seat in the pool is not forever. A buyer who goes quiet for 15 minutes is
 warned and then dropped, and a match nobody confirms within 10 minutes is called
 off and both halves told — otherwise you get paired with somebody who left ten

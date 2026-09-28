@@ -21,6 +21,17 @@
  *
  *   node scripts/fake-stripe.mjs --port 5312           # standalone, for local dev
  *   import { startFakeStripe } from './fake-stripe.mjs' # hosted, for the checker
+ *
+ * Two control routes, neither of which Stripe has:
+ *
+ *   GET  /__recorded            everything it has been asked for
+ *   POST /__fail {"refunds":500}  answer /v1/refunds with that status until cleared
+ *
+ * The second one exists because "the refund call failed" is a state the app has
+ * to report honestly and cannot be driven to from the outside otherwise. A
+ * refund that is *attempted* and refused is still recorded, under
+ * `refundAttempts` — asserting the attempt is how a caller tells "Stripe said no"
+ * apart from "we never asked".
  */
 import { createServer } from 'node:http'
 import { resolve } from 'node:path'
@@ -58,7 +69,10 @@ function readBody(req) {
  * reached Stripe rather than only the effects they had.
  */
 export function startFakeStripe({ port }) {
-  const recorded = { intents: [], refunds: [] }
+  // `refunds` is refunds that SUCCEEDED; `refundAttempts` is every call, refused
+  // or not. A caller asserting a buyer was made whole has to read the first.
+  const recorded = { intents: [], refunds: [], refundAttempts: [] }
+  const failures = { refunds: 0 }
   let seq = 0
 
   const server = createServer(async (req, res) => {
@@ -71,6 +85,13 @@ export function startFakeStripe({ port }) {
     if (req.method === 'GET' && url.pathname === '/__recorded') return json(200, recorded)
     if (req.method === 'GET' && url.pathname === '/__health') return json(200, { ok: true })
     if (req.method !== 'POST') return json(404, { error: { message: 'not found' } })
+
+    if (url.pathname === '/__fail') {
+      const body = await readBody(req)
+      const wanted = body.length === 0 ? {} : JSON.parse(body)
+      failures.refunds = Number(wanted.refunds ?? 0)
+      return json(200, { ...failures })
+    }
 
     const form = parseForm(await readBody(req))
     // Idempotency is the property production relies on, so honour it here rather
@@ -95,6 +116,14 @@ export function startFakeStripe({ port }) {
     }
 
     if (url.pathname === '/v1/refunds') {
+      // Recorded before the outcome is decided, so a refused refund is
+      // distinguishable from one that was never asked for.
+      recorded.refundAttempts.push({ idempotencyKey: key, paymentIntent: form.payment_intent })
+      if (failures.refunds > 0) {
+        return json(failures.refunds, {
+          error: { message: 'fake stripe was told to refuse refunds', code: 'refund_refused' },
+        })
+      }
       const existing = recorded.refunds.find((refund) => refund.idempotencyKey === key)
       if (existing !== undefined) return json(200, existing.response)
       seq += 1
@@ -107,7 +136,7 @@ export function startFakeStripe({ port }) {
   })
 
   return new Promise((accept) => {
-    server.listen(port, () => accept({ server, recorded }))
+    server.listen(port, () => accept({ server, recorded, failures }))
   })
 }
 

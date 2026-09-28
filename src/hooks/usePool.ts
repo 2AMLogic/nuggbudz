@@ -103,6 +103,17 @@ function humanWindow(ms: number): string {
   return `${mins} minute${mins === 1 ? '' : 's'}`
 }
 
+/**
+ * What to append to a teardown notice when money was collected and not returned.
+ *
+ * A refund the processor refused is not a refund, and the screen must not imply
+ * one. Empty in the ordinary case, so the common path reads exactly as before.
+ */
+function heldSuffix(heldCents: number): string {
+  if (heldCents <= 0) return ''
+  return ` ${formatCents(heldCents)} could not be refunded automatically and is being held — flagged for a human.`
+}
+
 function socketUrl({ lat, lng, demoName }: JoinRequest): string {
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
   const params = new URLSearchParams()
@@ -261,10 +272,10 @@ export function usePool() {
                 waitingOn: null,
                 notice:
                   message.whose === 'you'
-                    ? 'Your payment did not go through, so that match is off.'
+                    ? `Your payment did not go through, so that match is off.${heldSuffix(message.heldCents)}`
                     : `Your bud's payment failed${
                         message.refunded ? ` — ${formatCents(message.refundedCents)} refunded` : ''
-                      }. Back in the queue.`,
+                      }. Back in the queue.${heldSuffix(message.heldCents)}`,
               }
             case 'buddy_left':
               return {
@@ -290,10 +301,19 @@ export function usePool() {
                 ...prev,
                 stage: 'disputed',
                 waitingOn: null,
-                notice:
+                notice: `${
                   message.reason === 'buddy_left'
-                    ? 'Your bud left before confirming. This split is flagged for review.'
-                    : 'Only one of you confirmed in time. This split is flagged for review.',
+                    ? 'Your bud left before confirming.'
+                    : 'Only one of you confirmed in time.'
+                } This split is flagged for review${
+                  // A dispute holds the money on purpose — see README's "A
+                  // disputed split holds the money". Saying "flagged for review"
+                  // without saying that leaves a buyer who paid assuming a
+                  // refund is on its way.
+                  message.heldCents > 0
+                    ? `, and ${formatCents(message.heldCents)} is held until someone looks at it`
+                    : ''
+                }.`,
               }
             case 'queue_expiring':
               return {
@@ -325,8 +345,10 @@ export function usePool() {
                 // real cents to give back.
                 notice:
                   message.refundedCents > 0
-                    ? `That match went unconfirmed and was called off. ${formatCents(message.refundedCents)} refunded.`
-                    : 'That match went unconfirmed and was called off. Nothing was charged.',
+                    ? `That match went unconfirmed and was called off. ${formatCents(message.refundedCents)} refunded.${heldSuffix(message.heldCents)}`
+                    : `That match went unconfirmed and was called off.${
+                        message.heldCents > 0 ? '' : ' Nothing was charged.'
+                      }${heldSuffix(message.heldCents)}`,
               }
             case 'error':
               return { ...prev, error: message.message }

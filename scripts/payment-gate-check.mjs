@@ -78,6 +78,24 @@ const BUYERS = {
   // confirms, and the money has to come back.
   rex: { sid: sessionId('pay-rex'), userId: accountId(4), name: 'Rex' },
   tam: { sid: sessionId('pay-tam'), userId: accountId(5), name: 'Tam' },
+  // The late-success pair: one card declines, the OTHER clears afterwards (3DS),
+  // against a match the pool has already torn down.
+  una: { sid: sessionId('pay-una'), userId: accountId(6), name: 'Una' },
+  vic: { sid: sessionId('pay-vic'), userId: accountId(7), name: 'Vic' },
+  // The refused-refund pair: one half pays, the other declines, and Stripe
+  // refuses to hand the first one's money back.
+  wes: { sid: sessionId('pay-wes'), userId: accountId(8), name: 'Wes' },
+  zed: { sid: sessionId('pay-zed'), userId: accountId(9), name: 'Zed' },
+}
+
+/** Tell the fake Stripe to refuse refunds (or, with no argument, to stop). */
+async function failRefunds(status = 0) {
+  const res = await fetch(`${FAKE_STRIPE}/__fail`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refunds: status }),
+  })
+  return await res.json()
 }
 
 function seedSessions() {
@@ -512,6 +530,136 @@ if (mode === 'unconfigured') {
   )
 
   rex.ws.close()
+
+  // --- a leg that succeeds AFTER the other one failed is still refunded ---
+  //
+  // Two buyers confirm cards in parallel. The first declines and the match is
+  // torn down; the second clears two seconds later behind 3DS, against a match
+  // this pool no longer has. Before the tombstone, that webhook was answered
+  // `unknown_match` and the buyer kept a $4.49 charge for a box that never
+  // existed — with a green unit test over the branch that would have refunded it,
+  // because no live path could reach that branch. There is no way to see this
+  // from a pure function: the deletion is what breaks it.
+  if (FAKE_STRIPE !== null) {
+    const una = open(BUYERS.una, HERE)
+    const vic = open(BUYERS.vic, NEARBY)
+    await Promise.all([una.opened, vic.opened])
+    await Promise.all([una.expect('welcome'), vic.expect('welcome')])
+    una.join()
+    await una.expect('waiting')
+    vic.join()
+    const [mu, mv] = await Promise.all([una.expect('matched'), vic.expect('matched')])
+    const ru = await una.expect('payment_required')
+    const rv = await vic.expect('payment_required')
+
+    // Una's card declines. The match dies with Vic's PaymentIntent still open.
+    await deliverWebhook(intentOf(ru), 'payment_intent.payment_failed', {
+      match_id: mu.matchId,
+      role: mu.role,
+      cell,
+    })
+    const dead = await vic.expect('payment_failed')
+    check(
+      'a declined half kills the match for the other buyer',
+      dead.matchId === mu.matchId && dead.whose === 'buddy',
+      JSON.stringify(dead),
+    )
+    check(
+      'nothing was collected from the declining half',
+      dead.refundedCents === 0,
+      `${dead.refundedCents}`,
+    )
+
+    // ...and now Vic's clears, against a match that is already gone.
+    const late = await deliverWebhook(intentOf(rv), 'payment_intent.succeeded', {
+      match_id: mu.matchId,
+      role: mv.role,
+      cell,
+    })
+    check('the late success is acknowledged', late.status === 200, JSON.stringify(late.body))
+
+    await new Promise((r) => setTimeout(r, 800))
+    const afterLate = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
+    const lateRefunds = afterLate.refunds.filter((r) => r.idempotencyKey.includes(mu.matchId))
+    check(
+      'a leg that succeeds AFTER the other failed is refunded',
+      lateRefunds.length === 1 && lateRefunds[0].paymentIntent === intentOf(rv),
+      JSON.stringify(lateRefunds),
+    )
+    check(
+      'and that refund is keyed on the dead match and the late role',
+      lateRefunds[0]?.idempotencyKey === `refund:${mu.matchId}:${mv.role}`,
+      `${lateRefunds[0]?.idempotencyKey}`,
+    )
+    const lateBooked = ledgerQuery(
+      `SELECT COUNT(*) AS n FROM matches WHERE match_id = '${mu.matchId}'`,
+    )
+    check('the dead match still books no ledger row', (lateBooked[0]?.n ?? 0) === 0)
+
+    for (const socket of [una, vic]) socket.ws.close()
+  }
+
+  // --- a refund the processor refuses is reported as a refund that did not happen ---
+  //
+  // `refundedCents` used to be the amount *collected*, computed before the Stripe
+  // call, and the call's failure was swallowed — so a buyer was told
+  // `refunded=true refundedCents=449` while every refund call had failed, and the
+  // stored record agreed with the lie. What a buyer is told now is what Stripe
+  // actually did.
+  if (FAKE_STRIPE !== null) {
+    const wes = open(BUYERS.wes, HERE)
+    const zed = open(BUYERS.zed, NEARBY)
+    await Promise.all([wes.opened, zed.opened])
+    await Promise.all([wes.expect('welcome'), zed.expect('welcome')])
+    wes.join()
+    await wes.expect('waiting')
+    zed.join()
+    const [mw, mz] = await Promise.all([wes.expect('matched'), zed.expect('matched')])
+    const rw = await wes.expect('payment_required')
+    const rz = await zed.expect('payment_required')
+
+    await failRefunds(500)
+
+    // Wes pays; Zed declines. Wes is owed a refund that Stripe will refuse.
+    await deliverWebhook(intentOf(rw), 'payment_intent.succeeded', {
+      match_id: mw.matchId,
+      role: mw.role,
+      cell,
+    })
+    await deliverWebhook(intentOf(rz), 'payment_intent.payment_failed', {
+      match_id: mw.matchId,
+      role: mz.role,
+      cell,
+    })
+
+    const told = await wes.expect('payment_failed')
+    check(
+      'a buyer is NOT told they were refunded when the refund failed',
+      told.refunded === false && told.refundedCents === 0,
+      `refunded=${told.refunded} refundedCents=${told.refundedCents}`,
+    )
+    check(
+      'they are told what is still held instead',
+      told.heldCents === rw.amountCents,
+      `${told.heldCents} vs ${rw.amountCents}`,
+    )
+
+    await new Promise((r) => setTimeout(r, 400))
+    const afterFail = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
+    check(
+      'the refund really was attempted and really was refused',
+      afterFail.refundAttempts.some(
+        (r) => r.idempotencyKey === `refund:${mw.matchId}:${mw.role}`,
+      ) && afterFail.refunds.every((r) => !r.idempotencyKey.includes(mw.matchId)),
+      `attempts ${JSON.stringify(afterFail.refundAttempts.filter((r) => r.idempotencyKey.includes(mw.matchId)))}, successes ${JSON.stringify(afterFail.refunds.filter((r) => r.idempotencyKey.includes(mw.matchId)))}`,
+    )
+
+    // Restored, so nothing after this runs against a stub that refuses refunds.
+    const cleared = await failRefunds(0)
+    check('the refund stub is restored', cleared.refunds === 0, JSON.stringify(cleared))
+
+    for (const socket of [wes, zed]) socket.ws.close()
+  }
 }
 
 hosted?.server.close()

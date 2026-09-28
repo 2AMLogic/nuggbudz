@@ -51,7 +51,17 @@ async function main() {
   // off the deployed Worker for the same reason — a local `.dev.vars` or a
   // `wrangler secret put` that went to the wrong environment would both look
   // fine from here otherwise.
-  console.log(`Payments: ${health.payments}`)
+  console.log(
+    `Payments: ${health.payments} (Stripe API base: ${health.stripeApiBase ?? 'unknown'})`,
+  )
+  // `live` says the secrets are bound, not that the charges go to Stripe. The
+  // test lanes point STRIPE_API_BASE at a local fake; production must not.
+  if (health.stripeApiBase === 'custom') {
+    console.error(
+      'STRIPE_API_BASE IS OVERRIDDEN on a deployment — charges are being sent somewhere that is not Stripe. That var is meant for the local payment-gate check only. Clear it in the Cloudflare dashboard and redeploy.',
+    )
+    process.exitCode = 1
+  }
   switch (health.payments) {
     case 'live':
       console.log('PAYMENTS ARE LIVE — both halves of a match are charged, $0.99 retained.')

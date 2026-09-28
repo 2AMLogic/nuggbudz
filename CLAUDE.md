@@ -69,6 +69,19 @@ state.
   because `demo` is answered before the secrets are consulted — enforced on the
   path, and proved by the `demo-check` CI job running with Stripe pointed at a
   dead address.
+- **A dispute holds the money; every other teardown refunds it — and a refund is
+  only a refund once Stripe says so.** `disputeMatch` deliberately does not
+  refund: auto-refunding when one buddy confirms and the other goes silent would
+  make silence the cheapest way to eat for free, which is the same reasoning that
+  writes no ledger row. That hold is documented in `README.md` and stated on
+  screen, because holding money you have no automated way to return is only
+  defensible if it is written down. Everywhere else, `refund()` returns the legs
+  Stripe *confirmed* and `markRefunded` stamps only those — never before the call.
+  A leg whose refund failed stays `succeeded` (money collected, not returned) and
+  the buyer is told `heldCents`, never `refunded`. A match being deleted leaves
+  its unfinished money behind as a tombstone (`retireMatch`, the one place a
+  `match:` key is removed), so a PaymentIntent that clears *after* its match died
+  is still refunded rather than answered `unknown_match`.
 
 ## Commands
 

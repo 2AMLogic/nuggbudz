@@ -39,17 +39,22 @@ import { writeSettledMatch } from './ledger'
 import {
   allLegsPaid,
   applyPaymentOutcome,
+  centsFor,
   codeAtMatchTime,
   collectedCents,
+  markRefunded,
   openLedger,
   type PaymentDisposition,
   type PaymentLedger,
   type PaymentLeg,
+  type PaymentOutcomeRequest,
+  type PaymentTombstone,
   parsePaymentOutcome,
   paymentDisposition,
   paymentIntentSpecs,
+  refundableLegs,
   refundIdempotencyKey,
-  unwindLedger,
+  retireLedger,
 } from './lib/payments'
 import { createPaymentIntent, refundPaymentIntent, type StripeClientConfig } from './lib/stripe'
 
@@ -58,6 +63,26 @@ import { createPaymentIntent, refundPaymentIntent, type StripeClientConfig } fro
  * browser can reach: the only way in is a Durable Object stub.
  */
 export const INTERNAL_PAYMENT_PATH = '/__internal/payment'
+
+/**
+ * Where a retired match's unfinished money lives.
+ *
+ * A separate keyspace from `match:` on purpose: `matchRecords()` lists that
+ * prefix and feeds the expiry sweep, `handleConfirmPickup` and `scheduleSweep`,
+ * and a tombstone must not be visible to any of them. It is money, not a match.
+ */
+const TOMBSTONE_PREFIX = 'paytomb:'
+
+/**
+ * How long a tombstone that holds no money is kept.
+ *
+ * Only ever reached by a tombstone whose legs are all still `pending`: Stripe
+ * gives up retrying a webhook after about three days, so after four nothing will
+ * ever land against it and there is nothing to wait for. A tombstone that still
+ * has collected cents in it is *never* collected here — that one is the
+ * reconciliation record for money this pool failed to give back.
+ */
+const TOMBSTONE_RETENTION_MS = 4 * 24 * 60 * 60 * 1_000
 
 /**
  * Who is on the other end of a socket.
@@ -369,6 +394,8 @@ export class NuggPool extends DurableObject<Env> {
 
     for (const matchId of plan.cancel) await this.cancelMatch(matchId)
 
+    await this.sweepTombstones(now)
+
     // Anyone dropped has left everyone else's roster, so the map dots and pool
     // counts still showing them have to be refreshed.
     if (plan.expire.length > 0 || plan.cancel.length > 0) this.broadcastWaiting()
@@ -386,13 +413,17 @@ export class NuggPool extends DurableObject<Env> {
     const record = await this.ctx.storage.get<MatchRecord>(`match:${matchId}`)
     // Whatever was collected for a box nobody turned up for goes back. This is
     // the field `match_expired.refundedCents` was reserved for: a cancellation
-    // can never be reported without saying what happened to the money.
-    let refundedCents = 0
+    // can never be reported without saying what happened to the money — and
+    // `refundedCents` counts refunds Stripe *confirmed*, never refunds attempted.
+    let retired = record
+    let refunded: PaymentLeg[] = []
+    let held: PaymentLeg[] = []
     if (record?.ledger !== undefined) {
-      refundedCents = collectedCents(record.ledger)
-      const { ledger, refund } = unwindLedger(record.ledger)
-      await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, { ...record, ledger })
-      await this.refund(refund, matchId)
+      const settled = await this.settleRefunds(matchId, record.ledger)
+      retired = { ...record, ledger: settled.ledger }
+      refunded = settled.refunded
+      held = settled.held
+      await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, retired)
     }
 
     for (const peer of this.matchSockets(matchId)) {
@@ -401,10 +432,11 @@ export class NuggPool extends DurableObject<Env> {
         type: 'match_expired',
         matchId,
         reason: 'unconfirmed',
-        refundedCents,
+        refundedCents: centsFor(refunded, peer.state.role),
+        heldCents: centsFor(held, peer.state.role),
       })
     }
-    await this.ctx.storage.delete(`match:${matchId}`)
+    await this.retireMatch(matchId, retired)
   }
 
   override async webSocketClose(ws: WebSocket): Promise<void> {
@@ -683,19 +715,20 @@ export class NuggPool extends DurableObject<Env> {
    */
   private async abortMatch(matchId: string, why: string): Promise<void> {
     const record = await this.ctx.storage.get<MatchRecord>(`match:${matchId}`)
+    let retired = record
     if (record?.ledger !== undefined) {
       // Defensive: reaching here with a ledger means charges were opened and then
       // something failed, so anything collected goes back.
-      const { ledger, refund } = unwindLedger(record.ledger)
-      await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, { ...record, ledger })
-      await this.refund(refund, matchId)
+      const settled = await this.settleRefunds(matchId, record.ledger)
+      retired = { ...record, ledger: settled.ledger }
+      await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, retired)
     }
 
     for (const peer of this.matchSockets(matchId)) {
       this.fail(peer.ws, 'payment_unavailable', why)
       this.setState(peer.ws, principalOf(peer.state))
     }
-    await this.ctx.storage.delete(`match:${matchId}`)
+    await this.retireMatch(matchId, retired)
     this.broadcastWaiting()
     await this.scheduleSweep()
   }
@@ -712,11 +745,11 @@ export class NuggPool extends DurableObject<Env> {
     if (outcome === null) return Response.json({ error: 'bad payment event' }, { status: 400 })
 
     const record = await this.ctx.storage.get<MatchRecord>(`match:${outcome.matchId}`)
-    if (record?.ledger === undefined) {
-      // Already unwound, already settled, or never ours. Acknowledge so Stripe
-      // stops retrying a delivery nobody is waiting for.
-      return Response.json({ ok: true, effect: 'unknown_match' })
-    }
+    // A match this pool no longer has may still owe somebody money: the other
+    // half declined, this half cleared two seconds later behind 3DS, and the
+    // record was deleted in between. `retireMatch` left the charges behind for
+    // exactly this, so look there before answering `unknown_match`.
+    if (record?.ledger === undefined) return await this.handleLatePaymentEvent(outcome)
 
     const { ledger, effect } = applyPaymentOutcome(record.ledger, outcome)
     await this.ctx.storage.put<MatchRecord>(`match:${outcome.matchId}`, { ...record, ledger })
@@ -726,14 +759,65 @@ export class NuggPool extends DurableObject<Env> {
         this.releasePickupCode({ ...record, ledger })
         break
       case 'unwind':
-        await this.refund(effect.refund, outcome.matchId)
         await this.unwindMatch({ ...record, ledger }, effect.failedRole, effect.refund)
         break
+      case 'late_refund': {
+        // Defensive: a live record whose ledger is already closed should not
+        // exist — `retireMatch` writes the closed copy to a tombstone and deletes
+        // the record in the same tick, and a Durable Object runs one event at a
+        // time. Refund anyway rather than sit on money for a dead match.
+        const settled = await this.settleRefunds(outcome.matchId, ledger, effect.refund)
+        await this.ctx.storage.put<MatchRecord>(`match:${outcome.matchId}`, {
+          ...record,
+          ledger: settled.ledger,
+        })
+        break
+      }
       default:
         break
     }
 
     return Response.json({ ok: true, effect: effect.kind })
+  }
+
+  /**
+   * A payment result for a match this pool has already torn down.
+   *
+   * The case that used to lose a customer $4.49: two buyers confirm cards in
+   * parallel, the orderer's declines, the match is unwound, and the receiver's
+   * clears a moment later behind 3DS. The record is gone, so there is nothing to
+   * clear and nobody to tell — but there is a charge, and no box, so the money
+   * goes back.
+   *
+   * A tombstone is money and never a match. Nothing here touches a socket, reads
+   * a pickup code (it does not carry one) or can reach `completeMatch` (which
+   * takes a `MatchRecord`). It only ever refunds, and remembers what it could
+   * not refund.
+   */
+  private async handleLatePaymentEvent(outcome: PaymentOutcomeRequest): Promise<Response> {
+    const key = `${TOMBSTONE_PREFIX}${outcome.matchId}`
+    const tombstone = await this.ctx.storage.get<PaymentTombstone>(key)
+    if (tombstone === undefined) {
+      // Already settled, never ours, or a match that owed nothing when it died.
+      // Acknowledge so Stripe stops retrying a delivery nobody is waiting for.
+      return Response.json({ ok: true, effect: 'unknown_match' })
+    }
+
+    const { ledger, effect } = applyPaymentOutcome(tombstone.ledger, outcome)
+    const owed = effect.kind === 'late_refund' ? effect.refund : []
+    const settled = await this.settleRefunds(outcome.matchId, ledger, owed)
+    const next = retireLedger(settled.ledger, tombstone.retiredAt)
+    // Nothing left to land and nothing left owed: the tombstone has done its job.
+    if (next === null) await this.ctx.storage.delete(key)
+    else await this.ctx.storage.put<PaymentTombstone>(key, next)
+
+    return Response.json({
+      ok: true,
+      effect: effect.kind,
+      late: true,
+      refundedCents: settled.refunded.reduce((sum, leg) => sum + leg.amountCents, 0),
+      heldCents: collectedCents(settled.ledger),
+    })
   }
 
   /**
@@ -764,19 +848,26 @@ export class NuggPool extends DurableObject<Env> {
   private async unwindMatch(
     record: MatchRecord,
     failedRole: BuyerRole,
-    refunded: PaymentLeg[],
+    owed: PaymentLeg[],
   ): Promise<void> {
-    const refundedFor = (role: BuyerRole) =>
-      refunded.filter((leg) => leg.role === role).reduce((sum, leg) => sum + leg.amountCents, 0)
+    // Refund first, then say what happened: what a buyer is told has to be what
+    // Stripe actually did, not what this pool intended to ask for.
+    const settled =
+      record.ledger === undefined
+        ? { ledger: undefined, refunded: [] as PaymentLeg[], held: [] as PaymentLeg[] }
+        : await this.settleRefunds(record.matchId, record.ledger, owed)
+    const retired: MatchRecord =
+      settled.ledger === undefined ? record : { ...record, ledger: settled.ledger }
 
     for (const peer of this.matchSockets(record.matchId)) {
-      const mine = refundedFor(peer.state.role)
+      const mine = centsFor(settled.refunded, peer.state.role)
       this.send(peer.ws, {
         type: 'payment_failed',
         matchId: record.matchId,
         whose: peer.state.role === failedRole ? 'you' : 'buddy',
         refunded: mine > 0,
         refundedCents: mine,
+        heldCents: centsFor(settled.held, peer.state.role),
       })
       if (peer.state.role === failedRole) {
         this.setState(peer.ws, principalOf(peer.state))
@@ -793,27 +884,94 @@ export class NuggPool extends DurableObject<Env> {
       })
     }
 
-    await this.ctx.storage.delete(`match:${record.matchId}`)
+    await this.retireMatch(record.matchId, retired)
     this.broadcastWaiting()
     await this.scheduleSweep()
   }
 
-  /** Hand money back for legs that were collected against a match that is off. */
-  private async refund(legs: PaymentLeg[], matchId: string): Promise<void> {
+  /**
+   * Delete a match record, leaving behind whatever its money still needs.
+   *
+   * **The only place a `match:` key is removed.** Four paths tear a match down
+   * (a declined half, a cancellation, an abort, a disconnect) and every one of
+   * them used to delete the record itself — which is what made
+   * `applyPaymentOutcome`'s late-success refund unreachable from its only caller,
+   * and would have made it unreachable again the next time a teardown path was
+   * added. One chokepoint, so the tombstone cannot be forgotten;
+   * `test/payments.test.ts` asserts there is still only one.
+   */
+  private async retireMatch(matchId: string, record: MatchRecord | undefined): Promise<void> {
+    const tombstone = record?.ledger === undefined ? null : retireLedger(record.ledger, Date.now())
+    if (tombstone !== null) {
+      await this.ctx.storage.put<PaymentTombstone>(`${TOMBSTONE_PREFIX}${matchId}`, tombstone)
+    }
+    await this.ctx.storage.delete(`match:${matchId}`)
+  }
+
+  /**
+   * Hand money back for legs collected against a match that is off, and report
+   * what Stripe actually agreed to.
+   *
+   * `refunded` is what was confirmed; `held` is what was owed and is still
+   * sitting in the account. The distinction is the whole point: the legs are
+   * stamped `refunded` only *after* the call, so a stuck refund leaves the record
+   * saying `succeeded` — money collected, not returned — instead of erasing the
+   * one piece of evidence a human reconciling it would need.
+   */
+  private async settleRefunds(
+    matchId: string,
+    ledger: PaymentLedger,
+    owed: PaymentLeg[] = refundableLegs(ledger),
+  ): Promise<{ ledger: PaymentLedger; refunded: PaymentLeg[]; held: PaymentLeg[] }> {
+    const refunded = await this.refund(owed, matchId)
+    const confirmed = new Set(refunded.map((leg) => leg.paymentIntentId))
+    return {
+      ledger: markRefunded(ledger, refunded),
+      refunded,
+      held: owed.filter((leg) => !confirmed.has(leg.paymentIntentId)),
+    }
+  }
+
+  /**
+   * Ask Stripe to hand money back, and return only the legs it confirmed.
+   *
+   * A refund that fails is a money problem for a human, not a reason to leave the
+   * buyer staring at a dead match — so the loop continues. But it is also not a
+   * refund, so it is not reported as one: the leg is simply absent from what this
+   * returns, and every caller derives what it tells the buyer from that.
+   */
+  private async refund(legs: PaymentLeg[], matchId: string): Promise<PaymentLeg[]> {
     const stripe = this.stripe
-    if (stripe === null || legs.length === 0) return
+    if (legs.length === 0) return []
+    if (stripe === null) {
+      // A secret rotated away mid-match. Nothing was refunded, and saying
+      // otherwise would be the lie this function exists to stop telling.
+      console.error(
+        'NuggPool: cannot refund %d leg(s) of match %s — Stripe is not configured',
+        legs.length,
+        matchId,
+      )
+      return []
+    }
+    const refunded: PaymentLeg[] = []
     for (const leg of legs) {
       try {
         await refundPaymentIntent(stripe, {
           paymentIntentId: leg.paymentIntentId,
           idempotencyKey: refundIdempotencyKey(matchId, leg.role),
         })
+        refunded.push(leg)
       } catch (error) {
-        // A stuck refund is a money problem for a human, not a reason to leave
-        // the buyer staring at a dead match.
-        console.error('NuggPool: refund failed for %s (%s): %o', matchId, leg.role, error)
+        console.error(
+          'NuggPool: refund FAILED for %s (%s), %d cents still held: %o',
+          matchId,
+          leg.role,
+          leg.amountCents,
+          error,
+        )
       }
     }
+    return refunded
   }
 
   /** Seat a buyer in the queue, alive as of now, and arm the cell's alarm. */
@@ -985,12 +1143,19 @@ export class NuggPool extends DurableObject<Env> {
     }
 
     const confirmedBy = confirmedRole(record.confirmations)
+    const heldFor = (role: BuyerRole) =>
+      record.ledger === undefined ? 0 : centsFor(refundableLegs(record.ledger), role)
     for (const peer of this.matchSockets(record.matchId, except)) {
       this.send(peer.ws, {
         type: 'pickup_disputed',
         matchId: record.matchId,
         confirmedBy,
         reason,
+        // Said out loud rather than left to a code comment: this is the one
+        // teardown that deliberately does *not* refund, so the buyer has to be
+        // told their money is being held rather than left to infer it from
+        // "flagged for review".
+        heldCents: heldFor(peer.state.role),
       })
       this.setState(peer.ws, principalOf(peer.state))
     }
@@ -1045,10 +1210,11 @@ export class NuggPool extends DurableObject<Env> {
     // Nobody confirmed, so nobody has a box — anything collected goes back. The
     // buyer who stayed has paid for an order that is not being placed, and the one
     // who walked away has paid for nothing at all.
+    let retired = record
     if (record?.ledger !== undefined) {
-      const { ledger, refund } = unwindLedger(record.ledger)
-      await this.ctx.storage.put<MatchRecord>(`match:${state.matchId}`, { ...record, ledger })
-      await this.refund(refund, state.matchId)
+      const settled = await this.settleRefunds(state.matchId, record.ledger)
+      retired = { ...record, ledger: settled.ledger }
+      await this.ctx.storage.put<MatchRecord>(`match:${state.matchId}`, retired)
     }
 
     for (const other of this.states()) {
@@ -1069,7 +1235,7 @@ export class NuggPool extends DurableObject<Env> {
       this.send(other.ws, { type: 'buddy_left', matchId: state.matchId })
     }
 
-    await this.ctx.storage.delete(`match:${state.matchId}`)
+    await this.retireMatch(state.matchId, retired)
     // Without this the survivor's UI would keep showing the pool count (and
     // buddy dots) from before they were matched, which for an instant match
     // is zero — and it also tells everyone else in the cell about the
@@ -1107,6 +1273,23 @@ export class NuggPool extends DurableObject<Env> {
 
   private async matchRecords(): Promise<Map<string, MatchRecord>> {
     return await this.ctx.storage.list<MatchRecord>({ prefix: 'match:' })
+  }
+
+  /**
+   * Drop tombstones that are waiting for a webhook that will never come.
+   *
+   * A tombstone still holding collected cents is never dropped: that one is the
+   * record of money this pool failed to hand back, and deleting it would lose the
+   * only trace of it. Opportunistic rather than scheduled — a cell with nothing
+   * but a tombstone arms no alarm, and does not need to: there is nothing due.
+   */
+  private async sweepTombstones(now: number): Promise<void> {
+    const tombstones = await this.ctx.storage.list<PaymentTombstone>({ prefix: TOMBSTONE_PREFIX })
+    for (const [key, tombstone] of tombstones) {
+      if (collectedCents(tombstone.ledger) > 0) continue
+      if (now - tombstone.retiredAt < TOMBSTONE_RETENTION_MS) continue
+      await this.ctx.storage.delete(key)
+    }
   }
 
   /**

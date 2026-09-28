@@ -12,8 +12,13 @@ import { SAUCES_PER_SELECTION, type SauceSelection } from './sauces'
  * `payment_cleared`. A v4 client would sit on a null code with no idea it was
  * waiting for two cards to clear, which is why this is a bump rather than an
  * additive change.
+ *
+ * 6 stops a teardown claiming a refund it did not get: `payment_failed`,
+ * `match_expired` and `pickup_disputed` all carry `heldCents` — money collected
+ * and *not* handed back. A v5 client would silently show nothing where a buyer
+ * is owed real money, which is exactly the misreport this version exists to end.
  */
-export const PROTOCOL_VERSION = 5
+export const PROTOCOL_VERSION = 6
 
 /**
  * Take a seat in the pool.
@@ -194,7 +199,8 @@ export type PaymentFailureSide = 'you' | 'buddy'
 
 /**
  * A half went unpaid, so the whole match is off. If this buyer had already paid,
- * that charge has been refunded.
+ * that charge has been refunded — or, if the processor refused the refund, is
+ * being held for a human, which is said out loud rather than papered over.
  *
  * The buyer whose payment failed drops out of the queue entirely and has to join
  * again deliberately; the one who paid is requeued. Requeueing both would pair
@@ -204,9 +210,17 @@ export interface PaymentFailedMessage {
   type: 'payment_failed'
   matchId: string
   whose: PaymentFailureSide
+  /** True only of a refund the processor confirmed. Never of one merely attempted. */
   refunded: boolean
   /** What was handed back to you, in cents. Zero when you were the one who failed. */
   refundedCents: number
+  /**
+   * Collected from you and *not* handed back, in cents — a refund the processor
+   * refused. Zero in the ordinary case. A buyer with cents here has not been
+   * refunded and is not told they have been: the money is held against the
+   * server's record until a human reconciles it.
+   */
+  heldCents: number
 }
 
 /** Your buddy disconnected before pickup; you are returned to the queue. */
@@ -243,6 +257,14 @@ export interface PickupDisputedMessage {
   /** The side that did confirm. */
   confirmedBy: BuyerRole | null
   reason: 'timeout' | 'buddy_left'
+  /**
+   * What you paid and is being held, in cents, pending a human.
+   *
+   * A dispute deliberately does not refund — see README's "A disputed split
+   * holds the money" — so this is the one teardown that can report held cents
+   * with nothing having gone wrong at the processor.
+   */
+  heldCents: number
 }
 
 /** You have gone quiet and are about to lose your place. A ping keeps it. */
@@ -272,11 +294,13 @@ export interface MatchExpiredMessage {
   matchId: string
   reason: 'unconfirmed'
   /**
-   * Cents returned to you. Always zero while no money is captured before
-   * pickup; the field is here so a cancellation can never be reported without
-   * saying what happened to the payment.
+   * Cents returned to you, and confirmed by the processor. The field is here so a
+   * cancellation can never be reported without saying what happened to the
+   * payment.
    */
   refundedCents: number
+  /** Cents collected from you that the processor would not hand back. */
+  heldCents: number
 }
 
 export interface PongMessage {

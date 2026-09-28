@@ -5,8 +5,29 @@ import type { LocationSource } from './location'
 import { normalizePickupCode } from './pickup'
 import { SAUCES_PER_SELECTION, type SauceSelection } from './sauces'
 
-/** Wire protocol version. Bump on any breaking message change. */
-export const PROTOCOL_VERSION = 5
+/**
+ * Wire protocol version. Bump on any breaking message change.
+ *
+ * Two changes independently claimed **5** on separate branches — chat on `main`,
+ * and money in front of the pickup code here — so this merge is **6** rather
+ * than either of them: a client speaking one of the two 5s cannot be assumed to
+ * speak the other, and a version number that two incompatible wires both answer
+ * to is worse than no version number at all.
+ *
+ * 5 (chat) added the two-party relay between matched buddies, and with it the
+ * `ChatErrorCode` arm of `ProtocolErrorCode` below.
+ *
+ * 5 (money) put payment in front of the pickup code: `matched` no longer carries
+ * one even for the orderer while a match is being charged, and the code arrives
+ * later on `payment_cleared`. A client from before it would sit on a null code
+ * with no idea it was waiting for two cards to clear.
+ *
+ * 6 also stops a teardown claiming a refund it did not get: `payment_failed`,
+ * `match_expired` and `pickup_disputed` all carry `heldCents` — money collected
+ * and *not* handed back. An older client would silently show nothing where a
+ * buyer is owed real money, which is exactly the misreport it exists to end.
+ */
+export const PROTOCOL_VERSION = 6
 
 /**
  * Take a seat in the pool.
@@ -171,8 +192,72 @@ export interface MatchedMessage {
    * The code your buddy has to read off you at the handoff — sent to the
    * orderer only, and null for the receiver, who is the one who has to go and
    * read it.
+   *
+   * Also null for the orderer while the match is being charged: money comes
+   * first, and a code released before both halves clear would buy a box nobody
+   * paid for. It arrives on `payment_cleared` instead. Non-null here only when
+   * no money is in play at all — a demo pairing, or a server explicitly running
+   * uncharged.
    */
   pickupCode: string | null
+}
+
+/**
+ * Pay your half. Sent immediately after `matched`, to each buddy separately.
+ *
+ * `amountCents` is that buyer's own `share.payCents` copied verbatim — the client
+ * never recomputes a price, and the same number is what was sent to Stripe as the
+ * PaymentIntent amount.
+ */
+export interface PaymentRequiredMessage {
+  type: 'payment_required'
+  matchId: string
+  amountCents: number
+  /** Stripe PaymentIntent client secret, confirmed in the browser. */
+  clientSecret: string
+}
+
+/**
+ * Both halves cleared, so the handoff can begin.
+ *
+ * This is where the orderer finally learns their pickup code. It is the same
+ * random code the match was struck with — never derived from the match id — and
+ * it is still `null` for the receiver, who has to go and read it off the orderer.
+ * Payment gates *when* the code is released; it never changes *who* gets it.
+ */
+export interface PaymentClearedMessage {
+  type: 'payment_cleared'
+  matchId: string
+  pickupCode: string | null
+}
+
+/** Which side of the pair failed to pay. */
+export type PaymentFailureSide = 'you' | 'buddy'
+
+/**
+ * A half went unpaid, so the whole match is off. If this buyer had already paid,
+ * that charge has been refunded — or, if the processor refused the refund, is
+ * being held for a human, which is said out loud rather than papered over.
+ *
+ * The buyer whose payment failed drops out of the queue entirely and has to join
+ * again deliberately; the one who paid is requeued. Requeueing both would pair
+ * them with each other again on the spot and charge the same card again.
+ */
+export interface PaymentFailedMessage {
+  type: 'payment_failed'
+  matchId: string
+  whose: PaymentFailureSide
+  /** True only of a refund the processor confirmed. Never of one merely attempted. */
+  refunded: boolean
+  /** What was handed back to you, in cents. Zero when you were the one who failed. */
+  refundedCents: number
+  /**
+   * Collected from you and *not* handed back, in cents — a refund the processor
+   * refused. Zero in the ordinary case. A buyer with cents here has not been
+   * refunded and is not told they have been: the money is held against the
+   * server's record until a human reconciles it.
+   */
+  heldCents: number
 }
 
 /** Your buddy disconnected before pickup; you are returned to the queue. */
@@ -209,6 +294,14 @@ export interface PickupDisputedMessage {
   /** The side that did confirm. */
   confirmedBy: BuyerRole | null
   reason: 'timeout' | 'buddy_left'
+  /**
+   * What you paid and is being held, in cents, pending a human.
+   *
+   * A dispute deliberately does not refund — see README's "A disputed split
+   * holds the money" — so this is the one teardown that can report held cents
+   * with nothing having gone wrong at the processor.
+   */
+  heldCents: number
 }
 
 /** You have gone quiet and are about to lose your place. A ping keeps it. */
@@ -238,11 +331,13 @@ export interface MatchExpiredMessage {
   matchId: string
   reason: 'unconfirmed'
   /**
-   * Cents returned to you. Always zero while no money is captured before
-   * pickup; the field is here so a cancellation can never be reported without
-   * saying what happened to the payment.
+   * Cents returned to you, and confirmed by the processor. The field is here so a
+   * cancellation can never be reported without saying what happened to the
+   * payment.
    */
   refundedCents: number
+  /** Cents collected from you that the processor would not hand back. */
+  heldCents: number
 }
 
 /**
@@ -293,6 +388,10 @@ export type ProtocolErrorCode =
   | 'bad_pickup_code'
   | 'already_confirmed'
   | 'match_disputed'
+  /** The pool cannot charge for a match and so will not make one. Fails closed. */
+  | 'payment_unavailable'
+  /** Both halves have not cleared yet, so there is nothing to confirm. */
+  | 'payment_pending'
   | ChatErrorCode
 
 export interface ErrorMessage {
@@ -305,6 +404,9 @@ export type ServerMessage =
   | WelcomeMessage
   | WaitingMessage
   | MatchedMessage
+  | PaymentRequiredMessage
+  | PaymentClearedMessage
+  | PaymentFailedMessage
   | BuddyLeftMessage
   | PickupConfirmedMessage
   | PickupCompleteMessage

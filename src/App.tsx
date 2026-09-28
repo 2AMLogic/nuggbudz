@@ -115,6 +115,7 @@ export function App() {
       <Shell cell={pool.cell} source={pool.locationSource}>
         <SettlementReceipt
           match={pool.match}
+          payment={pool.payment}
           yourSauces={sauces.selection}
           confirmed={pool.confirmed}
           waitingOn={pool.waitingOn}

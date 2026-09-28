@@ -161,6 +161,31 @@ if (!demo) {
   check('settlement still splits to $4.49', ma.share.payCents === 449 && mb.share.payCents === 449)
   check('each saves $2.50', ma.share.savingsCents === 250)
 
+  // --- a demo pair is never charged ---
+  // The ledger already refuses to book a demo split (below). This is the other
+  // half of the same rule, and the half that costs real money if it breaks: a
+  // throwaway `demo:` identity must never reach Stripe at all, not even on a
+  // fully configured production deploy. `paymentDisposition` answers `demo`
+  // before it looks at the secrets, so the tell is that the pickup code is
+  // released at match time and nobody is asked to pay.
+  //
+  // The CI job that runs this points `STRIPE_API_BASE` at an address nothing is
+  // listening on, so a demo pair that *did* try to charge would abort the match
+  // rather than quietly succeed — which is what makes these two assertions
+  // enforcement rather than decoration.
+  await new Promise((resolve) => setTimeout(resolve, 800))
+  check(
+    'a demo pair is never asked to pay',
+    [a, b].every((s) => s.inbox.every((m) => m.type !== 'payment_required')),
+    JSON.stringify([a, b].map((s) => s.inbox.map((m) => m.type))),
+  )
+  check(
+    'a demo pair gets its pickup code at match time, because no money is in play',
+    typeof ma.pickupCode === 'string' && ma.pickupCode.length === 6,
+    `${ma.pickupCode}`,
+  )
+  check('and the receiver still never gets it', mb.pickupCode === null, `${mb.pickupCode}`)
+
   // --- a demo handoff completes on screen, and books nothing ---
   // The demo is still worth running on a stage: the pair must get all the way to
   // `pickup_complete` and see a receipt. What it must not do is leave a row.

@@ -206,6 +206,10 @@ const SURFACE: Record<ProtocolErrorCode, 'chat' | 'elsewhere'> = {
   bad_pickup_code: 'elsewhere',
   already_confirmed: 'elsewhere',
   match_disputed: 'elsewhere',
+  // Both are refusals about money, and money is never a chat problem: one says
+  // this pool cannot charge anybody, the other that a half has not cleared yet.
+  payment_unavailable: 'elsewhere',
+  payment_pending: 'elsewhere',
   chat_empty: 'chat',
   chat_too_long: 'chat',
   chat_rate_limited: 'chat',

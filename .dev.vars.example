@@ -22,3 +22,25 @@ GOOGLE_CLIENT_SECRET=""
 # QUEUE_IDLE_SECONDS="6"
 # QUEUE_WARN_LEAD_SECONDS="3"
 # MATCH_CONFIRM_SECONDS="8"
+
+# Stripe. Both of these are secrets in a deployed environment
+# (`wrangler secret put`), and a pool with either of them missing REFUSES TO
+# PAIR rather than pairing for free — see the README's "Payments" section.
+# The publishable key is not here: it is a build-time env var
+# (`VITE_STRIPE_PUBLISHABLE_KEY`), public by design.
+STRIPE_SECRET_KEY=""
+STRIPE_WEBHOOK_SECRET=""
+
+# Pair without charging anybody. Required for `pnpm dev`, `pnpm smoke` and
+# `pnpm test:e2e` on a checkout with no Stripe keys — without it, joining the
+# pool is refused with `payment_unavailable`.
+#
+# Checked in ADDITION to the two secrets above being empty, never instead of
+# them, so an empty production secret is never indistinguishable from
+# intentional test mode. Ignored entirely when Stripe is configured.
+ALLOW_UNCHARGED_PAIRING="1"
+
+# Where the Stripe REST calls go. Only ever set to point at
+# `scripts/fake-stripe.mjs`, which is how the charged path is driven end to end
+# without a Stripe account. Unset means the real API.
+# STRIPE_API_BASE="http://127.0.0.1:5312/v1"

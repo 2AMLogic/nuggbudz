@@ -73,6 +73,29 @@ state.
   to the receiver); the receiver reads it off them. One side confirming alone
   times out into a dispute, and completing the handshake is the only thing that
   writes a row to the D1 ledger.
+- **Money clears before the handshake starts, and the gate fails closed.**
+  `paymentDisposition` in `worker/lib/payments.ts` decides once per match
+  whether it is charged, is a demo pair, is deliberately uncharged, or cannot
+  happen at all — and that one value gates both the pickup code and
+  `confirm_pickup`, so a half-paid match reaches neither a code nor a ledger
+  row. A pool with no Stripe secrets and no explicit `ALLOW_UNCHARGED_PAIRING`
+  **refuses to pair**; it never pairs for free. Demo pairs never reach Stripe,
+  because `demo` is answered before the secrets are consulted — enforced on the
+  path, and proved by the `demo-check` CI job running with Stripe pointed at a
+  dead address.
+- **A dispute holds the money; every other teardown refunds it — and a refund is
+  only a refund once Stripe says so.** `disputeMatch` deliberately does not
+  refund: auto-refunding when one buddy confirms and the other goes silent would
+  make silence the cheapest way to eat for free, which is the same reasoning that
+  writes no ledger row. That hold is documented in `README.md` and stated on
+  screen, because holding money you have no automated way to return is only
+  defensible if it is written down. Everywhere else, `refund()` returns the legs
+  Stripe *confirmed* and `markRefunded` stamps only those — never before the call.
+  A leg whose refund failed stays `succeeded` (money collected, not returned) and
+  the buyer is told `heldCents`, never `refunded`. A match being deleted leaves
+  its unfinished money behind as a tombstone (`retireMatch`, the one place a
+  `match:` key is removed), so a PaymentIntent that clears *after* its match died
+  is still refunded rather than answered `unknown_match`.
 
 ## Reconciling a conflicted branch: merge `origin/main` in, do not rebase onto it
 
@@ -125,6 +148,8 @@ Concretely:
 pnpm dev          # Vite + Worker together, full stack
 pnpm test         # vitest — pure logic (settlement, geo, matchmaking, protocol)
 pnpm smoke        # end-to-end pairing against a running `pnpm dev`
+pnpm payment-gate # the money gate, in whichever mode that server reports
+pnpm fake-stripe  # a local stand-in for Stripe's REST API, for the charged path
 pnpm test:e2e     # Playwright — two browsers driving the real UI end to end
 pnpm typecheck    # wrangler types && tsc --noEmit
 pnpm lint         # biome
@@ -136,6 +161,12 @@ pnpm run deploy:demo # stage deploy — adds --var ALLOW_DEMO_PAIRING:1, see REA
 dev server on port 5199. `pnpm test:e2e` boots one itself (or reuses one
 already running there) and additionally exercises the screen a person actually
 looks at. Run all three before calling a change done.
+
+Pairing needs `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars` on a checkout with no
+Stripe keys — otherwise a join is refused rather than paired for free, which is
+the point. `pnpm payment-gate` is the fourth lane: it asserts whichever money
+mode the server it is pointed at reports, and it is the only thing that
+exercises the charged path through the real Durable Object.
 
 ## Style
 

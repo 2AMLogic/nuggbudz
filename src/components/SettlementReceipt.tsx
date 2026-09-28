@@ -3,12 +3,13 @@ import type { BuyerRole } from '@shared/economics'
 import { formatCents } from '@shared/economics'
 import { formatDistance } from '@shared/geo'
 import { PICKUP_CODE_LENGTH } from '@shared/pickup'
-import type { MatchedMessage } from '@shared/protocol'
+import type { MatchedMessage, PaymentRequiredMessage } from '@shared/protocol'
 import { describeSauceSelection, type SauceSelection } from '@shared/sauces'
 import { useState } from 'react'
 import type { ChatLine } from '../hooks/usePool'
 import { Barcode } from './Barcode'
 import { BuddyChat } from './BuddyChat'
+import { PaymentPanel } from './PaymentPanel'
 import { Line, Perf } from './Roll'
 
 /**
@@ -19,6 +20,7 @@ import { Line, Perf } from './Roll'
  */
 export function SettlementReceipt({
   match,
+  payment,
   yourSauces,
   confirmed,
   waitingOn,
@@ -32,6 +34,12 @@ export function SettlementReceipt({
   onDone,
 }: {
   match: MatchedMessage
+  /**
+   * Your half, while it is still owed. Non-null means the handoff has not been
+   * paid for yet, which is why the pickup block below is replaced by the card
+   * form rather than shown alongside it.
+   */
+  payment: PaymentRequiredMessage | null
   /**
    * Your own pair, from this browser rather than off the wire — the server has no
    * reason to echo back a choice you just made. Null if you picked none.
@@ -135,7 +143,15 @@ export function SettlementReceipt({
       )}
 
       <Perf
-        label={stage === 'settled' ? 'Settled' : stage === 'disputed' ? 'Disputed' : 'Pickup'}
+        label={
+          stage === 'settled'
+            ? 'Settled'
+            : stage === 'disputed'
+              ? 'Disputed'
+              : payment !== null
+                ? 'Your half'
+                : 'Pickup'
+        }
       />
 
       {stage === 'settled' ? (
@@ -154,6 +170,26 @@ export function SettlementReceipt({
           </p>
           <button type="button" onClick={onDone} className={PRIMARY}>
             Done
+          </button>
+        </>
+      ) : payment !== null ? (
+        <>
+          {/* Money first. There is deliberately no pickup code and no confirm
+              button on this screen: the server has not released one, and the
+              handshake it gates is refused until both halves clear. */}
+          <p
+            className="printed font-body text-base leading-snug"
+            style={{ animationDelay: '700ms' }}
+          >
+            {instruction}
+          </p>
+          <PaymentPanel payment={payment} />
+          <button
+            type="button"
+            onClick={onDone}
+            className="mt-4 w-full font-display text-[0.65rem] tracking-[0.15em] text-faded uppercase underline"
+          >
+            Leave this match
           </button>
         </>
       ) : (

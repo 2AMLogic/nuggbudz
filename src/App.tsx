@@ -1,5 +1,6 @@
 import type { DealSpec, Settlement, SpreadAnalysis } from '@shared/economics'
 import { formatCents } from '@shared/economics'
+import { describeLocationSource, type LocationSource } from '@shared/location'
 import { useEffect, useState } from 'react'
 import { CellMap } from './components/CellMap'
 import { Line, Perf, Roll } from './components/Roll'
@@ -78,29 +79,32 @@ export function App() {
   const identified = session.user !== null || demoReady
 
   /**
-   * Get a location, then take the seat. Deliberately not an effect keyed on the
-   * fix: leaving the queue would immediately rejoin on the still-set fix.
+   * Take the seat. No location prompt: coordinates are sent only if the buyer
+   * already turned on precise location, and the server places the socket from the
+   * edge otherwise. Deliberately not an effect keyed on the fix — leaving the
+   * queue would immediately rejoin on the still-set fix.
    */
-  const start = async () => {
+  const start = () => {
     if (dealId === null || !identified) return
-    const fix = await coords.locate()
     pool.join({
       dealId,
-      lat: fix.lat,
-      lng: fix.lng,
+      lat: coords.fix?.lat,
+      lng: coords.fix?.lng,
       demoName: session.user === null ? demoName.trim() : undefined,
     })
   }
 
   const selected = deals.find((deal) => deal.id === dealId) ?? null
   const canStart = identified && dealId !== null && !coords.pending
+  const placement =
+    pool.locationSource === null ? null : describeLocationSource(pool.locationSource)
 
   if (
     pool.match !== null &&
     (pool.stage === 'matched' || pool.stage === 'settled' || pool.stage === 'disputed')
   ) {
     return (
-      <Shell cell={pool.cell}>
+      <Shell cell={pool.cell} source={pool.locationSource}>
         <SettlementReceipt
           match={pool.match}
           confirmed={pool.confirmed}
@@ -116,7 +120,7 @@ export function App() {
 
   if (pool.stage === 'connecting' || pool.stage === 'waiting') {
     return (
-      <Shell cell={pool.cell}>
+      <Shell cell={pool.cell} source={pool.locationSource}>
         <section aria-live="polite">
           <p className="font-display text-[0.65rem] tracking-[0.2em] text-faded uppercase">
             {pool.stage === 'connecting' ? 'Joining your cell' : 'Looking for a bud'}
@@ -125,6 +129,11 @@ export function App() {
             {pool.stage === 'connecting' ? 'Standing in line' : `${pool.waiting} in your cell`}
           </h2>
 
+          {/* The map needs a "you are here" at full precision, and on the
+              promptless path nobody has one: the server knows where it placed
+              this socket but `welcome` carries only the cell. So the map appears
+              once the buyer opts into exact location, rather than drawing the
+              cell centre and calling it them. */}
           {pool.stage === 'waiting' && pool.cell !== null && pool.own !== null && (
             <CellMap cell={pool.cell} you={pool.own} buddies={pool.buddies} />
           )}
@@ -147,6 +156,10 @@ export function App() {
             open.
           </p>
 
+          {placement !== null && (
+            <p className="mt-3 font-body text-xs leading-snug text-faded">{placement.detail}</p>
+          )}
+
           <button
             type="button"
             onClick={pool.leave}
@@ -160,7 +173,7 @@ export function App() {
   }
 
   return (
-    <Shell cell={pool.cell}>
+    <Shell cell={pool.cell} source={pool.locationSource}>
       <p className="font-body text-base leading-snug">
         Twenty nuggets cost less than ten. Split the box with someone nearby and you both stop
         paying the single-person tax.
@@ -274,17 +287,45 @@ export function App() {
         onClick={start}
         className="mt-6 w-full bg-ink px-4 py-4 font-display text-sm font-bold tracking-[0.15em] text-paper uppercase transition-transform active:translate-y-px disabled:opacity-35"
       >
-        {coords.pending ? 'Finding your cell…' : 'Find a bud'}
+        Find a bud
       </button>
+
+      {/* The only control that may prompt for location, and nothing calls it for
+          you. Pairing works whether or not it is ever tapped. */}
+      {coords.fix === null ? (
+        <button
+          type="button"
+          disabled={coords.pending}
+          onClick={() => void coords.requestPrecise()}
+          className="mt-3 w-full border-2 border-hairline px-4 py-3 font-display text-[0.7rem] font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px disabled:opacity-35"
+        >
+          {coords.pending ? 'Asking your device…' : 'Use my exact location'}
+        </button>
+      ) : (
+        <p className="mt-3 font-body text-sm text-faded">
+          Exact location on, so the walk to your bud is measured properly.
+        </p>
+      )}
+
       <p className="mt-3 font-body text-xs leading-snug text-faded">
-        We use your location once, to find the pool for your block. Pairing fee is{' '}
-        {formatCents(selected?.platformFeeCents ?? 99)} per split.
+        No permission prompt needed: we place you in a cell from your connection, which is accurate
+        to about a neighbourhood. Pairing fee is {formatCents(selected?.platformFeeCents ?? 99)} per
+        split.
       </p>
     </Shell>
   )
 }
 
-function Shell({ cell, children }: { cell: string | null; children: React.ReactNode }) {
+function Shell({
+  cell,
+  source,
+  children,
+}: {
+  cell: string | null
+  /** Which rung placed this socket, once the server has said. */
+  source: LocationSource | null
+  children: React.ReactNode
+}) {
   return (
     <Roll>
       <header>
@@ -294,9 +335,16 @@ function Shell({ cell, children }: { cell: string | null; children: React.ReactN
             {cell === null ? 'no cell' : `cell ${cell}`}
           </span>
         </div>
-        <p className="font-display text-[0.6rem] tracking-[0.22em] text-faded uppercase">
-          Protein settlement layer
-        </p>
+        <div className="flex items-baseline justify-between gap-2">
+          <p className="font-display text-[0.6rem] tracking-[0.22em] text-faded uppercase">
+            Protein settlement layer
+          </p>
+          {source !== null && (
+            <span className="font-display text-[0.6rem] tracking-[0.15em] text-faded uppercase">
+              {describeLocationSource(source).label}
+            </span>
+          )}
+        </div>
       </header>
       <Perf />
       {children}

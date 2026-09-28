@@ -59,8 +59,16 @@ const health = await fetch(`${BASE}/api/health`).then((r) => r.json())
 const demo = health.demoPairing === true
 console.log(`server reports demoPairing=${health.demoPairing} (protocol ${health.protocol})\n`)
 
-function open(name, lat, lng) {
-  const params = new URLSearchParams({ lat: String(lat), lng: String(lng), name })
+/**
+ * Open a demo socket the way a phone now does: a name, and no coordinates.
+ *
+ * Nothing is sent about where the caller is, so the Worker resolves the cell
+ * itself — from `request.cf` on a deployed server, from the demo origin locally.
+ * Two clients behind the same connection therefore land in the same market,
+ * which is the whole point on a stage where nobody should see a location prompt.
+ */
+function open(name) {
+  const params = new URLSearchParams({ name })
   const ws = new WebSocket(`${WS}/api/pool/ws?${params}`)
   const inbox = []
   const waiters = []
@@ -89,7 +97,7 @@ function open(name, lat, lng) {
       })
     },
     join(dealId = 'mcd-nuggets-20') {
-      ws.send(JSON.stringify({ type: 'join', dealId, lat, lng }))
+      ws.send(JSON.stringify({ type: 'join', dealId }))
     },
     /** A receiver sends the code off their bud's receipt; an orderer just taps. */
     confirm(code) {
@@ -104,13 +112,13 @@ if (!demo) {
   // Strict mode: the identity gate runs before the upgrade check, so a plain GET
   // exercises it. (undici forbids setting Upgrade/Connection on a fetch, and a
   // real socket would only surface the refusal as an opaque connection error.)
-  const res = await fetch(`${BASE}/api/pool/ws?lat=37.7955&lng=-122.3937`)
+  const res = await fetch(`${BASE}/api/pool/ws`)
   check('unauthenticated upgrade refused', res.status === 401, `status ${res.status}`)
   const body = await res.json().catch(() => ({}))
   check('refusal says why', body.error === 'sign in required', JSON.stringify(body))
 } else {
-  const a = open('Robb', 37.7955, -122.3937)
-  const b = open('Dana', 37.7958, -122.394)
+  const a = open('Robb')
+  const b = open('Dana')
   await Promise.all([a.opened, b.opened])
 
   const welcome = await a.expect('welcome')
@@ -123,6 +131,11 @@ if (!demo) {
     'welcome carries a demo identity',
     typeof welcome.user?.id === 'string' && welcome.user.id.startsWith('demo:'),
     JSON.stringify(welcome.user),
+  )
+  check(
+    'the cell came from the server, with no coordinates and no prompt',
+    welcome.locationSource === 'edge' || welcome.locationSource === 'demo',
+    `${welcome.locationSource} — 'edge' from request.cf, 'demo' when there is none to read`,
   )
 
   a.join()

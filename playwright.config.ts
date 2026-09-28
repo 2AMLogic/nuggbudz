@@ -2,7 +2,12 @@ import { defineConfig, devices } from '@playwright/test'
 
 // Same port `scripts/smoke.mjs` and the `smoke` CI job already use for a live
 // `pnpm dev` -- one convention across both live-server test lanes.
-const PORT = 5199
+//
+// Overridable because `reuseExistingServer` below will happily adopt a stranger:
+// with several worktrees of this repo checked out, whoever holds 5199 gets the
+// run, and the failures it produces are attributed to the wrong tree. `E2E_PORT`
+// is the same escape hatch `BASE` is for `scripts/smoke.mjs`.
+const PORT = Number(process.env.E2E_PORT ?? 5199)
 const BASE_URL = `http://localhost:${PORT}`
 
 export default defineConfig({

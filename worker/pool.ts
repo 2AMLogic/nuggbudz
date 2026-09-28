@@ -12,7 +12,8 @@ import {
   queueDeadline,
   resolveWindows,
 } from '../shared/expiry'
-import { snapToGrid } from '../shared/geo'
+import { type LatLng, snapToGrid } from '../shared/geo'
+import { type LocationSource, parseCoords, parseLocationSource } from '../shared/location'
 import { type Candidate, findMatch } from '../shared/matchmaker'
 import {
   bothConfirmed,
@@ -26,6 +27,7 @@ import {
   pendingRole,
 } from '../shared/pickup'
 import {
+  type JoinMessage,
   PROTOCOL_VERSION,
   type ProtocolErrorCode,
   parseClientMessage,
@@ -45,6 +47,13 @@ interface Principal {
   userId: string
   name: string
   cell: string
+  /**
+   * The location the Worker resolved for this socket, and the rung it came from.
+   * A join with no coordinates of its own — the promptless default — is placed
+   * here, which is also the coordinate the cell was derived from.
+   */
+  origin: LatLng
+  locationSource: LocationSource
 }
 
 interface BuyerIdentity extends Principal {
@@ -145,17 +154,35 @@ export class NuggPool extends DurableObject<Env> {
       return new Response('unauthenticated', { status: 401 })
     }
 
+    // Same reasoning for the location: the Worker resolves it and passes it down,
+    // so its absence means this request did not come through that path. Refusing
+    // is better than seating a buyer at a coordinate nobody chose.
+    const origin = parseCoords({ lat: params.get('lat'), lng: params.get('lng') })
+    const locationSource = parseLocationSource(params.get('locationSource'))
+    if (origin === null || locationSource === null) {
+      return new Response('missing server-derived location', { status: 400 })
+    }
+
     const { 0: client, 1: server } = new WebSocketPair()
     this.ctx.acceptWebSocket(server)
 
     const connId = crypto.randomUUID()
     const cell = params.get('cell') ?? ''
-    this.setState(server, { status: 'idle', connId, userId, name, cell })
+    this.setState(server, {
+      status: 'idle',
+      connId,
+      userId,
+      name,
+      cell,
+      origin,
+      locationSource,
+    })
 
     this.send(server, {
       type: 'welcome',
       protocol: PROTOCOL_VERSION,
       cell,
+      locationSource,
       waiting: this.waitingStates().length,
       user: { id: userId, name },
       expiry: this.windows,
@@ -188,7 +215,7 @@ export class NuggPool extends DurableObject<Env> {
         await this.handleConfirmPickup(ws, msg.code)
         return
       case 'join':
-        await this.handleJoin(ws, msg.dealId, msg.lat, msg.lng)
+        await this.handleJoin(ws, msg)
         return
     }
   }
@@ -286,7 +313,8 @@ export class NuggPool extends DurableObject<Env> {
     await this.handleDisconnect(ws)
   }
 
-  private async handleJoin(ws: WebSocket, dealId: string, lat: number, lng: number): Promise<void> {
+  private async handleJoin(ws: WebSocket, msg: JoinMessage): Promise<void> {
+    const dealId = msg.dealId
     const state = this.getState(ws)
     if (state === null) return
     if (state.status === 'waiting') {
@@ -309,15 +337,28 @@ export class NuggPool extends DurableObject<Env> {
       return
     }
 
+    // Coordinates in the join message are the opt-in precise path; without them
+    // the socket's server-resolved origin stands. Either only ever moves a buyer
+    // within the market they were already routed to — the cell was decided at
+    // upgrade time and is not re-derived here. `parseCoords` re-validates both,
+    // and covers a socket whose attachment predates this field.
+    const fix = parseCoords(msg) ?? parseCoords(state.origin)
+    if (fix === null) {
+      this.fail(ws, 'bad_message', 'this connection has no location; reconnect')
+      return
+    }
+
     const identity: BuyerIdentity = {
       connId: state.connId,
       // The authenticated name, not anything the client sent.
       userId: state.userId,
       name: state.name,
       cell: state.cell,
+      origin: state.origin,
+      locationSource: state.locationSource,
       dealId,
-      lat,
-      lng,
+      lat: fix.lat,
+      lng: fix.lng,
       joinedAt: Date.now(),
     }
     // A second tab is not a second buyer: never pair an account with itself.
@@ -796,14 +837,14 @@ function expirableMatches(records: Iterable<MatchRecord>): OpenMatch[] {
 
 /** Strip connection status off a state, leaving just who and where the buyer is. */
 function identityOf(state: BuyerIdentity): BuyerIdentity {
-  const { connId, userId, name, cell, dealId, lat, lng, joinedAt } = state
-  return { connId, userId, name, cell, dealId, lat, lng, joinedAt }
+  const { connId, userId, name, cell, origin, locationSource, dealId, lat, lng, joinedAt } = state
+  return { connId, userId, name, cell, origin, locationSource, dealId, lat, lng, joinedAt }
 }
 
 /** Drop back to an idle connection, keeping only the session-derived identity. */
 function principalOf(state: Principal): ConnState {
-  const { connId, userId, name, cell } = state
-  return { status: 'idle', connId, userId, name, cell }
+  const { connId, userId, name, cell, origin, locationSource } = state
+  return { status: 'idle', connId, userId, name, cell, origin, locationSource }
 }
 
 /** What the match record remembers about a buyer once their socket is gone. */

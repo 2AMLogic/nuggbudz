@@ -1,59 +1,55 @@
 import { useCallback, useState } from 'react'
 
-/**
- * A demo location, used when the browser will not give up the real one.
- *
- * A hackathon venue is exactly where geolocation fails: denied permissions, no
- * GPS indoors, a laptop on conference wifi. Falling back to a fixed coordinate
- * keeps the pairing demo alive, and the UI says plainly that it is doing so
- * rather than pretending the fix is real.
- */
-const DEMO_ORIGIN = { lat: 37.7955, lng: -122.3937 }
-
 export interface Fix {
   lat: number
   lng: number
-  /** True when this came from the device, false when it is the demo origin. */
-  real: boolean
 }
 
+/**
+ * Precise location, and only when the buyer asks for it.
+ *
+ * Nothing here runs on its own. Pairing does not need it: the Worker resolves a
+ * location for the socket from the edge, so tapping "Find a bud" never produces
+ * a permission prompt. This hook exists for the one case that is worth a prompt
+ * — two buyers in the same cell who want the walking distance between them to be
+ * right — and it is wired to an explicit control, the way once-around keeps
+ * `requestGeolocation()` behind a button rather than on load.
+ *
+ * A refusal is not an error state. It leaves the fix unset, which is the same
+ * situation as never having asked, and pairing carries on from the edge.
+ */
 export function useCoords() {
   const [pending, setPending] = useState(false)
-  /** Set when the device refused; the demo origin is used anyway. */
+  const [fix, setFix] = useState<Fix | null>(null)
+  /** Set when the device was asked and refused; pairing still works without it. */
   const [notice, setNotice] = useState<string | null>(null)
 
-  /**
-   * Resolve a coordinate, always. Location failure downgrades to the demo
-   * origin rather than rejecting, so a denied prompt cannot dead-end the flow.
-   */
-  const locate = useCallback((): Promise<Fix> => {
+  const requestPrecise = useCallback((): Promise<Fix | null> => {
     if (!('geolocation' in navigator)) {
-      setNotice('This browser has no location. Using the demo cell.')
-      return Promise.resolve({ ...DEMO_ORIGIN, real: false })
+      setNotice('This browser has no location. Pairing still works without it.')
+      return Promise.resolve(null)
     }
 
     setPending(true)
     setNotice(null)
 
-    return new Promise<Fix>((resolve) => {
+    return new Promise<Fix | null>((resolve) => {
       navigator.geolocation.getCurrentPosition(
         (position) => {
+          const precise = { lat: position.coords.latitude, lng: position.coords.longitude }
           setPending(false)
-          resolve({
-            lat: position.coords.latitude,
-            lng: position.coords.longitude,
-            real: true,
-          })
+          setFix(precise)
+          resolve(precise)
         },
         () => {
           setPending(false)
-          setNotice('Location is off. Using the demo cell so you can still pair.')
-          resolve({ ...DEMO_ORIGIN, real: false })
+          setNotice('Location is off. Pairing still works — you are placed by your connection.')
+          resolve(null)
         },
         { enableHighAccuracy: true, timeout: 8_000, maximumAge: 30_000 },
       )
     })
   }, [])
 
-  return { pending, notice, locate }
+  return { pending, notice, fix, requestPrecise }
 }

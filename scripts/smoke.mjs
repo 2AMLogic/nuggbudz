@@ -15,6 +15,8 @@
  * Usage:  pnpm dev --port 5199     (in one shell)
  *         pnpm smoke               (in another)
  *
+ * `BASE` overrides the target, e.g. BASE=http://localhost:5211 pnpm smoke.
+ *
  * The expiry checks only run when the dev server is configured with short
  * liveness windows — nobody waits 15 real minutes for a smoke test. To include
  * them, put this in `.dev.vars` before starting the dev server:
@@ -49,8 +51,8 @@ const BUYERS = {
   dana: { sid: sessionId('smoke-dana'), userId: 'smoke-user-dana', name: 'Dana' },
   far: { sid: sessionId('smoke-faraway'), userId: 'smoke-user-faraway', name: 'Faraway' },
   bad: { sid: sessionId('smoke-bad'), userId: 'smoke-user-bad', name: 'Bad' },
-  // Different deals, same block, purely to prove the cell-wide roster
-  // broadcast without any of these three ever actually pairing up.
+  // Same cell, too far apart to pair, purely to prove the cell-wide roster
+  // broadcast without either of them ever actually pairing up.
   kim: { sid: sessionId('smoke-kim'), userId: 'smoke-user-kim', name: 'Kim' },
   lee: { sid: sessionId('smoke-lee'), userId: 'smoke-user-lee', name: 'Lee' },
   // Signed in only to be signed out again.
@@ -60,6 +62,9 @@ const BUYERS = {
   hana: { sid: sessionId('smoke-hana'), userId: 'smoke-user-hana', name: 'Hana' },
   ivy: { sid: sessionId('smoke-ivy'), userId: 'smoke-user-ivy', name: 'Ivy' },
   jed: { sid: sessionId('smoke-jed'), userId: 'smoke-user-jed', name: 'Jed' },
+  // The pair that never sends a coordinate: the promptless path.
+  kai: { sid: sessionId('smoke-kai'), userId: 'smoke-user-kai', name: 'Kai' },
+  lex: { sid: sessionId('smoke-lex'), userId: 'smoke-user-lex', name: 'Lex' },
   // Liveness: one buyer who keeps pinging, one who goes quiet, and a pair who
   // match and then never confirm.
   pinger: { sid: sessionId('smoke-pinger'), userId: 'smoke-user-pinger', name: 'Pinger' },
@@ -232,10 +237,37 @@ check(
 const afterLogout = await fetch(`${BASE}/api/auth/me`, { headers: cookie(BUYERS.doomed) })
 check('logout revokes the session', afterLogout.status === 401, `status ${afterLogout.status}`)
 
+// A coordinate that is present but unusable is a client bug, not a reason to
+// quietly file the buyer under some other cell.
+const badCoordsOpened = await new Promise((resolve) => {
+  const ws = new WebSocket(`${WS}/api/pool/ws?lat=north&lng=west`, { headers: cookie(BUYERS.bad) })
+  ws.addEventListener('open', () => {
+    ws.close()
+    resolve(true)
+  })
+  ws.addEventListener('error', () => resolve(false))
+  setTimeout(() => resolve(false), 4000)
+})
+check('an unusable coordinate is refused rather than relocated', badCoordsOpened === false)
+
 // --- live pairing ---
+/**
+ * Open a pool socket. Pass `null, null` for coordinates to exercise the path a
+ * phone with location denied takes: nothing is sent, and the server resolves the
+ * cell itself (from `request.cf` when deployed, from the demo origin locally).
+ */
 function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
   const name = buyer.name
-  const ws = new WebSocket(`${WS}/api/pool/ws?lat=${lat}&lng=${lng}`, { headers: cookie(buyer) })
+  const placed = lat !== null && lat !== undefined && lng !== null && lng !== undefined
+  const params = new URLSearchParams()
+  if (placed) {
+    params.set('lat', String(lat))
+    params.set('lng', String(lng))
+  }
+  const query = params.toString()
+  const ws = new WebSocket(`${WS}/api/pool/ws${query === '' ? '' : `?${query}`}`, {
+    headers: cookie(buyer),
+  })
   const inbox = []
   const waiters = []
   // Errors are asserted on in sequence, so each one is consumed rather than
@@ -312,7 +344,11 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
     join() {
       // `forgedName` proves the server ignores a client-supplied name: the buddy
       // is shown the name on the session, never this one.
-      const payload = { type: 'join', dealId, lat, lng }
+      const payload = { type: 'join', dealId }
+      if (placed) {
+        payload.lat = lat
+        payload.lng = lng
+      }
       if (forgedName !== null) payload.name = forgedName
       ws.send(JSON.stringify(payload))
     },
@@ -340,6 +376,11 @@ check(
   'welcome carries the authenticated identity',
   welcomeA.user?.id === BUYERS.robb.userId && welcomeA.user?.name === 'Robb',
   JSON.stringify(welcomeA.user),
+)
+check(
+  'welcome names the rung that placed the socket',
+  welcomeA.locationSource === 'client',
+  `${welcomeA.locationSource}`,
 )
 
 a.join()
@@ -405,6 +446,14 @@ const left = await b.expect('buddy_left')
 check('survivor told their bud left', left.matchId === matchA.matchId)
 const requeued = await b.expect('waiting')
 check('survivor requeued', requeued.waiting >= 1, JSON.stringify(requeued))
+// Then leave this cell empty. Robb and Dana sit in `9q8znb`, which is the cell
+// `DEMO_ORIGIN` (37.7955, -122.3937) encodes to — and that is where the server
+// puts a socket that sent no coordinates. The promptless pair far below cannot
+// pick a cell of its own, so its isolation has to come from this side: a
+// survivor left queued here is 43m from where an unplaced buyer lands, well
+// inside MATCH_RADIUS_METERS, and would be matched with them instead of with
+// their own bud. Closing the socket dequeues them.
+b.ws.close()
 
 // --- the pickup handshake ---
 // A different neighbourhood (geohash `9q9p3w`, ~14m apart), so this pair cannot
@@ -558,6 +607,73 @@ check(
   afterDispute.code,
 )
 
+// --- pairing with no location permission at all ---
+// Neither of these sends a coordinate, in the upgrade or in the join, which is
+// what a phone with location denied does. The server places both from
+// `request.cf`, and from the fixed demo origin when there is no `cf` to read —
+// miniflare usually supplies one locally, but an offline or trimmed one has no
+// coordinates, so both answers are acceptable here as long as a cell comes out.
+//
+// Every other scenario isolates itself by choosing a cell. This one cannot:
+// choosing nothing is the point. There are exactly two cells it can land in, and
+// the suite keeps both clear instead —
+//   * `9q8yyk`, from miniflare's cached `cf` (37.77493, -122.41942), which sits
+//     108m inside the nearest edge of that cell. No scenario here is placed in
+//     it at all.
+//   * `9q8znb`, the demo origin's cell, with the origin 281m inside its nearest
+//     edge. The opening pair is the only one placed there, and both of its
+//     sockets are closed before this point.
+// The `waiting === 1` check below is what keeps that argument honest rather than
+// merely written down: a buyer left queued in whichever cell the server picks
+// would show up as a second waiter, or would be matched with one of these two
+// before the other ever joined.
+//
+// Isolating by a second deal id — which is what this scenario used to do — is no
+// longer available: only McDonald's is offered, and a join naming any other
+// chain is refused (the gate checks are a few dozen lines below).
+const k = open(BUYERS.kai, null, null)
+const l = open(BUYERS.lex, null, null)
+await Promise.all([k.opened, l.opened])
+const welcomeK = await k.expect('welcome')
+check(
+  'a socket with no coordinates still resolves a cell',
+  typeof welcomeK.cell === 'string' && welcomeK.cell.length === 6,
+  `${welcomeK.cell}`,
+)
+check(
+  'and says which rung placed it, never claiming an exact fix',
+  welcomeK.locationSource === 'edge' || welcomeK.locationSource === 'demo',
+  `${welcomeK.locationSource} — 'edge' when request.cf carries coordinates, 'demo' when it does not`,
+)
+await l.expect('welcome')
+k.join()
+const waitingK = await k.expect('waiting')
+check(
+  'a buyer the server placed has the cell it placed them in to themselves',
+  waitingK.waiting === 1 && waitingK.buddies.length === 0,
+  `${welcomeK.cell} ${JSON.stringify(waitingK)}`,
+)
+l.join()
+const [matchK, matchL] = await Promise.all([k.expect('matched'), l.expect('matched')])
+check(
+  'two buyers who never shared their location pair anyway',
+  matchK.matchId === matchL.matchId,
+  `${matchK.matchId} / ${matchL.matchId}`,
+)
+// The catalogue is the source of truth for prices, so this reads the half off
+// the deal rather than restating a number.
+const promptlessHalf = mcd.settlement.shares[1].payCents
+check(
+  'the split is the same as any other pairing on this deal',
+  matchK.share.payCents === promptlessHalf && matchL.share.payCents === promptlessHalf,
+  `${matchK.share.payCents}/${matchL.share.payCents} vs ${promptlessHalf}`,
+)
+check(
+  'distance is measured from the server-resolved origin',
+  matchK.buddy.distanceMeters < 1,
+  `${matchK.buddy.distanceMeters}m`,
+)
+
 // Protocol hygiene.
 const c = open(BUYERS.bad, 37.7955, -122.3937)
 await c.opened
@@ -672,7 +788,7 @@ check(
   JSON.stringify(latestForKim.buddies),
 )
 
-for (const s of [b, far, c, g, h, j, kim, lee]) s.ws.close()
+for (const s of [b, far, c, g, h, j, k, l, kim, lee]) s.ws.close()
 
 // --- liveness: stale queue entries and unconfirmed matches ---
 const windows = welcomeA.expiry ?? {}

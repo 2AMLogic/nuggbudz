@@ -1,4 +1,5 @@
 import type { BuyerRole } from '@shared/economics'
+import type { LocationSource } from '@shared/location'
 import type { CellBuddy, MatchedMessage, ServerMessage } from '@shared/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -9,8 +10,13 @@ const TERMINAL: readonly PoolStage[] = ['matched', 'settled', 'disputed']
 
 export interface JoinRequest {
   dealId: string
-  lat: number
-  lng: number
+  /**
+   * Precise coordinates, sent only when the buyer turned on exact location.
+   * Leaving them out is the normal case and never prompts: the server places the
+   * socket from the edge instead, and reports which rung it used.
+   */
+  lat?: number
+  lng?: number
   /**
    * A name to pair under when the server is in demo mode and nobody is signed
    * in. Ignored whenever a session exists — the server takes the display name
@@ -25,11 +31,14 @@ export interface PoolState {
   waiting: number
   queuedAhead: number
   cell: string | null
+  /** Which rung of the location fallback placed this socket; null until welcomed. */
+  locationSource: LocationSource | null
   /**
-   * Where you told the server you are standing. Kept around (not just handed
-   * off to `join` and discarded) so the cell map has a "you are here" marker
-   * to draw at full precision — the server only ever coarsens *other*
-   * buyers' positions, since this one is already yours.
+   * Where you told the server you are standing, when you told it at all. Kept
+   * around (not just handed off to `join` and discarded) so the cell map has a
+   * "you are here" marker to draw at full precision — the server only ever
+   * coarsens *other* buyers' positions, since this one is already yours. Null on
+   * the no-prompt path, where only the server knows where you are.
    */
   own: { lat: number; lng: number } | null
   /** Everyone else waiting in your cell, snapped to a coarse grid server-side. */
@@ -52,6 +61,7 @@ const INITIAL: PoolState = {
   waiting: 0,
   queuedAhead: 0,
   cell: null,
+  locationSource: null,
   own: null,
   buddies: [],
   match: null,
@@ -76,7 +86,14 @@ function humanWindow(ms: number): string {
 
 function socketUrl({ lat, lng, demoName }: JoinRequest): string {
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
-  const params = new URLSearchParams({ lat: String(lat), lng: String(lng) })
+  const params = new URLSearchParams()
+  // Sent only on the opt-in precise path. With no coordinates the server falls
+  // back to the edge's approximate location, which is why pairing needs no
+  // permission prompt at all.
+  if (lat !== undefined && lng !== undefined) {
+    params.set('lat', String(lat))
+    params.set('lng', String(lng))
+  }
   // Only meaningful in demo mode; the server ignores it whenever a session
   // exists, and sanitizes it when one does not.
   if (demoName !== undefined && demoName.trim().length > 0) {
@@ -88,9 +105,9 @@ function socketUrl({ lat, lng, demoName }: JoinRequest): string {
 /**
  * Hold a live seat in a neighbourhood's matching pool.
  *
- * One socket per session. The server decides which cell you belong to and, from
- * your session cookie, who you are — so the only thing this hook sends up is
- * what you want and where you are standing.
+ * One socket per session. The server decides which cell you belong to, where it
+ * thinks you are standing, and — from your session cookie — who you are. So the
+ * only thing this hook has to send up is which box it wants.
  */
 export function usePool() {
   const [state, setState] = useState<PoolState>(INITIAL)
@@ -142,19 +159,24 @@ export function usePool() {
   const join = useCallback(
     (request: JoinRequest) => {
       close()
-      setState({ ...INITIAL, stage: 'connecting', own: { lat: request.lat, lng: request.lng } })
+      const own =
+        request.lat !== undefined && request.lng !== undefined
+          ? { lat: request.lat, lng: request.lng }
+          : null
+      setState({ ...INITIAL, stage: 'connecting', own })
 
       const socket = new WebSocket(socketUrl(request))
       socketRef.current = socket
 
       socket.onopen = () => {
+        // Coordinates are omitted unless the buyer opted into precise location:
+        // the socket already carries a server-resolved one.
         socket.send(
-          JSON.stringify({
-            type: 'join',
-            dealId: request.dealId,
-            lat: request.lat,
-            lng: request.lng,
-          }),
+          JSON.stringify(
+            request.lat !== undefined && request.lng !== undefined
+              ? { type: 'join', dealId: request.dealId, lat: request.lat, lng: request.lng }
+              : { type: 'join', dealId: request.dealId },
+          ),
         )
       }
 
@@ -171,7 +193,12 @@ export function usePool() {
         setState((prev) => {
           switch (message.type) {
             case 'welcome':
-              return { ...prev, cell: message.cell, waiting: message.waiting }
+              return {
+                ...prev,
+                cell: message.cell,
+                locationSource: message.locationSource,
+                waiting: message.waiting,
+              }
             case 'waiting':
               return {
                 ...prev,

@@ -29,6 +29,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { FIXTURE_COORDS } from './smoke-fixtures.mjs'
 
 const BASE = process.env.BASE ?? 'http://localhost:5199'
 const WS = BASE.replace('http', 'ws')
@@ -491,9 +492,17 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
   }
 }
 
-// Two buyers, same block.
-const a = open(BUYERS.robb, 37.7955, -122.3937)
-const b = open(BUYERS.dana, 37.7958, -122.394, 'mcd-nuggets-20', 'Definitely Not Dana')
+// Two buyers, same block. Coordinates come from FIXTURE_COORDS — see that
+// file for why (test/smoke-fixture-cells.test.ts checks every scenario's
+// coordinates land in a cell of its own).
+const a = open(BUYERS.robb, FIXTURE_COORDS.robb.lat, FIXTURE_COORDS.robb.lng)
+const b = open(
+  BUYERS.dana,
+  FIXTURE_COORDS.dana.lat,
+  FIXTURE_COORDS.dana.lng,
+  'mcd-nuggets-20',
+  'Definitely Not Dana',
+)
 await Promise.all([a.opened, b.opened])
 
 const welcomeA = await a.expect('welcome')
@@ -569,7 +578,7 @@ check(
 )
 
 // A buyer too far away must not pair, even in the same cell region.
-const far = open(BUYERS.far, 37.84, -122.3937)
+const far = open(BUYERS.far, FIXTURE_COORDS.far.lat, FIXTURE_COORDS.far.lng)
 await far.opened
 far.join()
 const farWaiting = await far.expect('waiting')
@@ -594,8 +603,8 @@ b.ws.close()
 // A different neighbourhood (geohash `9q9p3w`, ~14m apart), so this pair cannot
 // be matched with anyone still queued above: only one deal is offered now, so
 // the cell is the axis that isolates a market, not the deal.
-const g = open(BUYERS.gus, 37.8715, -122.273)
-const h = open(BUYERS.hana, 37.8716, -122.2731)
+const g = open(BUYERS.gus, FIXTURE_COORDS.gus.lat, FIXTURE_COORDS.gus.lng)
+const h = open(BUYERS.hana, FIXTURE_COORDS.hana.lat, FIXTURE_COORDS.hana.lng)
 await Promise.all([g.opened, h.opened])
 await Promise.all([g.expect('welcome'), h.expect('welcome')])
 g.join()
@@ -708,8 +717,8 @@ check(
 // restart the dev server, and half-confirm a match: the alarm disputes it.
 // Again a cell of their own (`9q9k6m`), so the dispute below is unambiguously
 // this pair's and cannot draw in a buyer left queued by an earlier scenario.
-const i = open(BUYERS.ivy, 37.3382, -121.8863)
-const j = open(BUYERS.jed, 37.3383, -121.8864)
+const i = open(BUYERS.ivy, FIXTURE_COORDS.ivy.lat, FIXTURE_COORDS.ivy.lng)
+const j = open(BUYERS.jed, FIXTURE_COORDS.jed.lat, FIXTURE_COORDS.jed.lng)
 await Promise.all([i.opened, j.opened])
 await Promise.all([i.expect('welcome'), j.expect('welcome')])
 i.join()
@@ -809,8 +818,13 @@ check(
   `${matchK.buddy.distanceMeters}m`,
 )
 
-// Protocol hygiene.
-const c = open(BUYERS.bad, 37.7955, -122.3937)
+// Protocol hygiene. This deliberately reopens a socket in the opening pair's
+// cell (FIXTURE_COORDS.badRejoin *is* FIXTURE_COORDS.robb — see
+// scripts/smoke-fixtures.mjs) now that both `a` and `b` have closed theirs, a
+// couple dozen lines up. It is the one declared exception in
+// test/smoke-fixture-cells.test.ts ('forged-rejoin'): do not give this socket
+// a coordinate of its own without also removing that exception.
+const c = open(BUYERS.bad, FIXTURE_COORDS.badRejoin.lat, FIXTURE_COORDS.badRejoin.lng)
 await c.opened
 await c.expect('welcome')
 c.ws.send('this is not json')
@@ -821,7 +835,14 @@ const unmatched = await c.expectError()
 check('confirming without a match is refused', unmatched.code === 'not_matched', unmatched.code)
 /** Send a hand-rolled `join` frame, bypassing whatever the UI would offer. */
 const rawJoin = (socket, dealId) =>
-  socket.ws.send(JSON.stringify({ type: 'join', dealId, lat: 37.7955, lng: -122.3937 }))
+  socket.ws.send(
+    JSON.stringify({
+      type: 'join',
+      dealId,
+      lat: FIXTURE_COORDS.badRejoin.lat,
+      lng: FIXTURE_COORDS.badRejoin.lng,
+    }),
+  )
 
 rawJoin(c, 'no-such-deal')
 const unknownDeal = await c.expectError()
@@ -866,8 +887,8 @@ check('a refused gated join never queues the buyer', (await c.settles('waiting')
 // documents — same market, too far to walk — and it is what makes the roster
 // assertion below discriminating: a buddy appears on the map who this buyer
 // could not be matched with.
-const KIM_AT = { lat: 37.7108, lng: -122.3873 }
-const LEE_AT = { lat: 37.7158, lng: -122.3771 }
+const KIM_AT = FIXTURE_COORDS.kim
+const LEE_AT = FIXTURE_COORDS.lee
 
 const kim = open(BUYERS.kim, KIM_AT.lat, KIM_AT.lng)
 await kim.opened
@@ -930,8 +951,8 @@ for (const s of [b, far, c, g, h, j, k, l, kim, lee]) s.ws.close()
 // with each other. The point of these checks is that the sauce ids are validated
 // on the *request path* rather than by a unit test calling the validator: this
 // repo has shipped three predicates that existed and enforced nothing.
-const sal = open(BUYERS.sal, 47.6062, -122.3321)
-const nia = open(BUYERS.nia, 47.6063, -122.3322)
+const sal = open(BUYERS.sal, FIXTURE_COORDS.sal.lat, FIXTURE_COORDS.sal.lng)
+const nia = open(BUYERS.nia, FIXTURE_COORDS.nia.lat, FIXTURE_COORDS.nia.lng)
 await Promise.all([sal.opened, nia.opened])
 await Promise.all([sal.expect('welcome'), nia.expect('welcome')])
 
@@ -997,7 +1018,7 @@ check(
 
 // Far from the pairing checks above, so these buyers neither disturb them nor
 // get pulled into a match by them.
-const pinger = open(BUYERS.pinger, 40.6782, -73.9442)
+const pinger = open(BUYERS.pinger, FIXTURE_COORDS.pinger.lat, FIXTURE_COORDS.pinger.lng)
 await pinger.opened
 await pinger.expect('welcome')
 pinger.join()
@@ -1024,7 +1045,7 @@ if (!shortWindows) {
   const patience = (ms) => ms + 6_000
 
   // A buyer who joins and walks away must be warned, then dropped.
-  const stale = open(BUYERS.stale, 41.8781, -87.6298)
+  const stale = open(BUYERS.stale, FIXTURE_COORDS.stale.lat, FIXTURE_COORDS.stale.lng)
   await stale.opened
   await stale.expect('welcome')
   // The one socket that must not hold its own seat.
@@ -1045,8 +1066,8 @@ if (!shortWindows) {
   )
 
   // A match neither half confirms must be called off for both of them.
-  const slowOne = open(BUYERS.slowOne, 34.0522, -118.2437)
-  const slowTwo = open(BUYERS.slowTwo, 34.0523, -118.2438)
+  const slowOne = open(BUYERS.slowOne, FIXTURE_COORDS.slowOne.lat, FIXTURE_COORDS.slowOne.lng)
+  const slowTwo = open(BUYERS.slowTwo, FIXTURE_COORDS.slowTwo.lat, FIXTURE_COORDS.slowTwo.lng)
   await Promise.all([slowOne.opened, slowTwo.opened])
   await Promise.all([slowOne.expect('welcome'), slowTwo.expect('welcome')])
   slowOne.join()
@@ -1072,8 +1093,8 @@ if (!shortWindows) {
   // match belongs to the dispute path and the expiry sweep must not touch it.
   // Cancelling it here would erase a buddy's claim that the nuggets changed
   // hands — exactly what the two-sided handshake exists to prevent.
-  const halfOne = open(BUYERS.halfOne, 39.9526, -75.1652)
-  const halfTwo = open(BUYERS.halfTwo, 39.9527, -75.1653)
+  const halfOne = open(BUYERS.halfOne, FIXTURE_COORDS.halfOne.lat, FIXTURE_COORDS.halfOne.lng)
+  const halfTwo = open(BUYERS.halfTwo, FIXTURE_COORDS.halfTwo.lat, FIXTURE_COORDS.halfTwo.lng)
   await Promise.all([halfOne.opened, halfTwo.opened])
   await Promise.all([halfOne.expect('welcome'), halfTwo.expect('welcome')])
   halfOne.join()

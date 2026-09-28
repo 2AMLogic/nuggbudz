@@ -5,13 +5,35 @@ import { generatePickupCode, PICKUP_CODE_ALPHABET, PICKUP_CODE_LENGTH } from '..
 import {
   pickupQrMatrix,
   QR_ERROR_CORRECTION,
+  QR_MODULE_PIXELS_MAX,
+  QR_MODULE_PIXELS_MIN,
   QR_QUIET_ZONE_MODULES,
   QR_TYPE_AUTO,
+  qrModulePixels,
   qrSpanModules,
 } from '../shared/qr'
 
 /** The origin a receipt prints against in these tests; the live one. */
 const ORIGIN = 'https://nuggbudz.com'
+
+/**
+ * The longest origin this app is deployed under, and the one that sets the size.
+ *
+ * A `*.workers.dev` preview name is what a stage deploy prints against, and it
+ * needs a denser symbol than production's own hostname does. Every width claim
+ * below is measured against it rather than against `nuggbudz.com`, because the
+ * narrowest phone on the longest origin is the case #127 was filed for.
+ */
+const PREVIEW_ORIGIN = 'https://nuggbudz-staging.2amlogic.workers.dev'
+
+/**
+ * The receipt column on the narrowest screen anybody browses on, in CSS pixels.
+ *
+ * 320 px viewport minus what `.printout` spends on padding and sprocket strips.
+ * Measured — `e2e/qr-scale.spec.ts` is what asserts the real number against a
+ * real browser; this is the floor the arithmetic here is allowed to assume.
+ */
+const NARROW_COLUMN_PIXELS = 236
 
 /**
  * The encoder half of the scannable handoff.
@@ -190,6 +212,23 @@ describe('the pickup code as a QR symbol', () => {
     }
   })
 
+  it('reports a span that includes the quiet zone, on both deployed origins', () => {
+    // The number #127 was filed over. `matrix.length` is the data area; the span
+    // is that plus four modules of margin on each side. Asserted for both origins
+    // because the *longer* one is what decides how wide the symbol has to be, and
+    // reading the shorter one is half of how the mistake was made.
+    for (const origin of [ORIGIN, PREVIEW_ORIGIN]) {
+      const matrix = pickupQrMatrix('K7M2QX', origin)
+      expect(qrSpanModules(matrix)).toBe(matrix.length + 8)
+      expect(qrSpanModules(matrix) - matrix.length).toBe(QR_QUIET_ZONE_MODULES * 2)
+    }
+    // And the longer origin genuinely costs modules, which is why a fixed pitch
+    // cannot be sized against production's own hostname.
+    expect(qrSpanModules(pickupQrMatrix('K7M2QX', PREVIEW_ORIGIN))).toBeGreaterThan(
+      qrSpanModules(pickupQrMatrix('K7M2QX', ORIGIN)),
+    )
+  })
+
   it('refuses to encode against an origin that is not one', () => {
     // The other half of the payload rule now that there is a second argument: a
     // caller cannot reach the symbol's bytes through the origin either.
@@ -198,5 +237,77 @@ describe('the pickup code as a QR symbol', () => {
         /handoff origin/,
       )
     }
+  })
+})
+
+/**
+ * How big the symbol is drawn, which until #127 was a constant nobody measured.
+ *
+ * This is arithmetic, so it belongs here; whether the *browser* then resamples
+ * what was drawn is a question no unit test can answer, and `e2e/qr-scale.spec.ts`
+ * is what answers it — by screenshotting the composited element at a 320px
+ * viewport rather than reading the canvas's backing store.
+ */
+describe('the module pitch the symbol is drawn at', () => {
+  it('fills the space when there is room for the full pitch', () => {
+    for (const origin of [ORIGIN, PREVIEW_ORIGIN]) {
+      const span = qrSpanModules(pickupQrMatrix('K7M2QX', origin))
+      expect(qrModulePixels(span, span * QR_MODULE_PIXELS_MAX)).toBe(QR_MODULE_PIXELS_MAX)
+      expect(qrModulePixels(span, 4096)).toBe(QR_MODULE_PIXELS_MAX)
+    }
+  })
+
+  it('fits the narrowest phone on the longest origin, which the old constant did not', () => {
+    const span = qrSpanModules(pickupQrMatrix('K7M2QX', PREVIEW_ORIGIN))
+    // The regression itself: the pitch this repo used to hardcode does not fit.
+    expect(span * QR_MODULE_PIXELS_MAX).toBeGreaterThan(NARROW_COLUMN_PIXELS)
+    // And the derived one does, with whole pixels per module so the browser has
+    // nothing to resample.
+    const pitch = qrModulePixels(span, NARROW_COLUMN_PIXELS)
+    expect(pitch).toBe(Math.floor(pitch))
+    expect(span * pitch).toBeLessThanOrEqual(NARROW_COLUMN_PIXELS)
+    expect(pitch).toBeGreaterThanOrEqual(QR_MODULE_PIXELS_MIN)
+  })
+
+  it('never returns a pitch whose symbol overflows the space it was given', () => {
+    // Swept rather than spot-checked: every column width a phone or a desktop
+    // could present, against both deployed origins.
+    for (const origin of [ORIGIN, PREVIEW_ORIGIN]) {
+      const span = qrSpanModules(pickupQrMatrix('K7M2QX', origin))
+      for (let available = span * QR_MODULE_PIXELS_MIN; available <= 1200; available += 1) {
+        const pitch = qrModulePixels(span, available)
+        expect(span * pitch, `pitch ${pitch} overflows ${available}px`).toBeLessThanOrEqual(
+          available,
+        )
+      }
+    }
+  })
+
+  it('clamps rather than collapsing when the space is absurd or unmeasured', () => {
+    const span = qrSpanModules(pickupQrMatrix('K7M2QX', PREVIEW_ORIGIN))
+    // A container narrower than any real screen still gets a drawable symbol: a
+    // pitch of zero would be a blank canvas, which is a worse failure than one
+    // that overflows and is caught by the element's own `max-width`.
+    expect(qrModulePixels(span, 0)).toBe(QR_MODULE_PIXELS_MIN)
+    expect(qrModulePixels(span, -100)).toBe(QR_MODULE_PIXELS_MIN)
+    // An unmeasured column — `getBoundingClientRect` on a detached node — must not
+    // propagate `NaN` into the canvas's `width` attribute.
+    expect(qrModulePixels(span, Number.NaN)).toBe(QR_MODULE_PIXELS_MAX)
+    expect(qrModulePixels(0, 300)).toBe(QR_MODULE_PIXELS_MAX)
+  })
+
+  it('still decodes at the pitch the narrowest phone gets', () => {
+    // The point of the minimum: a symbol drawn smaller on purpose is only a better
+    // answer than a browser downscale if it still reads. Same decoder the
+    // receiver's phone runs, on the longest origin, at the narrowest column.
+    const matrix = pickupQrMatrix('K7M2QX', PREVIEW_ORIGIN)
+    const pitch = qrModulePixels(qrSpanModules(matrix), NARROW_COLUMN_PIXELS)
+    const { rgba, span } = rasterize(matrix, pitch)
+    expect(jsQR(rgba, span, span)?.data).toBe(qrPayloadFor(PREVIEW_ORIGIN, 'K7M2QX'))
+    // And at the floor, which is what a column narrower than any real phone gets.
+    const floor = rasterize(matrix, QR_MODULE_PIXELS_MIN)
+    expect(jsQR(floor.rgba, floor.span, floor.span)?.data).toBe(
+      qrPayloadFor(PREVIEW_ORIGIN, 'K7M2QX'),
+    )
   })
 })

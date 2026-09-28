@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
-import { findDeal } from '../shared/deals'
+import { findDeal, isDealOffered } from '../shared/deals'
 import type { BuyerRole, Settlement } from '../shared/economics'
 import { settle } from '../shared/economics'
 import { type LatLng, snapToGrid } from '../shared/geo'
@@ -228,8 +228,13 @@ export class NuggPool extends DurableObject<Env> {
       return
     }
 
+    // This id came off a socket, so the question is "may this be chosen", not
+    // "does this exist" — a gated deal still resolves in the catalogue, and
+    // `findDeal` alone would let a hand-rolled `join` frame pair and settle on a
+    // chain the app does not offer. `unknown_deal` rather than a distinct code
+    // on purpose: which chains are gated is not a caller's to enumerate.
     const deal = findDeal(dealId)
-    if (deal === undefined) {
+    if (deal === undefined || !isDealOffered(deal.id)) {
       this.fail(ws, 'unknown_deal', `no such deal: ${dealId}`)
       return
     }

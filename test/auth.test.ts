@@ -176,6 +176,7 @@ describe('checkAuthState', () => {
   const pending = {
     state: 'y'.repeat(43),
     codeVerifier: 'v'.repeat(43),
+    nonce: 'n'.repeat(22),
     redirectUri: 'https://nuggbudz.example/api/auth/google/callback',
     createdAt: 1,
   }
@@ -220,12 +221,17 @@ describe('parsePendingAuthRecord', () => {
   const record = {
     state: 's'.repeat(43),
     codeVerifier: 'v'.repeat(43),
+    nonce: 'n'.repeat(22),
     redirectUri: 'https://nuggbudz.example/api/auth/google/callback',
     createdAt: 5,
   }
 
   it('accepts a well-formed record', () => {
     expect(parsePendingAuthRecord(record)).toEqual(record)
+  })
+
+  it('carries the stashed nonce back out for the callback to check', () => {
+    expect(parsePendingAuthRecord(record)?.nonce).toBe('n'.repeat(22))
   })
 
   it('rejects records that could weaken PKCE or the redirect', () => {
@@ -235,6 +241,13 @@ describe('parsePendingAuthRecord', () => {
     expect(parsePendingAuthRecord({ ...record, codeVerifier: 'short' })).toBeNull()
     expect(parsePendingAuthRecord({ ...record, redirectUri: '' })).toBeNull()
     expect(parsePendingAuthRecord({ ...record, createdAt: 'now' })).toBeNull()
+  })
+
+  it('rejects a record with no usable nonce rather than skipping the check', () => {
+    const { state, codeVerifier, redirectUri, createdAt } = record
+    expect(parsePendingAuthRecord({ state, codeVerifier, redirectUri, createdAt })).toBeNull()
+    expect(parsePendingAuthRecord({ ...record, nonce: '' })).toBeNull()
+    expect(parsePendingAuthRecord({ ...record, nonce: 42 })).toBeNull()
   })
 })
 

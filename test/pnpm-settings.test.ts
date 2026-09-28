@@ -5,14 +5,15 @@ import ciSource from '../.github/workflows/ci.yml?raw'
 import workspaceSource from '../pnpm-workspace.yaml?raw'
 
 /**
- * `pnpm-workspace.yaml` has to satisfy two pnpm majors at once, and neither of
- * them says so when it does not: pnpm 11 reads `allowBuilds` and ignores an
- * unknown `onlyBuiltDependencies`, pnpm 10 does the reverse, and a key the
- * running pnpm does not know is silently dropped rather than rejected. That is
- * #61 — CI pins pnpm 10, so `allowBuilds` alone meant the esbuild and workerd
- * postinstalls were skipped on every CI job while the file's own comment said
- * they were not. Nothing failed: pnpm 10 only *warns* about ignored build
- * scripts, and both packages happened to work without their install step.
+ * `pnpm-workspace.yaml` has to satisfy whatever pnpm CI resolves, and pnpm does
+ * not say so when it cannot: a settings key the running pnpm does not know is
+ * silently dropped rather than rejected. That is #61. CI pins `version: 10`,
+ * which is a *floating* major — it resolves to the newest 10.x at job time — and
+ * `allowBuilds` only became readable in the 10 line at 10.28.0, so the build
+ * allowlist's fate depends on where that pin happens to land. Today it lands on
+ * 10.34.5, which does honour `allowBuilds`; 10.20.0 through 10.24.0 do not.
+ * `onlyBuiltDependencies` is read by every 10.x (and still by 11), so declaring
+ * it alongside `allowBuilds` is what pins the outcome down.
  *
  * So the hazard is a mismatch between a version pin in one file and a key
  * spelling in another, which no type checker, linter or install exit code sees.
@@ -41,7 +42,9 @@ describe('pnpm settings', () => {
     // would otherwise leave this check asserting nothing.
     expect(pinnedMajors.length).toBeGreaterThan(0)
     for (const major of pinnedMajors) {
-      // `onlyBuiltDependencies` is the pnpm 10 spelling, `allowBuilds` pnpm 11+.
+      // A pinned major is a floor, not a version: `version: 10` resolves to the
+      // newest 10.x at job time. So a pinned 10 demands the spelling *every*
+      // 10.x can read, not merely the one 10.34.5 happens to accept today.
       const spelling = major <= 10 ? 'onlyBuiltDependencies' : 'allowBuilds'
       expect(workspaceSource).toContain(`${spelling}:`)
     }
@@ -53,7 +56,7 @@ describe('pnpm settings', () => {
   })
 })
 
-/** The pnpm 11 spelling: a mapping of package name to a boolean. */
+/** The `allowBuilds` spelling (pnpm 10.28+ and 11): package name to a boolean. */
 function parseAllowBuilds(source: string): string[] {
   return blockLines(source, 'allowBuilds').flatMap((line) => {
     const match = /^\s+([^\s:]+):\s*true\s*$/.exec(line)
@@ -61,7 +64,7 @@ function parseAllowBuilds(source: string): string[] {
   })
 }
 
-/** The pnpm 10 spelling: a sequence of package names. */
+/** The `onlyBuiltDependencies` spelling (every 10.x, and 11): a name sequence. */
 function parseOnlyBuiltDependencies(source: string): string[] {
   return blockLines(source, 'onlyBuiltDependencies').flatMap((line) => {
     const match = /^\s+-\s*(\S+)\s*$/.exec(line)

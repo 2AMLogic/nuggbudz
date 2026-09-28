@@ -1,20 +1,29 @@
 # Repository-level pnpm settings. This project has no workspace, so this file
 # is purely pnpm's settings home (pnpm >= 10.16 reads settings from here).
 #
-# It has to answer two pnpm majors at once: CI pins pnpm 10 (`version: 10` on
-# every `pnpm/action-setup@v4` step in .github/workflows/ci.yml) while a
-# developer's own pnpm is usually 11, and the two spell these settings
-# differently. Both spellings are declared on purpose — each major reads the
-# key it knows and ignores the other (#61).
+# It has to answer whatever pnpm actually runs, and that is not a fixed
+# version: every `pnpm/action-setup@v4` step in .github/workflows/ci.yml pins
+# `version: 10`, which is a *floating* major resolved to the newest 10.x at job
+# time (10.34.5 today), while a developer's own pnpm is usually 11. Both build
+# allowlist spellings are declared on purpose (#61).
 #
 # Build scripts (#50). esbuild and workerd run postinstall builds that the
-# lockfile already pins. With neither key below, pnpm skips them: pnpm 11 exits
-# ERR_PNPM_IGNORED_BUILDS, and pnpm 10 — the one CI runs — only prints
-# "Ignored build scripts", which is the quieter, worse half. CI stayed green
-# with those builds silently skipped, so the next dependency whose postinstall
-# actually matters would break nothing until it reached a user.
-#   allowBuilds           is the pnpm 11 spelling
-#   onlyBuiltDependencies is the pnpm 10 spelling
+# lockfile already pins. With no allowlist key at all pnpm skips them: pnpm 11
+# exits ERR_PNPM_IGNORED_BUILDS, pnpm 10 only prints "Ignored build scripts",
+# which is the quieter, worse half. `allowBuilds` was backported into the pnpm
+# 10 line at 10.28.0, so the pnpm CI resolves today (10.34.5) does honour it —
+# but 10.20.0 through 10.24.0 silently ignore it, and a floating `version: 10`
+# is free to resolve elsewhere tomorrow.
+#   onlyBuiltDependencies is read by every pnpm 10.x, and still by 11
+#   allowBuilds           is read by pnpm 10.28+ and by 11
+# Declaring both is what makes the allowlist hold regardless of which 10.x the
+# pin lands on — today's, an older one a contributor has locally, or whatever a
+# future release brings. Verified on 10.34.5: both spellings, same install.
+#
+# Keep this block verifiable rather than narrative. It has now twice described
+# a CI behaviour that was not happening, and no linter or install exit code
+# checks prose; `test/pnpm-settings.test.ts` can only check the part that is
+# mechanical — that every pinned major has a spelling it can read.
 allowBuilds:
   esbuild: true
   workerd: true

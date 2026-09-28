@@ -196,8 +196,11 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: node scripts/fake-stripe.mjs --port 5312 &
-      - run: npx wait-on http://localhost:5312/__health --timeout 30000
+      # The fake Stripe is NOT started here. A backgrounded `&` step does not
+      # reliably outlive the step that started it -- this job watched it print its
+      # banner and then die before the next step ran -- so `payment-gate` hosts it
+      # in its own process via `FAKE_STRIPE_SERVE` below. Nothing calls Stripe
+      # until a match is struck, which cannot happen before that script runs.
       - run: |
           {
             echo 'STRIPE_SECRET_KEY="sk_test_fake"'
@@ -220,5 +223,6 @@ jobs:
       - run: |
           BASE=http://localhost:5249 \
           FAKE_STRIPE=http://localhost:5312 \
+          FAKE_STRIPE_SERVE=5312 \
           STRIPE_WEBHOOK_SECRET=whsec_fake_for_ci_only \
           pnpm payment-gate

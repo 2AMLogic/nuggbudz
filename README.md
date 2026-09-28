@@ -187,14 +187,16 @@ To exercise the *charged* path with no Stripe account, `scripts/fake-stripe.mjs`
 answers the three REST calls this app makes:
 
 ```bash
-pnpm fake-stripe -- --port 5312   # in one shell
 cat > .dev.vars <<'VARS'
 STRIPE_SECRET_KEY="sk_test_fake"
 STRIPE_WEBHOOK_SECRET="whsec_fake"
 STRIPE_API_BASE="http://127.0.0.1:5312/v1"
 VARS
-pnpm dev --port 5248              # in another
-BASE=http://localhost:5248 FAKE_STRIPE=http://localhost:5312 \
+pnpm dev --port 5248              # in one shell
+# FAKE_STRIPE_SERVE makes the checker host the stub itself, so there is no third
+# process to keep alive. `pnpm fake-stripe -- --port 5312` runs it standalone if
+# you want to poke at it by hand.
+BASE=http://localhost:5248 FAKE_STRIPE=http://localhost:5312 FAKE_STRIPE_SERVE=5312 \
   STRIPE_WEBHOOK_SECRET=whsec_fake pnpm payment-gate
 ```
 

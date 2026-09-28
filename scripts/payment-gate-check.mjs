@@ -25,20 +25,27 @@
  * `FAKE_STRIPE` here to the same base URL and this script will assert what was
  * actually sent to it, and sign webhooks back with `STRIPE_WEBHOOK_SECRET`.
  *
+ * `FAKE_STRIPE_SERVE=<port>` makes this script *host* that stub itself rather
+ * than expect one already running. That is how CI does it: a backgrounded `&`
+ * step does not reliably outlive the step that started it, so the stub's lifetime
+ * belongs to this process instead.
+ *
  * Usage:
  *   BASE=http://localhost:5248 node scripts/payment-gate-check.mjs
- *   BASE=... FAKE_STRIPE=http://localhost:5312 STRIPE_WEBHOOK_SECRET=whsec_x \
- *     node scripts/payment-gate-check.mjs
+ *   BASE=... FAKE_STRIPE=http://localhost:5312 FAKE_STRIPE_SERVE=5312 \
+ *     STRIPE_WEBHOOK_SECRET=whsec_x node scripts/payment-gate-check.mjs
  */
 import { execFileSync } from 'node:child_process'
 import { createHmac } from 'node:crypto'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { startFakeStripe } from './fake-stripe.mjs'
 
 const BASE = process.env.BASE ?? 'http://localhost:5248'
 const WS = BASE.replace('http', 'ws')
 const FAKE_STRIPE = process.env.FAKE_STRIPE ?? null
+const FAKE_STRIPE_SERVE = process.env.FAKE_STRIPE_SERVE ?? null
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET ?? null
 const WRANGLER_ENV = { ...process.env, CI: 'true', WRANGLER_SEND_METRICS: 'false' }
 
@@ -205,6 +212,13 @@ async function deliverWebhook(intentId, type, metadata) {
   })
   return { status: res.status, body: await res.json().catch(() => ({})) }
 }
+
+// Hosted here, before the first socket, so nothing the dev server does can find
+// the stub missing. The dev server only calls Stripe once a match is struck, which
+// cannot happen until this script joins the pool below.
+const hosted =
+  FAKE_STRIPE_SERVE === null ? null : await startFakeStripe({ port: Number(FAKE_STRIPE_SERVE) })
+if (hosted !== null) log(`hosting the fake Stripe API on port ${FAKE_STRIPE_SERVE}\n`)
 
 const health = await fetch(`${BASE}/api/health`).then((r) => r.json())
 const mode = health.payments
@@ -499,6 +513,8 @@ if (mode === 'unconfigured') {
 
   rex.ws.close()
 }
+
+hosted?.server.close()
 
 log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

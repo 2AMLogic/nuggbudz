@@ -83,7 +83,8 @@ pnpm smoke        # end-to-end pairing against a running `pnpm dev`
 pnpm test:e2e     # Playwright — two browsers driving the real UI end to end
 pnpm typecheck    # wrangler types && tsc --noEmit
 pnpm lint         # biome
-pnpm run deploy    # vite build && wrangler deploy (pnpm deploy is a pnpm builtin)
+pnpm run deploy      # strict deploy — sign-in only (`pnpm deploy` is a pnpm builtin)
+pnpm run deploy:demo # stage deploy — adds --var ALLOW_DEMO_PAIRING:1, see README "Demo pairing"
 ```
 
 `pnpm test` does not cover the Durable Object. `pnpm smoke` does, and needs a

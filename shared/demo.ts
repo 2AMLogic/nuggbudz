@@ -50,13 +50,27 @@ export function sanitizeDemoName(raw: string | null | undefined): string {
   const spaced = raw.replace(/\s/g, ' ')
   const printable = Array.from(spaced)
     .filter((ch) => {
-      const code = ch.charCodeAt(0)
-      return code >= FIRST_PRINTABLE && code !== DELETE_CHAR
+      const code = ch.codePointAt(0) ?? 0
+      if (code < FIRST_PRINTABLE || code === DELETE_CHAR) return false
+      // C1 control block (U+0080-U+009F) — not caught by \s or the C0/DEL check.
+      if (code >= 0x80 && code <= 0x9f) return false
+      // Unicode format characters (category Cf): zero-width space/joiner/
+      // non-joiner, BOM, bidi override/isolate marks. These are invisible and
+      // U+202E in particular can make a name render differently from its
+      // bytes, so they are stripped rather than displayed. No /g flag here —
+      // a stateful global regex reused across `.filter()` calls silently
+      // skips matches via `lastIndex`.
+      if (/\p{Cf}/u.test(ch)) return false
+      return true
     })
     .join('')
   const cleaned = printable.replace(/ +/g, ' ').trim()
   if (cleaned.length === 0) return 'Guest'
-  return cleaned.slice(0, MAX_NAME)
+  // Cap on code points, not UTF-16 code units — slicing by code unit can split
+  // a surrogate pair (e.g. an emoji) in two, leaving a lone surrogate that
+  // decodes to U+FFFD. Trim after capping so the cap itself can't leave a
+  // trailing space.
+  return Array.from(cleaned).slice(0, MAX_NAME).join('').trim()
 }
 
 /** The marker that makes a demo identity greppable, spelled once. */

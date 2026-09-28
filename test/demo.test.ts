@@ -53,6 +53,44 @@ describe('sanitizeDemoName', () => {
     expect(sanitizeDemoName('Даша')).toBe('Даша')
     expect(sanitizeDemoName('Robb 🍗')).toBe('Robb 🍗')
   })
+
+  it('strips C1 control characters (U+0080-U+009F), which \\s does not match', () => {
+    // U+0085 (NEL) sits in the C1 block and is neither \s nor C0/DEL.
+    expect(sanitizeDemoName(`Robb${String.fromCharCode(0x85)}W`)).toBe('RobbW')
+    expect(sanitizeDemoName(String.fromCharCode(0x9f))).toBe('Guest')
+  })
+
+  it('strips zero-width and bidi-override format characters (Unicode Cf)', () => {
+    // Zero-width space (U+200B) between two words.
+    expect(sanitizeDemoName(`Robb${String.fromCharCode(0x200b)}Walters`)).toBe('RobbWalters')
+    // RTL override (U+202E) is the display-spoofing primitive this guards against.
+    expect(sanitizeDemoName(`Robb${String.fromCharCode(0x202e)}Walters`)).toBe('RobbWalters')
+  })
+
+  it('collapses an all-invisible-character input to Guest', () => {
+    const invisible = [0x200b, 0x200c, 0x200d, 0xfeff, 0x202e].map((code) =>
+      String.fromCharCode(code),
+    )
+    expect(sanitizeDemoName(invisible.join(''))).toBe('Guest')
+  })
+
+  it('caps by code point, never splitting a surrogate pair', () => {
+    // 39 plain characters plus a trailing emoji (a surrogate pair) lands the
+    // emoji exactly on the 40-code-point boundary — it must survive whole,
+    // never decode to a lone surrogate / U+FFFD.
+    const name = `${'x'.repeat(39)}🍗`
+    const result = sanitizeDemoName(name)
+    expect(result).toBe(name)
+    expect(result).not.toContain('�')
+    expect(Array.from(result)).toHaveLength(40)
+  })
+
+  it('preserves whitespace-before-control ordering (regression guard)', () => {
+    // A newline must separate words, never glue them — this ordering was
+    // explicitly verified in #24 and must not regress while adding the new
+    // C1/Cf filtering above it.
+    expect(sanitizeDemoName('Robb\nWalters')).toBe('Robb Walters')
+  })
 })
 
 describe('demoUserId', () => {

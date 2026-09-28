@@ -15,9 +15,16 @@ export interface RadiusMapProps {
   centreLabel: string
 }
 
-const INK = '#17150f'
-const NUGGET = '#e8a33d'
-const PAPER = '#faf8f5'
+/*
+ * Marker and circle colours, read off the console palette rather than the
+ * receipt's. Leaflet takes strings, not CSS variables, so these are the one
+ * place a token is repeated as a literal — keep them in step with
+ * `src/styles/globals.css`.
+ */
+const CHROME = '#e8ecf7'
+const NUGGET = '#ffb02e'
+const TUBE = '#080520'
+const PHOSPHOR = '#4dffa6'
 
 /** Map height in CSS pixels; `h-48` in Tailwind's default scale. */
 const MAP_HEIGHT_PX = 192
@@ -26,14 +33,14 @@ const MAP_HEIGHT_PX = 192
 function dot(color: string, label: string): L.DivIcon {
   return L.divIcon({
     className: 'cell-map-dot',
-    html: `<span aria-label="${label}" style="display:block;width:12px;height:12px;border-radius:50%;background:${color};border:2px solid ${PAPER};box-shadow:0 0 0 1px ${INK};"></span>`,
+    html: `<span aria-label="${label}" style="display:block;width:12px;height:12px;border-radius:50%;background:${color};border:2px solid ${TUBE};box-shadow:0 0 0 1px ${CHROME};"></span>`,
     iconSize: [12, 12],
     iconAnchor: [6, 6],
   })
 }
 
 const YOU_ICON = dot(NUGGET, 'You')
-const BUDDY_ICON = dot(INK, 'A buddy waiting nearby')
+const BUDDY_ICON = dot(PHOSPHOR, 'A buddy waiting nearby')
 
 /**
  * The zoom at which a circle of `radiusMeters` fills most of the map's height.
@@ -127,11 +134,11 @@ export function RadiusMap({ you, radiusMeters, buddies, centreLabel }: RadiusMap
 
     L.circle([you.lat, you.lng], {
       radius: radiusMeters,
-      color: INK,
+      color: CHROME,
       weight: 1.5,
       dashArray: '4 3',
       fillColor: NUGGET,
-      fillOpacity: 0.12,
+      fillOpacity: 0.14,
     }).addTo(layer)
 
     L.marker([you.lat, you.lng], { icon: YOU_ICON, keyboard: false }).addTo(layer)
@@ -144,13 +151,13 @@ export function RadiusMap({ you, radiusMeters, buddies, centreLabel }: RadiusMap
     <div className="mt-4">
       <div
         ref={containerRef}
-        className="h-48 w-full border-2 border-ink"
+        className="inset h-48 w-full"
         role="img"
         aria-label={`Map centred on ${centreLabel}, showing everyone you could be paired with within ${formatMiles(
           radiusMeters,
         )}: you and ${buddies.length} other buyer${buddies.length === 1 ? '' : 's'} waiting`}
       />
-      <p className="mt-1 text-right font-display text-[0.55rem] tracking-[0.05em] text-faded uppercase">
+      <p className="mt-1 text-right font-mono text-[0.58rem] tracking-[0.05em] text-steel uppercase">
         Map data &copy;{' '}
         {/* OSMF asks that attribution link to the copyright page; that link is
             the part that is an actual licensing requirement, not decoration. */}

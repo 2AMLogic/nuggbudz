@@ -48,22 +48,19 @@ export function BuddyChat({
 
   return (
     <section aria-label={`Chat with ${buddyName}`}>
-      <div
-        className="max-h-44 overflow-y-auto border-2 border-hairline px-3 py-2"
-        aria-live="polite"
-      >
+      <div className="inset max-h-44 overflow-y-auto px-3 py-2" aria-live="polite">
         {lines.length === 0 ? (
-          <p className="font-body text-sm leading-snug text-faded">
+          <p className="font-body text-sm leading-snug text-steel">
             Say where you are standing. {buddyName} sees it straight away.
           </p>
         ) : (
           <ul className="flex flex-col gap-1">
             {lines.map((line) => (
               // `seq` and not `at`: two messages can land in the same millisecond.
-              <li key={line.seq} className="font-body text-sm leading-snug">
+              <li key={line.seq} className="font-body text-sm leading-snug text-chrome">
                 <span
-                  className={`font-display text-[0.6rem] tracking-[0.12em] uppercase ${
-                    line.from === myRole ? 'text-faded' : 'text-ketchup'
+                  className={`font-mono text-[0.6rem] tracking-[0.12em] uppercase ${
+                    line.from === myRole ? 'text-steel' : 'text-ketchup'
                   }`}
                 >
                   {line.from === myRole ? 'You' : line.name}
@@ -90,13 +87,13 @@ export function BuddyChat({
           maxLength={MAX_CHAT_CHARS}
           aria-label={`Message ${buddyName}`}
           placeholder="By the drinks, grey hoodie"
-          className="min-w-0 flex-1 border-b-2 border-ink bg-transparent px-1 py-2 font-body text-sm focus:outline-none"
+          className="slot min-w-0 flex-1 font-body text-sm"
         />
         <button
           type="button"
           onClick={send}
           disabled={draft.trim().length === 0}
-          className="border-2 border-ink px-3 font-display text-[0.65rem] font-bold tracking-[0.15em] uppercase transition-transform active:translate-y-px disabled:opacity-35"
+          className="btn btn-outline w-auto px-3 py-2 text-[0.65rem]"
         >
           Send
         </button>
@@ -104,7 +101,7 @@ export function BuddyChat({
 
       {error !== null && <p className="mt-2 font-body text-sm text-ketchup">{error}</p>}
 
-      <p className="mt-2 font-body text-xs leading-snug text-faded">
+      <p className="mt-2 font-body text-xs leading-snug text-steel">
         Nothing here is saved. Messages go straight to {buddyName} and nowhere else — not to the
         ledger, not to us — and the whole conversation disappears the moment this match is done.
       </p>

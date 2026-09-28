@@ -1,35 +1,42 @@
 import type { ReactNode } from 'react'
 
 /**
- * The till roll every screen is printed on.
+ * The console every screen is bolted to.
  *
- * Fixed narrow column at every breakpoint — an 80mm receipt does not become a
- * three-column layout on a desktop, it just sits in the middle of the counter.
+ * Fixed narrow column at every breakpoint — a workstation panel does not become
+ * a three-column layout on a desktop, it just sits in the middle of the bench.
+ * The gutter is 16px and the panel's own is another 16, so the usable width on a
+ * 320px phone is 256: everything inside is measured against that, not against
+ * the viewport.
  */
 export function Roll({ children }: { children: ReactNode }) {
   return (
-    <main className="mx-auto w-full max-w-[26rem] px-4 pb-16 pt-6">
-      <div className="bg-paper px-5 py-6 shadow-[0_1px_0_var(--color-hairline),0_18px_40px_-28px_rgba(23,21,15,0.55)]">
-        {children}
-      </div>
+    <main className="mx-auto w-full max-w-[26rem] px-4 pb-16 pt-5">
+      <div className="console-shell px-4 py-5">{children}</div>
     </main>
   )
 }
 
+/** An engraved rule across the panel, optionally with a label set into it. */
 export function Perf({ label }: { label?: string }) {
   if (label === undefined) return <div className="perf my-4" />
   return (
     <div className="my-4 flex items-center gap-3">
       <div className="perf flex-1" />
-      <span className="font-display text-[0.6rem] tracking-[0.18em] text-faded uppercase">
-        {label}
-      </span>
+      <span className="tag">{label}</span>
       <div className="perf flex-1" />
     </div>
   )
 }
 
-/** One itemised line: label on the left, figure right-aligned in the money column. */
+/**
+ * One itemised line: label on the left, figure right-aligned in the money
+ * column.
+ *
+ * Money is gold, because the box of nuggets is the only warm thing in this
+ * interface and the price of it is the same fact. Savings keep their own colour
+ * so the two figures never blur into one number.
+ */
 export function Line({
   label,
   value,
@@ -42,7 +49,7 @@ export function Line({
   delay?: number
 }) {
   const tone =
-    emphasis === 'savings' ? 'text-ketchup' : emphasis === 'total' ? 'text-ink' : 'text-faded'
+    emphasis === 'savings' ? 'text-ketchup' : emphasis === 'total' ? 'text-nugget' : 'text-steel'
   const weight = emphasis === 'normal' ? 'font-normal' : 'font-bold'
 
   return (
@@ -50,10 +57,12 @@ export function Line({
       className="printed flex items-baseline justify-between gap-3 py-[0.2rem]"
       style={{ animationDelay: `${delay}ms` }}
     >
-      <span className={`font-display text-[0.7rem] tracking-[0.1em] uppercase ${tone} ${weight}`}>
+      <span
+        className={`font-mono text-[0.68rem] tracking-[0.1em] whitespace-nowrap uppercase ${tone} ${weight}`}
+      >
         {label}
       </span>
-      <span className={`font-display text-sm tabular-nums ${tone} ${weight}`}>{value}</span>
+      <span className={`font-mono text-sm tabular-nums ${tone} ${weight}`}>{value}</span>
     </div>
   )
 }

@@ -141,12 +141,6 @@ export async function readStandings(
   return bands
 }
 
-/** One buyer's band, for the callers that only care about one. */
-export async function readStanding(db: D1Database, userId: string): Promise<StandingBand> {
-  const bands = await readStandings(db, [userId])
-  return bands.get(userId) ?? 'new'
-}
-
 function countsOf(row: StoredCounts): ReputationCounts {
   return {
     splitsCompleted: row.splits_completed,

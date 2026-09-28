@@ -231,11 +231,18 @@ jobs:
       # banner and then die before the next step ran -- so `payment-gate` hosts it
       # in its own process via `FAKE_STRIPE_SERVE` below. Nothing calls Stripe
       # until a match is struck, which cannot happen before that script runs.
+      # The operator allowlist for the holds queue and the refund-retry route,
+      # which answer 404 to everyone else -- including with the var unset, which
+      # is the shape a checkout is in. The id is `BUYERS.op` in
+      # scripts/payment-gate-check.mjs, and PAYMENT_GATE_REQUIRE_ADMIN below
+      # turns "no operator configured" from a skip into a failure, so a drift
+      # between the two cannot quietly delete this lane.
       - run: |
           {
             echo 'STRIPE_SECRET_KEY="sk_test_fake"'
             echo 'STRIPE_WEBHOOK_SECRET="whsec_fake_for_ci_only"'
             echo 'STRIPE_API_BASE="http://127.0.0.1:5312/v1"'
+            echo 'OPERATOR_USER_IDS="9a1d9a1d-0000-4000-8000-000000000033"'
           } > .dev.vars
       - run: pnpm dev --port 5249 &
       - run: npx wait-on http://localhost:5249/api/health --timeout 90000
@@ -255,4 +262,5 @@ jobs:
           FAKE_STRIPE=http://localhost:5312 \
           FAKE_STRIPE_SERVE=5312 \
           STRIPE_WEBHOOK_SECRET=whsec_fake_for_ci_only \
+          PAYMENT_GATE_REQUIRE_ADMIN=1 \
           pnpm payment-gate

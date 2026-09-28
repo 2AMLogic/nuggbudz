@@ -12,6 +12,10 @@
  *   never did. Not a weaker settled split and not a row in `matches` with a
  *   flag on it: it is an item of work for a human, holding money that was
  *   collected and deliberately not returned.
+ * - `holds` — money a match is still holding after a teardown that was *not* a
+ *   dispute, because Stripe refused the refund. Parallel to `disputes` rather
+ *   than folded into it: a dispute is a decision somebody owes an answer to,
+ *   and a hold is a failure somebody owes a retry to. Nobody decided a hold.
  *
  * Keeping them apart is what lets `/api/stats` stay a plain `WHERE settled_at
  * IS NOT NULL` rather than a filter every future query has to remember.
@@ -19,6 +23,7 @@
 import { isDemoUserId } from '../shared/demo'
 import type { DisputeReason, DisputeResolution } from '../shared/disputes'
 import type { BuyerRole, Settlement } from '../shared/economics'
+import type { HoldReason } from '../shared/holds'
 import { classifyUserId } from '../shared/identity'
 
 /** Everything the ledger needs to know about one settled split. */
@@ -68,6 +73,34 @@ export interface DisputedMatch {
    * moment of the dispute. Taken off the payment ledger, never recomputed from
    * the settlement: what a human is being asked about is what Stripe is
    * actually holding, which for a half-refunded match is not the same number.
+   */
+  heldCents: number
+  names: Record<BuyerRole, string>
+  userIds: Record<BuyerRole, string>
+}
+
+/**
+ * Everything the holds queue needs to know about money a teardown could not
+ * return.
+ *
+ * `heldCents` is the figure that decides whether this row exists at all — a
+ * teardown whose refund Stripe honoured owes nobody anything and is never
+ * written. `userIds` is required for the same reasons it is on a dispute: the
+ * write is refused unless the caller states who was out of pocket, and somebody
+ * has to be chaseable when the retry keeps failing.
+ */
+export interface HeldMatch {
+  matchId: string
+  dealId: string
+  cell: string
+  createdAt: number
+  /** When the match record was deleted and its charges became a tombstone. */
+  retiredAt: number
+  reason: HoldReason
+  /**
+   * Integer cents collected and not handed back, off the payment ledger rather
+   * than recomputed from the settlement. A half-refunded match holds less than
+   * it collected, and this is the money that is actually there.
    */
   heldCents: number
   names: Record<BuyerRole, string>
@@ -530,5 +563,204 @@ export async function stampDisputeRefund(
   await db
     .prepare('UPDATE disputes SET refunded_cents = ?2 WHERE match_id = ?1')
     .bind(matchId, refundedCents)
+    .run()
+}
+
+const INSERT_HOLD = `INSERT OR IGNORE INTO holds (
+  match_id, deal_id, cell, created_at, retired_at, reason,
+  orderer_user_id, orderer_name, receiver_user_id, receiver_name,
+  held_cents
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+/**
+ * The row one unreturned teardown becomes.
+ *
+ * Both of `ledgerStatements`' gates run here too, in the same order and for the
+ * same reasons. The demo gate is belt and braces rather than theatre: a demo
+ * pair never reaches Stripe, so it can never hold money and can never get this
+ * far — and if some future path made it possible, an operator's queue is the
+ * last place to discover that somebody ran a demo.
+ *
+ * Nothing about `disputes` is touched from here, deliberately. The two tables
+ * answer different questions and a hold must never become a dispute nobody
+ * raised.
+ */
+export function holdStatements(match: HeldMatch): LedgerStatement[] {
+  assertAuthenticIdentities(match)
+  if (isDemoMatch(match)) return []
+
+  return [
+    {
+      // OR IGNORE for the reason both other writes use it, and one more: the
+      // Durable Object replays a failed hold write off its next alarm, and a
+      // replay must not overwrite `held_cents` an operator's retry has since
+      // brought down.
+      sql: INSERT_HOLD,
+      params: [
+        match.matchId,
+        match.dealId,
+        match.cell,
+        match.createdAt,
+        match.retiredAt,
+        match.reason,
+        match.userIds.orderer,
+        match.names.orderer,
+        match.userIds.receiver,
+        match.names.receiver,
+        match.heldCents,
+      ],
+    },
+  ]
+}
+
+/**
+ * File money a teardown could not give back.
+ *
+ * Retried on a transient D1 failure exactly like the other two durable writes.
+ * Until this row lands, the only record that a buyer is $4.49 out of pocket for
+ * a box that does not exist lives in one Durable Object's storage — and unlike
+ * a dispute there is no human in the loop to notice, because nobody raised it.
+ * The caller (`NuggPool.retireMatch`) parks the row for replay if this throws.
+ */
+export async function writeHeldMatch(
+  db: D1Database,
+  match: HeldMatch,
+  options: WriteOptions = {},
+): Promise<void> {
+  await runBatch(db, holdStatements(match), options)
+}
+
+/** One hold as an operator sees it. Money is integer cents, as everywhere. */
+export interface HoldRecord {
+  matchId: string
+  dealId: string
+  cell: string
+  createdAt: number
+  retiredAt: number
+  reason: string
+  buddies: Record<BuyerRole, { userId: string; name: string }>
+  heldCents: number
+  /**
+   * What retries have recovered. `null` is not zero: it means no retry has been
+   * answered for yet, which is a different fact from "we asked and got nothing".
+   */
+  refundedCents: number | null
+  retriedAt: number | null
+  releasedAt: number | null
+}
+
+interface HoldRow {
+  match_id: string
+  deal_id: string
+  cell: string
+  created_at: number
+  retired_at: number
+  reason: string
+  orderer_user_id: string
+  orderer_name: string
+  receiver_user_id: string
+  receiver_name: string
+  held_cents: number
+  refunded_cents: number | null
+  retried_at: number | null
+  released_at: number | null
+}
+
+const SELECT_HOLD_COLUMNS = `match_id, deal_id, cell, created_at, retired_at, reason,
+  orderer_user_id, orderer_name, receiver_user_id, receiver_name,
+  held_cents, refunded_cents, retried_at, released_at`
+
+function toHoldRecord(row: HoldRow): HoldRecord {
+  return {
+    matchId: row.match_id,
+    dealId: row.deal_id,
+    cell: row.cell,
+    createdAt: row.created_at,
+    retiredAt: row.retired_at,
+    reason: row.reason,
+    buddies: {
+      orderer: { userId: row.orderer_user_id, name: row.orderer_name },
+      receiver: { userId: row.receiver_user_id, name: row.receiver_name },
+    },
+    heldCents: row.held_cents,
+    refundedCents: row.refunded_cents,
+    retriedAt: row.retried_at,
+    releasedAt: row.released_at,
+  }
+}
+
+/** How many holds one listing hands back, however large a `limit` is asked for. */
+export const MAX_HOLD_PAGE = 100
+
+/**
+ * The money nobody has managed to give back, oldest first — so the cents that
+ * have been stuck longest are the cents at the top of the list.
+ *
+ * `openOnly` is the default for the same reason it is on the disputes queue: an
+ * operator's question is almost always "what is outstanding". Released rows stay
+ * readable so a retry that finally worked can be audited after the fact.
+ */
+export async function listHolds(
+  db: D1Database,
+  options: { openOnly?: boolean; limit?: number } = {},
+): Promise<HoldRecord[]> {
+  const openOnly = options.openOnly ?? true
+  const limit = Math.min(Math.max(options.limit ?? MAX_HOLD_PAGE, 1), MAX_HOLD_PAGE)
+  const where = openOnly ? 'WHERE released_at IS NULL' : ''
+  const { results } = await db
+    .prepare(
+      `SELECT ${SELECT_HOLD_COLUMNS} FROM holds ${where}
+       ORDER BY retired_at ASC LIMIT ?1`,
+    )
+    .bind(limit)
+    .all<HoldRow>()
+  return results.map(toHoldRecord)
+}
+
+export async function getHold(db: D1Database, matchId: string): Promise<HoldRecord | null> {
+  const row = await db
+    .prepare(`SELECT ${SELECT_HOLD_COLUMNS} FROM holds WHERE match_id = ?1`)
+    .bind(matchId)
+    .first<HoldRow>()
+  return row === null ? null : toHoldRecord(row)
+}
+
+export interface HoldRefundStamp {
+  /** What *this* retry recovered, in integer cents. Added to what came before. */
+  refundedCents: number
+  /** What is left in the account after it — the pool's own answer, not a guess. */
+  heldCents: number
+  retriedAt: number
+}
+
+/**
+ * Stamp what a retry actually recovered, once Stripe has answered.
+ *
+ * Only ever called after the refund round trip, the same discipline
+ * `stampDisputeRefund` follows and for the same reason: a row that claims a
+ * refund before the call returns is a row that lies about a refund that failed.
+ *
+ * `refunded_cents` accumulates because a hold may be retried any number of
+ * times and each attempt may recover a different leg; `held_cents` is replaced
+ * outright because the pool reports the absolute figure it is still sitting on.
+ * A hold that reaches zero is released here and stops appearing in the queue —
+ * that is the *only* way `released_at` is ever set, so it can never be stamped
+ * on money still in the account.
+ */
+export async function stampHoldRefund(
+  db: D1Database,
+  matchId: string,
+  stamp: HoldRefundStamp,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE holds
+          SET refunded_cents = COALESCE(refunded_cents, 0) + ?2,
+              held_cents = ?3,
+              retried_at = ?4,
+              released_at = CASE WHEN ?3 = 0 THEN ?4 ELSE released_at END
+        WHERE match_id = ?1`,
+    )
+    .bind(matchId, stamp.refundedCents, stamp.heldCents, stamp.retriedAt)
     .run()
 }

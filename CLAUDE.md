@@ -182,10 +182,32 @@ state.
   its unfinished money behind as a tombstone (`retireMatch`, the one place a
   `match:` key is removed), so a PaymentIntent that clears *after* its match died
   is still refunded rather than answered `unknown_match`.
+- **A refund Stripe refused is a `holds` row, and holds are parallel to disputes,
+  never folded into them.** A tombstone lives in one cell's storage and there is
+  no registry of live cells, so until #85 a refused refund on a *non-dispute*
+  teardown was money nobody could enumerate — and unlike a dispute there is no
+  human in the loop by construction, because nobody raised it. `retireMatch` now
+  takes a **required** `TeardownReason`, and files a `holds` row when
+  `parseHoldReason` answers it *and* `holdsCollectedMoney` is true — before the
+  `match:` key is deleted, the same ordering `persistTerminal` enforces. The two
+  predicates are both load-bearing: `hasOutstandingMoney` (pending *or*
+  collected) is what keeps a tombstone, and `holdsCollectedMoney` (collected
+  alone) is what makes a hold, because a `pending` leg is a webhook to wait for
+  rather than money anybody has lost. A dispute's hold is deliberate and already
+  in `disputes`, so it names itself `'disputed'` and files nothing — the same
+  money in two operator queues is worse than in one. `GET /api/admin/holds` is
+  the queue; `POST /api/admin/holds/:matchId/retry` is the only action, because
+  nobody *decided* a hold and there is nothing to resolve. Re-asking is safe
+  because of `refundIdempotencyKey`, and `stampHoldRefund` runs only after Stripe
+  answers — `refunded_cents` NULL means no retry has been answered for, which is
+  not `0`. A D1 write that fails parks the row under `holdfile:` and
+  `reconcileHolds` replays it off the alarm, because a hold is filed for a record
+  that is still `pending` and `reconcileTerminal` skips those by design.
 - **A finished match leaves the Durable Object only once D1 has it.** A settled
-  split goes to `matches`, a dead handshake to `disputes` — a table of its own,
-  never a status column, so every revenue query stays a plain `WHERE settled_at
-  IS NOT NULL`. `persistTerminal` is the one answer both paths read, and the
+  split goes to `matches`, a dead handshake to `disputes`, and money a teardown
+  could not hand back to `holds` — each a table of its own, never a status
+  column, so every revenue query stays a plain `WHERE settled_at IS NOT NULL`.
+  `persistTerminal` is the one answer both terminal paths read, and the
   record is deleted **after** it returns true, never before; a failed write keeps
   the record and `reconcileTerminal` replays it off the next alarm. Get that
   order backwards and nothing looks broken until a D1 blip erases the only

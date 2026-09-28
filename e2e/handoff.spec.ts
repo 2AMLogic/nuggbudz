@@ -5,9 +5,7 @@ import { join } from 'node:path'
 import { type Browser, type BrowserContext, expect, type Page, test } from '@playwright/test'
 import jsQR from 'jsqr'
 import { SESSION_COOKIE } from '../shared/auth'
-import { DEFAULT_POOL_CELL_PRECISION, geohash } from '../shared/geo'
 import { handoffUrl, pickupCodeFromScan, qrPayloadFor } from '../shared/handoff'
-import { DEMO_ORIGIN } from '../shared/location'
 
 /**
  * The native-camera path: the QR is a link, and the phone's own camera opens it.
@@ -110,15 +108,16 @@ function seedSessions(): void {
 }
 
 /**
- * Settled rows in the shard this scenario pairs in.
+ * Every settled row in the ledger, counted as a delta rather than per shard.
  *
- * Promptless sockets land on `DEMO_ORIGIN` when the runtime has no usable
- * `request.cf`, and on the edge's guess when it has one — so this counts the
- * demo-origin shard and the assertions below are written as deltas rather than
- * as absolutes, which holds either way on a machine that is online.
+ * Deliberately not scoped to a cell. This scenario is promptless, so which shard
+ * it lands in is whatever the server resolved — `DEMO_ORIGIN` offline and the
+ * edge's guess otherwise — and a cell-scoped query would quietly count zero on a
+ * runner whose `request.cf` differs from the developer's. The suite runs on a
+ * single worker, so between capturing `before` and reading it back nothing else
+ * in this repo is settling anything.
  */
 function settledRows(): number {
-  const cell = geohash(DEMO_ORIGIN.lat, DEMO_ORIGIN.lng, DEFAULT_POOL_CELL_PRECISION)
   const out = execFileSync(
     'npx',
     [
@@ -129,7 +128,7 @@ function settledRows(): number {
       '--local',
       '--json',
       '--command',
-      `SELECT COUNT(*) AS n FROM matches WHERE cell = '${cell}' AND settled_at IS NOT NULL`,
+      'SELECT COUNT(*) AS n FROM matches WHERE settled_at IS NOT NULL',
     ],
     { encoding: 'utf8', env: WRANGLER_ENV },
   )
@@ -291,7 +290,10 @@ test('a handoff link opened in a second tab carries the receiver into the match'
     await expect(scanned.getByText(/both of you confirmed the handoff/i)).toBeVisible()
     await expect(second.page.getByText(/both of you confirmed the handoff/i)).toBeVisible()
 
-    expect(settledRows()).toBe(before + 1)
+    // Polled, not read once: the settled screen is the socket's word and the D1
+    // write is a separate round trip behind it, so reading the ledger in the
+    // same breath is a race this test has no reason to run.
+    await expect.poll(() => settledRows(), { timeout: 10_000 }).toBe(before + 1)
   } finally {
     await Promise.all(contexts.map((context) => context.close().catch(() => {})))
   }

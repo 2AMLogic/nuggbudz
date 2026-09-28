@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { appPalette, deckPalette } from '../scripts/brand-palette-probe.mjs'
 import {
   auditDeck,
   buildLedger,
@@ -157,5 +158,31 @@ describe('the orphan scan', () => {
       '34%',
       '34%',
     ])
+  })
+})
+
+describe('the deck theme and the app', () => {
+  // The deck is meant to be evidence that the product looks like this. A second
+  // hand-tuned palette is the way that stops being true: someone retunes the
+  // app's horizon and the slides keep last month's magenta, and nothing says so.
+  // The theme copies globals.css by value because Marp cannot import it, so this
+  // is the only thing keeping the copy honest.
+  const app = appPalette()
+  const deck = deckPalette()
+
+  it('reads two palettes that are actually there', () => {
+    // Both readers are regexes over files on disk. If either path moves, the
+    // maps come back empty and the two assertions below pass vacuously — which
+    // is the failure mode this whole check exists to prevent elsewhere.
+    expect(Object.keys(app).length).toBeGreaterThan(8)
+    expect(Object.keys(deck).length).toBeGreaterThan(8)
+  })
+
+  it('carries every one of the app\u2019s colour tokens', () => {
+    expect(Object.keys(deck).sort()).toEqual(Object.keys(app).sort())
+  })
+
+  it('spells each one with the app\u2019s own hex', () => {
+    expect(deck).toEqual(app)
   })
 })

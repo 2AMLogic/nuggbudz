@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { DEALS, findDeal } from '../shared/deals'
+import { ACTIVE_DEALS, findDeal, isDealOffered } from '../shared/deals'
 import { demoPairingEnabled, demoUserId, sanitizeDemoName } from '../shared/demo'
 import { analyzeSpread, settle } from '../shared/economics'
 import { geohash } from '../shared/geo'
@@ -27,9 +27,11 @@ app.get('/api/health', (c) =>
 app.route('/api/auth', authRoutes)
 
 /** The deal catalogue, each with its settlement and the spread it arbitrages. */
+// Only the deals the app currently offers — see INACTIVE_DEAL_IDS in
+// shared/deals.ts. The catalogue itself stays whole.
 app.get('/api/deals', (c) =>
   c.json({
-    deals: DEALS.map((deal) => ({
+    deals: ACTIVE_DEALS.map((deal) => ({
       ...deal,
       settlement: settle(deal),
       spread: analyzeSpread(deal),
@@ -38,8 +40,13 @@ app.get('/api/deals', (c) =>
 )
 
 app.get('/api/deals/:dealId/quote', (c) => {
+  // A gated deal exists in the catalogue but is not on offer, so it must 404
+  // exactly like one that does not exist — quoting a price for a chain the app
+  // will not pair you on is an invitation to a dead end.
   const deal = findDeal(c.req.param('dealId'))
-  if (deal === undefined) return c.json({ error: 'unknown deal' }, 404)
+  if (deal === undefined || !isDealOffered(deal.id)) {
+    return c.json({ error: 'unknown deal' }, 404)
+  }
 
   const rawParty = c.req.query('partySize')
   const partySize = rawParty === undefined ? deal.partySize : Number.parseInt(rawParty, 10)

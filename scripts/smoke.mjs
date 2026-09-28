@@ -120,8 +120,8 @@ check('health ok', health.ok === true, JSON.stringify(health))
 
 const { deals } = await fetch(`${BASE}/api/deals`).then((r) => r.json())
 check(
-  'deals catalogue returned',
-  Array.isArray(deals) && deals.length === 3,
+  'deals catalogue returned (McDonald-only)',
+  Array.isArray(deals) && deals.length === 1,
   `${deals?.length} deals`,
 )
 const mcd = deals.find((d) => d.id === 'mcd-nuggets-20')
@@ -143,6 +143,17 @@ const bad = await fetch(`${BASE}/api/deals/mcd-nuggets-20/quote?partySize=1`)
 check('party of 1 rejected', bad.status === 400, `status ${bad.status}`)
 const missing = await fetch(`${BASE}/api/deals/nope/quote`)
 check('unknown deal 404s', missing.status === 404, `status ${missing.status}`)
+// A gated deal is the harder case: it *is* in the catalogue, so `findDeal`
+// resolves it. Quoting a price for a chain the app will not pair you on is a
+// dead end, so it has to 404 like a deal that does not exist at all.
+const gatedQuotes = await Promise.all(
+  ['wendys-nuggets-20', 'bk-nuggets-20'].map((id) => fetch(`${BASE}/api/deals/${id}/quote`)),
+)
+check(
+  'a gated deal is not quotable',
+  gatedQuotes.every((r) => r.status === 404),
+  gatedQuotes.map((r) => r.status).join('/'),
+)
 
 // --- sessions ---
 const anonMe = await fetch(`${BASE}/api/auth/me`)
@@ -359,10 +370,11 @@ const requeued = await b.expect('waiting')
 check('survivor requeued', requeued.waiting >= 1, JSON.stringify(requeued))
 
 // --- the pickup handshake ---
-// A different deal, so this pair cannot be matched with anyone still queued
-// above: the cell is shared, the market is per deal.
-const g = open(BUYERS.gus, 37.7955, -122.3937, 'wendys-nuggets-20')
-const h = open(BUYERS.hana, 37.7956, -122.3938, 'wendys-nuggets-20')
+// A different neighbourhood (geohash `9q9p3w`, ~14m apart), so this pair cannot
+// be matched with anyone still queued above: only one deal is offered now, so
+// the cell is the axis that isolates a market, not the deal.
+const g = open(BUYERS.gus, 37.8715, -122.273)
+const h = open(BUYERS.hana, 37.8716, -122.2731)
 await Promise.all([g.opened, h.opened])
 await Promise.all([g.expect('welcome'), h.expect('welcome')])
 g.join()
@@ -370,7 +382,7 @@ await g.expect('waiting')
 h.join()
 const [orderer, receiver] = await Promise.all([g.expect('matched'), h.expect('matched')])
 check(
-  'handshake pair matched on their own deal',
+  'handshake pair matched in their own cell',
   orderer.matchId === receiver.matchId && orderer.role === 'orderer',
   `${orderer.role}/${receiver.role}`,
 )
@@ -473,8 +485,10 @@ check(
 // here because it would mean holding this script open for PICKUP_CONFIRM_TIMEOUT_MS.
 // To drive it by hand, put `PICKUP_CONFIRM_TIMEOUT_MS="2000"` in `.dev.vars`,
 // restart the dev server, and half-confirm a match: the alarm disputes it.
-const i = open(BUYERS.ivy, 37.7955, -122.3937, 'bk-nuggets-20')
-const j = open(BUYERS.jed, 37.7956, -122.3938, 'bk-nuggets-20')
+// Again a cell of their own (`9q9k6m`), so the dispute below is unambiguously
+// this pair's and cannot draw in a buyer left queued by an earlier scenario.
+const i = open(BUYERS.ivy, 37.3382, -121.8863)
+const j = open(BUYERS.jed, 37.3383, -121.8864)
 await Promise.all([i.opened, j.opened])
 await Promise.all([i.expect('welcome'), j.expect('welcome')])
 i.join()
@@ -517,58 +531,86 @@ check('garbage rejected', err.code === 'bad_message', err.code)
 c.confirm('A2B3C4')
 const unmatched = await c.expectError()
 check('confirming without a match is refused', unmatched.code === 'not_matched', unmatched.code)
-c.ws.send(
-  JSON.stringify({
-    type: 'join',
-    dealId: 'no-such-deal',
-    lat: 37.7955,
-    lng: -122.3937,
-  }),
-)
-const sawUnknownDeal = await (async () => {
-  for (let i = 0; i < 40; i++) {
-    if (c.inbox.some((m) => m.code === 'unknown_deal')) return true
-    await new Promise((r) => setTimeout(r, 100))
-  }
-  return false
-})()
+/** Send a hand-rolled `join` frame, bypassing whatever the UI would offer. */
+const rawJoin = (socket, dealId) =>
+  socket.ws.send(JSON.stringify({ type: 'join', dealId, lat: 37.7955, lng: -122.3937 }))
+
+rawJoin(c, 'no-such-deal')
+const unknownDeal = await c.expectError()
+check('unknown deal rejected over ws', unknownDeal.code === 'unknown_deal', unknownDeal.code)
+
+// The pairing path, not the storefront. `/api/deals` only ever lists what is
+// offered, but nothing stops a client sending its own `join` frame naming a
+// gated chain — and being paired there means being *settled* there. The gate has
+// to hold on this socket, not just on the listing.
+rawJoin(c, 'wendys-nuggets-20')
+const gatedJoin = await c.expectError()
 check(
-  'unknown deal rejected over ws',
-  sawUnknownDeal,
-  JSON.stringify(c.inbox.filter((m) => m.type === 'error')),
+  'a gated deal is refused on the pairing path',
+  gatedJoin.code === 'unknown_deal',
+  gatedJoin.code,
 )
+rawJoin(c, 'bk-nuggets-20')
+const gatedJoin2 = await c.expectError()
+check(
+  'every gated deal is refused on the pairing path',
+  gatedJoin2.code === 'unknown_deal',
+  gatedJoin2.code,
+)
+// Refusing with an error is not enough: a buyer queued on a gated deal would sit
+// in the pool waiting for a buddy who can never legitimately arrive.
+check('a refused gated join never queues the buyer', (await c.settles('waiting')) === false)
 
 // --- cell map roster broadcast ---
-// The cell map needs everyone's client to hear about a roster change, not
-// just the socket that caused it — so a third buyer joining the cell must
-// push a fresh 'waiting' message to every buyer already queued there, on any
-// deal, with the newcomer's position quantized rather than exact.
+// The cell map needs everyone's client to hear about a roster change, not just
+// the socket that caused it — so a buyer joining the cell must push a fresh
+// 'waiting' message to every buyer already queued there, with the newcomer's
+// position quantized rather than exact.
 //
-// Everyone still connected from the handshake checks above (`g`, `h`, `j`) has
-// settled or disputed their match and is back to idle, not waiting, so the only
-// buddy left in the cell at this point is the requeued `b`.
-const kim = open(BUYERS.kim, 37.7955, -122.3937, 'wendys-nuggets-20')
+// Isolated by cell, like the handshake pairs above: `9q8yx1` is a neighbourhood
+// nobody else in this suite touches, so the roster kim and lee see is only ever
+// each other. Isolating by a second deal id is no longer possible — one chain is
+// offered, and a join naming any other is refused three checks above.
+//
+// They also must not pair with each other, and the axis left for that is
+// distance: both sit inside `9q8yx1` but 1055m apart, beyond the 800m
+// MATCH_RADIUS_METERS. That is the "cell-edge buddies" case wrangler.jsonc
+// documents — same market, too far to walk — and it is what makes the roster
+// assertion below discriminating: a buddy appears on the map who this buyer
+// could not be matched with.
+const KIM_AT = { lat: 37.7108, lng: -122.3873 }
+const LEE_AT = { lat: 37.7158, lng: -122.3771 }
+
+const kim = open(BUYERS.kim, KIM_AT.lat, KIM_AT.lng)
 await kim.opened
+const kimWelcome = await kim.expect('welcome')
 kim.join()
-const kimWaiting = await kim.expect('waiting')
+const kimAlone = await kim.expect('waiting')
 check(
-  // `far` is a deliberately different cell (see the "distant buyer" check
-  // above), so the only buddy kim should see here is the requeued `b` —
-  // proving the roster is cell-wide (any deal) rather than global.
-  'buddy roster is cell-wide, not scoped to one deal',
-  kimWaiting.waiting === 1 && kimWaiting.buddies.length === 1,
-  JSON.stringify(kimWaiting),
+  'the first buyer in a fresh cell has an empty roster',
+  kimWelcome.cell === '9q8yx1' && kimAlone.buddies.length === 0,
+  `${kimWelcome.cell} ${JSON.stringify(kimAlone.buddies)}`,
 )
 
-const bWaitingBefore = b.inbox.filter((m) => m.type === 'waiting').length
-const lee = open(BUYERS.lee, 37.7955, -122.3937, 'bk-nuggets-20')
+const kimWaitingBefore = kim.inbox.filter((m) => m.type === 'waiting').length
+const lee = open(BUYERS.lee, LEE_AT.lat, LEE_AT.lng)
 await lee.opened
+const leeWelcome = await lee.expect('welcome')
 lee.join()
-await lee.expect('waiting')
+const leeWaiting = await lee.expect('waiting')
+check(
+  // Same cell and same deal, so both are queued in one market, yet too far
+  // apart to be matched — the roster still carries the other.
+  'the roster carries a cell buddy who is out of pairing range',
+  leeWelcome.cell === kimWelcome.cell &&
+    leeWaiting.waiting === 2 &&
+    leeWaiting.buddies.length === 1,
+  `${leeWelcome.cell} ${JSON.stringify(leeWaiting)}`,
+)
 
 const broadcastSeen = await (async () => {
   for (let i = 0; i < 40; i++) {
-    if (b.inbox.filter((m) => m.type === 'waiting').length > bWaitingBefore) return true
+    if (kim.inbox.filter((m) => m.type === 'waiting').length > kimWaitingBefore) return true
     await new Promise((r) => setTimeout(r, 100))
   }
   return false
@@ -576,21 +618,21 @@ const broadcastSeen = await (async () => {
 check(
   'a buyer already queued gets a fresh roster broadcast when someone new joins the cell',
   broadcastSeen,
-  `${bWaitingBefore} -> ${b.inbox.filter((m) => m.type === 'waiting').length}`,
+  `${kimWaitingBefore} -> ${kim.inbox.filter((m) => m.type === 'waiting').length}`,
 )
 
-const latestForB = b.inbox.filter((m) => m.type === 'waiting').at(-1)
+const latestForKim = kim.inbox.filter((m) => m.type === 'waiting').at(-1)
 check(
   'the broadcast roster carries a position for the newcomer',
-  latestForB.buddies.some(
-    (pos) => Math.abs(pos.lat - 37.7955) < 0.01 && Math.abs(pos.lng - -122.3937) < 0.01,
+  latestForKim.buddies.some(
+    (pos) => Math.abs(pos.lat - LEE_AT.lat) < 0.01 && Math.abs(pos.lng - LEE_AT.lng) < 0.01,
   ),
-  JSON.stringify(latestForB.buddies),
+  JSON.stringify(latestForKim.buddies),
 )
 check(
   'the broadcast never carries an exact coordinate for anyone else',
-  latestForB.buddies.every((pos) => pos.lat !== 37.7955 || pos.lng !== -122.3937),
-  JSON.stringify(latestForB.buddies),
+  latestForKim.buddies.every((pos) => pos.lat !== LEE_AT.lat || pos.lng !== LEE_AT.lng),
+  JSON.stringify(latestForKim.buddies),
 )
 
 for (const s of [b, far, c, g, h, j, kim, lee]) s.ws.close()

@@ -644,6 +644,11 @@ check(
   welcomeA.locationSource === 'client',
   `${welcomeA.locationSource}`,
 )
+check(
+  'welcome carries the pickup dispute timeout',
+  typeof welcomeA.pickupTimeoutMs === 'number' && welcomeA.pickupTimeoutMs > 0,
+  JSON.stringify(welcomeA.pickupTimeoutMs),
+)
 
 a.join()
 const waitingA = await a.expect('waiting')
@@ -756,11 +761,19 @@ check('a wrong code confirms nothing', (await h.settles('pickup_confirmed')) ===
 
 // The real code, typed the way a person types it.
 const typed = `${orderer.pickupCode.slice(0, 3)}-${orderer.pickupCode.slice(3).toLowerCase()}`
+// Bracket the confirmation with client-observed clock reads rather than trusting
+// a guess at the server's timeout: the server's own confirmedAt necessarily
+// falls between these two, so disputeAt — confirmedAt plus the configured
+// PICKUP_CONFIRM_TIMEOUT_MS, echoed at welcome as `pickupTimeoutMs` — necessarily
+// falls between beforeConfirm + pickupTimeoutMs and afterConfirm + pickupTimeoutMs,
+// whatever that timeout is configured to. No literal, and no guess at slack.
+const beforeConfirm = Date.now()
 h.confirm(typed)
 const [confirmedForOrderer, confirmedForReceiver] = await Promise.all([
   g.expect('pickup_confirmed'),
   h.expect('pickup_confirmed'),
 ])
+const afterConfirm = Date.now()
 check(
   'both sides see the receiver confirm',
   confirmedForOrderer.by === 'receiver' && confirmedForReceiver.by === 'receiver',
@@ -771,11 +784,18 @@ check(
   confirmedForOrderer.waitingOn === 'orderer',
   `${confirmedForOrderer.waitingOn}`,
 )
+const disputeWindow = [
+  beforeConfirm + welcomeA.pickupTimeoutMs,
+  afterConfirm + welcomeA.pickupTimeoutMs,
+]
 check(
-  'a dispute deadline is armed on the half-confirmed match',
+  'a dispute deadline is armed on the half-confirmed match, derived from the ' +
+    'configured pickup timeout',
   typeof confirmedForOrderer.disputeAt === 'number' &&
-    confirmedForOrderer.disputeAt > Date.now() + 60_000,
-  `${confirmedForOrderer.disputeAt}`,
+    confirmedForOrderer.disputeAt >= disputeWindow[0] &&
+    confirmedForOrderer.disputeAt <= disputeWindow[1],
+  `${confirmedForOrderer.disputeAt} not in [${disputeWindow[0]}, ${disputeWindow[1]}] ` +
+    `(pickupTimeoutMs=${welcomeA.pickupTimeoutMs})`,
 )
 check('one side confirming does not settle', (await h.settles('pickup_complete')) === false)
 

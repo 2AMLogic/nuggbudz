@@ -16,6 +16,14 @@
  *         pnpm smoke               (in another)
  *
  * `BASE` overrides the target, e.g. BASE=http://localhost:5211 pnpm smoke.
+ *
+ * The expiry checks only run when the dev server is configured with short
+ * liveness windows — nobody waits 15 real minutes for a smoke test. To include
+ * them, put this in `.dev.vars` before starting the dev server:
+ *
+ *   QUEUE_IDLE_SECONDS="6"
+ *   QUEUE_WARN_LEAD_SECONDS="3"
+ *   MATCH_CONFIRM_SECONDS="8"
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
@@ -57,6 +65,16 @@ const BUYERS = {
   // The pair that never sends a coordinate: the promptless path.
   kai: { sid: sessionId('smoke-kai'), userId: 'smoke-user-kai', name: 'Kai' },
   lex: { sid: sessionId('smoke-lex'), userId: 'smoke-user-lex', name: 'Lex' },
+  // Liveness: one buyer who keeps pinging, one who goes quiet, and a pair who
+  // match and then never confirm.
+  pinger: { sid: sessionId('smoke-pinger'), userId: 'smoke-user-pinger', name: 'Pinger' },
+  stale: { sid: sessionId('smoke-stale'), userId: 'smoke-user-stale', name: 'Stale' },
+  slowOne: { sid: sessionId('smoke-slow-one'), userId: 'smoke-user-slow-one', name: 'Slow One' },
+  slowTwo: { sid: sessionId('smoke-slow-two'), userId: 'smoke-user-slow-two', name: 'Slow Two' },
+  // A pair where exactly one side confirms: the expiry sweep must leave them to
+  // the dispute path.
+  halfOne: { sid: sessionId('smoke-half-one'), userId: 'smoke-user-half-one', name: 'Half One' },
+  halfTwo: { sid: sessionId('smoke-half-two'), userId: 'smoke-user-half-two', name: 'Half Two' },
 }
 
 /** Write the sessions into the dev server's KV namespace, in one CLI call. */
@@ -255,9 +273,26 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
   // Errors are asserted on in sequence, so each one is consumed rather than
   // every check re-reading the first error that ever arrived.
   let errorCursor = 0
+  let keepalive = null
+  const stopKeepalive = () => {
+    if (keepalive !== null) clearInterval(keepalive)
+    keepalive = null
+  }
+  ws.addEventListener('close', stopKeepalive)
   ws.addEventListener('message', (e) => {
     const msg = JSON.parse(e.data)
     inbox.push(msg)
+    // Hold this socket's seat the way the browser client does. A queued buyer
+    // who says nothing is supposed to be dropped, so a harness that never pings
+    // would age its own fixtures out of the market on a short-window server.
+    if (msg.type === 'welcome' && keepalive === null) {
+      const every = Math.max(1_000, Math.floor((msg.expiry?.queueIdleMs ?? 60_000) / 3))
+      keepalive = setInterval(() => {
+        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'ping', at: Date.now() }))
+      }, every)
+      // Never let a keepalive be the reason the process will not exit.
+      keepalive.unref?.()
+    }
     const w = waiters.find((x) => x.type === msg.type)
     if (w) {
       waiters.splice(waiters.indexOf(w), 1)
@@ -273,6 +308,8 @@ function open(buyer, lat, lng, dealId = 'mcd-nuggets-20', forgedName = null) {
     name,
     inbox,
     opened,
+    /** Go deliberately quiet, to be aged out of the queue. */
+    stopKeepalive,
     expect(type, ms = 4000) {
       const found = inbox.find((m) => m.type === type)
       if (found) return Promise.resolve(found)
@@ -752,6 +789,121 @@ check(
 )
 
 for (const s of [b, far, c, g, h, j, k, l, kim, lee]) s.ws.close()
+
+// --- liveness: stale queue entries and unconfirmed matches ---
+const windows = welcomeA.expiry ?? {}
+check(
+  'welcome carries the cell liveness windows',
+  Number.isFinite(windows.queueIdleMs) && Number.isFinite(windows.matchTimeoutMs),
+  JSON.stringify(windows),
+)
+
+// Far from the pairing checks above, so these buyers neither disturb them nor
+// get pulled into a match by them.
+const pinger = open(BUYERS.pinger, 40.6782, -73.9442)
+await pinger.opened
+await pinger.expect('welcome')
+pinger.join()
+await pinger.expect('waiting')
+pinger.ws.send(JSON.stringify({ type: 'ping', at: 4242 }))
+// Matched on `at` rather than taking the first pong: the harness keepalive is
+// also pinging, so several pongs are legitimately in flight.
+const sawPong = await (async () => {
+  for (let i = 0; i < 40; i++) {
+    if (pinger.inbox.some((msg) => msg.type === 'pong' && msg.at === 4242)) return true
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return false
+})()
+check('a ping is answered while queued', sawPong)
+
+const shortWindows = windows.queueIdleMs <= 20_000 && windows.matchTimeoutMs <= 20_000
+if (!shortWindows) {
+  log(
+    `SKIP  expiry — this server ages entries out after ${Math.round(windows.queueIdleMs / 1000)}s. ` +
+      'Set QUEUE_IDLE_SECONDS / QUEUE_WARN_LEAD_SECONDS / MATCH_CONFIRM_SECONDS in .dev.vars to run them.',
+  )
+} else {
+  const patience = (ms) => ms + 6_000
+
+  // A buyer who joins and walks away must be warned, then dropped.
+  const stale = open(BUYERS.stale, 41.8781, -87.6298)
+  await stale.opened
+  await stale.expect('welcome')
+  // The one socket that must not hold its own seat.
+  stale.stopKeepalive()
+  stale.join()
+  await stale.expect('waiting')
+  const expiring = await stale.expect('queue_expiring', patience(windows.queueIdleMs))
+  check(
+    'a quiet buyer is warned before being dropped',
+    Number.isFinite(expiring.expiresAt),
+    JSON.stringify(expiring),
+  )
+  const expired = await stale.expect('queue_expired', patience(windows.queueIdleMs))
+  check(
+    'a quiet buyer is dropped and told why',
+    expired.reason === 'idle' && expired.idleMs === windows.queueIdleMs,
+    JSON.stringify(expired),
+  )
+
+  // A match neither half confirms must be called off for both of them.
+  const slowOne = open(BUYERS.slowOne, 34.0522, -118.2437)
+  const slowTwo = open(BUYERS.slowTwo, 34.0523, -118.2438)
+  await Promise.all([slowOne.opened, slowTwo.opened])
+  await Promise.all([slowOne.expect('welcome'), slowTwo.expect('welcome')])
+  slowOne.join()
+  await slowOne.expect('waiting')
+  slowTwo.join()
+  const [slowMatch] = await Promise.all([slowOne.expect('matched'), slowTwo.expect('matched')])
+  const [cancelOne, cancelTwo] = await Promise.all([
+    slowOne.expect('match_expired', patience(windows.matchTimeoutMs)),
+    slowTwo.expect('match_expired', patience(windows.matchTimeoutMs)),
+  ])
+  check(
+    'an unconfirmed match is cancelled for both halves',
+    cancelOne.matchId === slowMatch.matchId && cancelTwo.matchId === slowMatch.matchId,
+    `${cancelOne.matchId} / ${cancelTwo.matchId}`,
+  )
+  check(
+    'a cancelled match returns nothing, because nothing was taken yet',
+    cancelOne.refundedCents === 0 && cancelTwo.refundedCents === 0,
+  )
+
+  // The boundary between the two timers, which is the thing most easily broken
+  // by wiring expiry in next to the handshake: once one side has confirmed, the
+  // match belongs to the dispute path and the expiry sweep must not touch it.
+  // Cancelling it here would erase a buddy's claim that the nuggets changed
+  // hands — exactly what the two-sided handshake exists to prevent.
+  const halfOne = open(BUYERS.halfOne, 39.9526, -75.1652)
+  const halfTwo = open(BUYERS.halfTwo, 39.9527, -75.1653)
+  await Promise.all([halfOne.opened, halfTwo.opened])
+  await Promise.all([halfOne.expect('welcome'), halfTwo.expect('welcome')])
+  halfOne.join()
+  await halfOne.expect('waiting')
+  halfTwo.join()
+  const [halfMatchOne] = await Promise.all([halfOne.expect('matched'), halfTwo.expect('matched')])
+  // The orderer confirms by tapping; only they need no code to do it.
+  const orderer = halfMatchOne.role === 'orderer' ? halfOne : halfTwo
+  orderer.confirm()
+  const halfConfirmed = await halfOne.expect('pickup_confirmed')
+  check(
+    'one side confirming is recorded and still waiting on the other',
+    halfConfirmed.waitingOn !== null && halfConfirmed.disputeAt !== null,
+    JSON.stringify(halfConfirmed),
+  )
+  // Waited out the whole window that *would* have cancelled it unconfirmed.
+  const hijacked = await halfOne.settles('match_expired', patience(windows.matchTimeoutMs))
+  check(
+    'a half-confirmed match is left to the dispute path, not expiry-cancelled',
+    hijacked === false,
+    JSON.stringify(halfOne.inbox.map((m) => m.type)),
+  )
+
+  for (const s of [stale, slowOne, slowTwo, halfOne, halfTwo]) s.ws.close()
+}
+
+pinger.ws.close()
 
 log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

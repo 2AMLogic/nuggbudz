@@ -1,7 +1,7 @@
 # Source of truth — end-to-end runs
 
 The shipped slide claims every end-to-end check passes and names no count (#46);
-these are the runs behind that claim. Run 6 is the most recent, and the earlier
+these are the runs behind that claim. Run 7 is the most recent, and the earlier
 runs are kept exactly as they were recorded — the deployed build and `main` have
 never been the same commit, and the count has moved at nearly every step, up as
 well as down. No run is edited after the fact: a superseded count is history, not
@@ -526,6 +526,138 @@ byte-identically afterwards (`cmp` clean).
 specs. That suite is a separate lane from this file: it drives the browser rather
 than the raw socket, and its count is not a deck figure.
 
+## Run 7 — the same merge, plus `main`'s liveness sweep, full local stack
+
+```bash
+pnpm dev --port 5229                          # in one shell
+BASE=http://localhost:5229 pnpm smoke         # in another
+```
+
+`main` moved again while run 6 was being taken: #23 landed the per-cell expiry
+alarm, so this run covers a tree with the deal gate, the promptless rungs, the
+cell map and the liveness sweep all in it. Three conflicts, all unions —
+`shared/protocol.ts` and `worker/pool.ts` were import lists, and
+`scripts/smoke.mjs` was the header comment and the `BUYERS` roster.
+
+The liveness fixtures needed checking against the promptless pair rather than
+assumed compatible, since that pair still cannot choose its own cell: `pinger`
+→ `dr5rmm`, `stale` → `dp3wjz`, `slowOne`/`slowTwo` → `9q5ctr`,
+`halfOne`/`halfTwo` → `dr4e39`, all computed with `shared/geo.ts`. None is
+`9q8yyk` or `9q8znb`, so nothing changed about the isolation run 6 established.
+
+82 checks, and the whole file runs only with short windows configured — with
+`wrangler.jsonc`'s production windows the six expiry checks print one `SKIP`
+instead, which is 76 `PASS` and the recipe. Both were run; the transcript below is
+the complete one, taken with
+
+```
+QUEUE_IDLE_SECONDS="6"
+QUEUE_WARN_LEAD_SECONDS="3"
+MATCH_CONFIRM_SECONDS="8"
+```
+
+in `.dev.vars`. `countSmokeChecks()`, `grep -c 'check('` and `grep -o 'check('`
+all read 82.
+
+Output, 2026-09-27, on `feature/issue-34` merged with `main` at `3d5f8d1`:
+
+```
+PASS  health ok — {"ok":true,"service":"nuggbudz","protocol":4,"demoPairing":false}
+PASS  deals catalogue returned (McDonald-only) — 1 deals
+PASS  mcd half is $4.49 — 449
+PASS  mcd spread is $5.99 — 599
+PASS  party of 4 splits 20pc evenly
+PASS  party of 1 rejected — status 400
+PASS  unknown deal 404s — status 404
+PASS  a gated deal is not quotable — 404/404
+PASS  anonymous /auth/me is 401 — status 401
+PASS  seeded session resolves to its user — {"user":{"id":"smoke-user-robb","displayName":"Robb","email":null,"avatarUrl":null}}
+PASS  a forged session id is not a session — status 401
+PASS  unauthenticated pool upgrade is 401 — 401
+PASS  unauthenticated websocket never opens
+PASS  google start either redirects or reports it is unconfigured — status 503
+PASS  a callback with an unknown state is a 4xx, not a 500 — status 503
+PASS  logout clears the cookie — nb_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax
+PASS  logout revokes the session — status 401
+PASS  an unusable coordinate is refused rather than relocated
+PASS  welcome carries a cell — 9q8znb
+PASS  welcome carries the authenticated identity — {"id":"smoke-user-robb","name":"Robb"}
+PASS  welcome names the rung that placed the socket — client
+PASS  first buyer queues — {"type":"waiting","waiting":1,"queuedAhead":0,"buddies":[]}
+PASS  both buyers matched — fe9b12e5-d5db-4dd6-b38c-7638fd564cae / fe9b12e5-d5db-4dd6-b38c-7638fd564cae
+PASS  roles are complementary — orderer/receiver
+PASS  longest waiter orders
+PASS  each pays $4.49
+PASS  each owed 10pc
+PASS  each saves $2.50
+PASS  buddy names come from the session, not the join message — Dana/Robb
+PASS  distance is a short walk — 43m
+PASS  only the orderer is given the pickup code — orderer HBWGE7
+PASS  the receiver is not given the pickup code — null
+PASS  pickup code is not derived from the match id — HBWGE7 vs fe9b12e5-d5db-4dd6-b38c-7638fd564cae
+PASS  distant buyer waits alone — {"type":"waiting","waiting":1,"queuedAhead":0,"buddies":[]}
+PASS  survivor told their bud left
+PASS  survivor requeued — {"type":"waiting","waiting":1,"queuedAhead":0,"buddies":[]}
+PASS  handshake pair matched in their own cell — orderer/receiver
+PASS  a wrong code is rejected — bad_pickup_code
+PASS  a receiver cannot confirm with no code at all — bad_pickup_code
+PASS  a wrong code completes nothing
+PASS  a wrong code confirms nothing
+PASS  both sides see the receiver confirm — receiver/receiver
+PASS  the orderer is still owed a confirmation — orderer
+PASS  a dispute deadline is armed on the half-confirmed match — 1790555969783
+PASS  one side confirming does not settle
+PASS  a second confirmation from the same side is refused — already_confirmed
+PASS  both sides get the same completion — a2d83fa2-ad3f-455a-9ad8-99cccd8f6def
+PASS  completion is stamped — 1790555670404
+PASS  the settled split is written to the ledger — {"match_id":"a2d83fa2-ad3f-455a-9ad8-99cccd8f6def","deal_id":"mcd-nuggets-20","cell":"9q9p3w","party_size":2,"total_collected_cents":898,"cogs_cents":799,"platform_fee_cents":99,"distance_meters":14.166510726194598,"created_at":1790555668573,"settled_at":1790555670404}
+PASS  both halves are booked, and they sum to the total — [{"role":"orderer","pay_cents":449},{"role":"receiver","pay_cents":449}]
+PASS  an abandoned match is never booked — []
+PASS  a settled match cannot be confirmed again — not_matched
+PASS  a bud who leaves after one confirmation raises a dispute — {"type":"pickup_disputed","matchId":"206ef8dc-baaf-49d8-8d14-c31e812aa5cb","confirmedBy":"receiver","reason":"buddy_left"}
+PASS  a disputed match never settles
+PASS  a disputed match does not quietly requeue the survivor
+PASS  a disputed match is never booked — []
+PASS  a disputed match cannot be confirmed away — not_matched
+PASS  a socket with no coordinates still resolves a cell — 9q8yyk
+PASS  and says which rung placed it, never claiming an exact fix — edge — 'edge' when request.cf carries coordinates, 'demo' when it does not
+PASS  a buyer the server placed has the cell it placed them in to themselves — 9q8yyk {"type":"waiting","waiting":1,"queuedAhead":0,"buddies":[]}
+PASS  two buyers who never shared their location pair anyway — b3cc9058-b996-412c-b650-6fbe223d48ec / b3cc9058-b996-412c-b650-6fbe223d48ec
+PASS  the split is the same as any other pairing on this deal — 449/449 vs 449
+PASS  distance is measured from the server-resolved origin — 0m
+PASS  garbage rejected — bad_message
+PASS  confirming without a match is refused — not_matched
+PASS  unknown deal rejected over ws — unknown_deal
+PASS  a gated deal is refused on the pairing path — unknown_deal
+PASS  every gated deal is refused on the pairing path — unknown_deal
+PASS  a refused gated join never queues the buyer
+PASS  the first buyer in a fresh cell has an empty roster — 9q8yx1 []
+PASS  the roster carries a cell buddy who is out of pairing range — 9q8yx1 {"type":"waiting","waiting":2,"queuedAhead":1,"buddies":[{"lat":37.71087854832914,"lng":-122.38736388350911}]}
+PASS  a buyer already queued gets a fresh roster broadcast when someone new joins the cell — 1 -> 2
+PASS  the broadcast roster carries a position for the newcomer — [{"lat":37.71559468199784,"lng":-122.37726845094652}]
+PASS  the broadcast never carries an exact coordinate for anyone else — [{"lat":37.71559468199784,"lng":-122.37726845094652}]
+PASS  welcome carries the cell liveness windows — {"queueIdleMs":6000,"queueWarnLeadMs":3000,"matchTimeoutMs":8000}
+PASS  a ping is answered while queued
+PASS  a quiet buyer is warned before being dropped — {"type":"queue_expiring","expiresAt":1790555682096}
+PASS  a quiet buyer is dropped and told why — {"type":"queue_expired","reason":"idle","idleMs":6000}
+PASS  an unconfirmed match is cancelled for both halves — 948ca4f9-46cb-4526-8030-a003b72aa6c8 / 948ca4f9-46cb-4526-8030-a003b72aa6c8
+PASS  a cancelled match returns nothing, because nothing was taken yet
+PASS  one side confirming is recorded and still waiting on the other — {"type":"pickup_confirmed","matchId":"489054e1-5586-48ca-8b17-f060d8a8b46e","by":"orderer","waitingOn":"receiver","disputeAt":1790555990207}
+PASS  a half-confirmed match is left to the dispute path, not expiry-cancelled — ["welcome","waiting","matched","pickup_confirmed","pong","pong","pong","pong","pong","pong"]
+
+ALL CHECKS PASSED
+```
+
+The promptless pair was re-run on the demo rung here too, the same way run 6
+records: `latitude`/`longitude` deleted from `node_modules/.mf/cf.json`, server
+restarted, cell `9q8znb`, `waiting: 1`, both paired at 0m, everything else green.
+`cf.json` restored byte-identically (`cmp` clean).
+
+`pnpm test:e2e` passed both specs against the same server (`E2E_PORT=5229`), and
+the mutation that proves the geolocation assertion is load-bearing was re-run on
+this tree: forcing `lat: undefined, lng: undefined` in `start()` fails on
+`getByText('cell 9q8yyx')`, and restoring it passes.
+
 ## What these runs do and do not establish
 
 **Do**: the pairing protocol works end to end on real infrastructure — cell
@@ -561,5 +693,8 @@ Two merges since then are the clinching data points. First `main` read 61 and th
 promptless-location branch read 64, each correct against its own tree, and the
 union turned out to be 68 — a number neither branch could have typed. Then `main`
 moved on to 66 with the McDonald's-only gate while this branch sat at 68, and the
-union of *those* is 74. The count is measured, never chosen, which is exactly why
-it does not belong on a slide.
+union of *those* is 74. One merge later again, with the liveness sweep in the
+tree, it is 82 — or 76 and a `SKIP`, depending on how the server under test is
+configured, which no single number on a slide could ever have expressed. The
+count is measured, never chosen, which is exactly why it does not belong on a
+slide.

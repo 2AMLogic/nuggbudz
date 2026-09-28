@@ -63,8 +63,17 @@ export function CellMap({ cell, you, buddies }: CellMapProps) {
     })
     mapRef.current = map
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png', {
-      subdomains: 'abcd',
+    // OpenStreetMap's standard tiles, which need no API key. CARTO's basemaps
+    // do now, and they fail *silently*: an unkeyed request still answers 200
+    // with a valid PNG, so the map renders a watermark rather than an error.
+    // The tell is that the placeholder is a constant image — an empty ocean
+    // tile and a dense city tile came back byte-identical at 2049 bytes.
+    //
+    // The receipt palette does not depend on the basemap: `.cell-map-tiles`
+    // desaturates whatever is underneath, so this swap is a drop-in. OSM's
+    // standard style does carry labels, which read as faint street context
+    // under that filter.
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       className: 'cell-map-tiles',
     }).addTo(map)
@@ -114,7 +123,17 @@ export function CellMap({ cell, you, buddies }: CellMapProps) {
         } waiting nearby`}
       />
       <p className="mt-1 text-right font-display text-[0.55rem] tracking-[0.05em] text-faded uppercase">
-        Map tiles CARTO, OpenStreetMap contributors
+        Map data &copy;{' '}
+        {/* OSMF asks that attribution link to the copyright page; that link is
+            the part that is an actual licensing requirement, not decoration. */}
+        <a
+          href="https://www.openstreetmap.org/copyright"
+          target="_blank"
+          rel="noreferrer"
+          className="underline"
+        >
+          OpenStreetMap contributors
+        </a>
       </p>
     </div>
   )

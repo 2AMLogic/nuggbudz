@@ -237,7 +237,7 @@ export function App() {
                 }
               }}
               maxLength={40}
-              placeholder="Robb"
+              placeholder="e.g. Alex"
               className="mt-2 w-full border-b-2 border-ink bg-transparent px-1 py-2 font-display text-lg focus:outline-none"
             />
           </label>

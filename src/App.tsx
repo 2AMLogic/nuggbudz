@@ -41,6 +41,14 @@ function readStoredDemoName(): string {
   }
 }
 
+function writeStoredDemoName(name: string): void {
+  try {
+    localStorage.setItem(DEMO_NAME_KEY, name)
+  } catch {
+    // A private window just means the name is not remembered.
+  }
+}
+
 export function App() {
   const [deals, setDeals] = useState<DealWithMath[]>([])
   const [dealId, setDealId] = useState<string | null>(null)
@@ -139,6 +147,12 @@ export function App() {
    */
   const start = () => {
     if (dealId === null || !identified) return
+    // Taking a seat is what makes a name and a pair worth remembering: this is
+    // the pair a bud was promised and the name they will look for, so the next
+    // visit opens on exactly what was queued with rather than on a half-edit.
+    // The name is stored trimmed, the way it goes on the wire.
+    writeStoredDemoName(demoName.trim())
+    sauces.remember()
     pool.join({
       dealId,
       lat: coords.fix?.lat,
@@ -350,11 +364,9 @@ export function App() {
               value={demoName}
               onChange={(event) => {
                 setDemoName(event.target.value)
-                try {
-                  localStorage.setItem(DEMO_NAME_KEY, event.target.value)
-                } catch {
-                  // A private window just means the name is not remembered.
-                }
+                // Also written as it is typed, so a reload before joining does not
+                // lose it; joining re-stamps the trimmed name it actually used.
+                writeStoredDemoName(event.target.value)
               }}
               maxLength={40}
               placeholder="e.g. Alex"

@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
   accountSocketTag,
+  anonSocketTag,
   clientKey,
   parseHits,
   slidingWindow,
   underConcurrencyCap,
+  upgradeRateKey,
 } from '../shared/ratelimit'
+// The deployed configuration, read as text (it is JSONC): the figures below are
+// asserted against what the Worker is actually given.
+import wranglerSource from '../wrangler.jsonc?raw'
 
 // Mirrors the defaults in wrangler.jsonc, so the demo tests below exercise the
 // limits that actually ship.
@@ -231,5 +236,58 @@ describe('clientKey', () => {
     ]) {
       expect(clientKey(bad)).toBeNull()
     }
+  })
+})
+
+/** `"NAME": "value"` out of wrangler.jsonc, as an integer. */
+function wranglerInt(name: string): number {
+  const found = wranglerSource.match(new RegExp(`"${name}"\\s*:\\s*"(\\d+)"`))
+  if (found === null) throw new Error(`wrangler.jsonc has no integer var ${name}`)
+  return Number(found[1])
+}
+
+describe('anonymous upgrades have an answer of their own (#150)', () => {
+  // Until #150 a signed-out upgrade never reached the limiter outside demo mode:
+  // the 401 refused it first. These pin the answer that replaced it.
+  it('are counted in a bucket separate from signed-in upgrades from the same address', () => {
+    const key = clientKey('203.0.113.7') ?? ''
+    expect(upgradeRateKey('anonymous', key)).not.toBe(upgradeRateKey('session', key))
+    // The signed-in key is the one that shipped before, so no live window resets.
+    expect(upgradeRateKey('session', key)).toBe(`ratelimit:pool-ws:${key}`)
+  })
+
+  it('are allowed fewer attempts than signed-in ones, as deployed', () => {
+    const anon = wranglerInt('POOL_ANON_UPGRADE_LIMIT')
+    const session = wranglerInt('POOL_UPGRADE_LIMIT')
+    expect(anon).toBeGreaterThan(0)
+    expect(anon).toBeLessThan(session)
+  })
+
+  it('so a signed-out crowd behind one NAT cannot spend the signed-in budget', () => {
+    const anonLimit = wranglerInt('POOL_ANON_UPGRADE_LIMIT')
+    const sessionLimit = wranglerInt('POOL_UPGRADE_LIMIT')
+    const buckets = new Map<string, number[]>()
+    const attempt = (bucket: 'session' | 'anonymous', now: number) => {
+      const kvKey = upgradeRateKey(bucket, 'ip4:198.51.100.1')
+      const limit = bucket === 'session' ? sessionLimit : anonLimit
+      const verdict = slidingWindow(buckets.get(kvKey) ?? [], now, WINDOW_MS, limit)
+      buckets.set(kvKey, verdict.hits)
+      return verdict.allowed
+    }
+    // The browsing crowd exhausts its own window...
+    const anonymous = Array.from({ length: anonLimit + 5 }, (_, i) => attempt('anonymous', i))
+    expect(anonymous.filter(Boolean)).toHaveLength(anonLimit)
+    // ...and the signed-in buyers on the same Wi-Fi still get every one of theirs.
+    const signedIn = Array.from({ length: sessionLimit }, (_, i) => attempt('session', 100 + i))
+    expect(signedIn.every(Boolean)).toBe(true)
+  })
+
+  it('and anonymous sockets are counted per address, not per throwaway identity', () => {
+    // A caller with no demo cookie gets a fresh identity per socket, so the cap
+    // has to key on the one thing it cannot rotate for free.
+    expect(anonSocketTag('ip4:203.0.113.7')).toBe(anonSocketTag('ip4:203.0.113.7'))
+    expect(anonSocketTag('ip4:203.0.113.7')).not.toBe(anonSocketTag('ip4:203.0.113.8'))
+    expect(anonSocketTag('ip4:203.0.113.7')).not.toBe(accountSocketTag('ip4:203.0.113.7'))
+    expect(wranglerInt('POOL_ANON_SOCKETS_PER_IP')).toBeGreaterThan(0)
   })
 })

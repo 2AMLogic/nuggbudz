@@ -92,6 +92,8 @@ export const MARKETS = {
   kansasCity: { lat: 39.0997, lng: -94.5786, label: 'Kansas City' },
   stLouis: { lat: 38.627, lng: -90.1994, label: 'St. Louis' },
   elPaso: { lat: 31.7619, lng: -106.485, label: 'El Paso' },
+  oklahomaCity: { lat: 35.4676, lng: -97.5164, label: 'Oklahoma City' },
+  tulsa: { lat: 36.154, lng: -95.9928, label: 'Tulsa' },
 }
 
 /**
@@ -213,6 +215,17 @@ export const FIXTURE_COORDS = {
   // live pickup code while it measures.
   e2eNarrowA: { lat: 39.0997, lng: -94.5786 },
   e2eNarrowB: { lat: 39.099823, lng: -94.578193 },
+  // Browsing without a seat (#150): a socket with no session, welcomed and shown
+  // the market, beside a signed-in buyer 40 m away whose seat is what it counts.
+  // The anonymous one never holds a seat on a strict server, so nothing here can
+  // pair with it — but it is still in a market of its own, because its whole
+  // assertion is an exact count of who is queued within its radius.
+  browseAnon: { lat: 35.4676, lng: -97.5164 },
+  browseSeated: { lat: 35.467723, lng: -97.515993 },
+  // The same, through the browser (`e2e/late-sign-in.spec.ts`): the signed-out
+  // page reads the count off the screen and is asked to sign in when it taps.
+  e2eBrowseAnon: { lat: 36.154, lng: -95.9928 },
+  e2eBrowseSeated: { lat: 36.154123, lng: -95.992393 },
 }
 
 // The "Protocol hygiene" socket (BUYERS.bad) deliberately reuses `robb`'s
@@ -425,6 +438,30 @@ export const SCENARIOS = {
     market: 'serverResolved',
     fixtures: [],
     what: 'a refused location prompt still pairs, placed by the server',
+  },
+  browseOnly: {
+    lane: 'smoke',
+    market: 'oklahomaCity',
+    fixtures: ['browseAnon', 'browseSeated'],
+    what:
+      'a socket with no session is welcomed, counted the market within its radius and never ' +
+      'sent the roster, and is refused a seat on the wire rather than paired (#150)',
+  },
+  e2eLateSignIn: {
+    lane: 'e2e',
+    market: 'tulsa',
+    fixtures: ['e2eBrowseAnon', 'e2eBrowseSeated'],
+    what:
+      'a signed-out page sees the count waiting within its radius, and tapping for a seat ' +
+      'brings up the sign-in interstitial instead of a queue (#150)',
+  },
+  e2eLateSignInResume: {
+    lane: 'e2e',
+    market: 'serverResolved',
+    fixtures: [],
+    what:
+      'back from the sign-in round trip, the buyer takes the seat they were taking with the ' +
+      'deal and sauces they chose — placed by the server, since a precise fix is not carried',
   },
   demoCheckPair: {
     lane: 'payments',

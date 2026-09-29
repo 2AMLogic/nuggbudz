@@ -8,7 +8,7 @@ import {
   parseDisputeRefundRequest,
   refundedRoles,
 } from '../shared/disputes'
-import type { BuyerRole, Settlement } from '../shared/economics'
+import type { BuyerRole, DealSpec, Settlement } from '../shared/economics'
 import { settle } from '../shared/economics'
 import {
   DEFAULT_EXPIRY_WINDOWS,
@@ -22,6 +22,18 @@ import {
 } from '../shared/expiry'
 import { DEFAULT_MATCH_RADIUS_METERS, distanceMeters, type LatLng, snapToGrid } from '../shared/geo'
 import { type HoldReason, parseHoldReason, parseHoldRetryRequest } from '../shared/holds'
+import {
+  HONEYPOT_BOW_OUT_MS,
+  HONEYPOT_COOLDOWN_MS,
+  HONEYPOT_FAREWELL,
+  HONEYPOT_POOL_SIZE,
+  type HoneypotBuyer,
+  type HoneypotSignalKind,
+  honeypotReply,
+  honeypotsEnabled,
+  isHoneypotUserId,
+  mintHoneypot,
+} from '../shared/honeypot'
 import { seatVerdict } from '../shared/identity'
 import { type LocationSource, parseCoords, parseLocationSource } from '../shared/location'
 import { type Candidate, findMatch } from '../shared/matchmaker'
@@ -48,6 +60,7 @@ import { anonSocketTag, slidingWindow, underConcurrencyCap } from '../shared/rat
 import { STANDING_TIEBREAK_WINDOW_MS, type StandingBand } from '../shared/reputation'
 import { parseSauceSelection, type SauceSelection } from '../shared/sauces'
 import { boolVar, type Env, intVar, stripeConfigured } from './env'
+import { recordHoneypotSignal } from './honeypot'
 import { type HeldMatch, writeDisputedMatch, writeHeldMatch, writeSettledMatch } from './ledger'
 import {
   allLegsPaid,
@@ -122,6 +135,28 @@ const TOMBSTONE_PREFIX = 'paytomb:'
 const PENDING_HOLD_PREFIX = 'holdfile:'
 
 /**
+ * Where this cell's decoy buyers live.
+ *
+ * Its own keyspace, like the tombstones and the parked holds, and for the
+ * sharpest version of the same reason: `matchRecords()` lists `match:` and feeds
+ * every sweep, and a decoy must never be visible to any of them. A honeypot is a
+ * queue entry with no socket behind it, so it cannot live in a hibernation
+ * attachment the way every real waiting buyer does — storage is the only place
+ * it can survive a cell being evicted.
+ */
+const HONEYPOT_PREFIX = 'honeypot:'
+
+/**
+ * How long a buyer who has just met a decoy is ineligible to meet another.
+ *
+ * The honesty line, kept per buyer rather than per cell: one phantom buddy is
+ * market seeding, and a buyer paired with a second and a third in a row is being
+ * kept in a queue by something that knows nobody is coming. Keyed on the user id
+ * so it survives the socket, the reconnect and the eviction.
+ */
+const HONEYPOT_COOLDOWN_PREFIX = 'hpcool:'
+
+/**
  * How long a tombstone that holds no money is kept.
  *
  * Only ever reached by a tombstone whose legs are all still `pending`: Stripe
@@ -193,6 +228,18 @@ type ConnState =
        * the match when the socket drops back to `principalOf`.
        */
       chatHits?: number[]
+      /**
+       * When this connection last tripped the chat limiter, if it has.
+       *
+       * Set on the refusal path and read only when a honeypot match is torn
+       * down, which is the one moment a storage read is already happening. That
+       * indirection is deliberate: #79 moved the limiter *ahead* of the record
+       * read so a flood costs no I/O, and filing a tripwire signal from inside
+       * the refusal would hand that cost straight back. It is a timestamp, never
+       * a message — the tripwire watching the chat channel must not be the thing
+       * that starts storing it.
+       */
+      floodedAt?: number
     } & BuyerIdentity)
 
 type WaitingState = Extract<ConnState, { status: 'waiting' }>
@@ -245,6 +292,15 @@ interface MatchRecord {
   disposition: PaymentDisposition
   /** The charges, once opened. Absent for every disposition but `charge`. */
   ledger?: PaymentLedger
+  /**
+   * How many lines a decoy has already said in this match, for a `honeypot`
+   * disposition and nothing else.
+   *
+   * A counter, never a transcript. It is here rather than on the socket because
+   * a decoy has no socket, and because the bound it enforces (`HONEYPOT_MAX_REPLIES`)
+   * is a fact about the match rather than about whoever is talking to it.
+   */
+  honeypotTurns?: number
 }
 
 /**
@@ -386,6 +442,136 @@ export class NuggPool extends DurableObject<Env> {
     })
   }
 
+  /**
+   * Whether this deployment seats decoys at all — one var, one question, and
+   * off unless an operator said otherwise. Read fresh, like every other var, so
+   * turning it off takes effect without a redeploy of anything else.
+   */
+  private get honeypotsAllowed(): boolean {
+    return honeypotsEnabled(this.env.HONEYPOT_BUYERS)
+  }
+
+  /**
+   * The decoys still standing in this cell, pruning any whose time is up.
+   *
+   * Answers an empty list *without touching storage* when the feature is off,
+   * which is the default and by far the common case: this is called from every
+   * roster broadcast, and a disabled feature must not cost a `list()` per join.
+   */
+  private async liveHoneypots(now: number): Promise<HoneypotBuyer[]> {
+    if (!this.honeypotsAllowed) return []
+    const listed = await this.ctx.storage.list<HoneypotBuyer>({ prefix: HONEYPOT_PREFIX })
+    const live: HoneypotBuyer[] = []
+    const stale: string[] = []
+    for (const [key, decoy] of listed) {
+      if (decoy.expiresAt <= now) stale.push(key)
+      else live.push(decoy)
+    }
+    if (stale.length > 0) await this.ctx.storage.delete(stale)
+    return live
+  }
+
+  /** The decoys inside a radius of a point, on any deal — the map's question. */
+  private nearbyHoneypots(at: LatLng, decoys: readonly HoneypotBuyer[]): HoneypotBuyer[] {
+    const radius = this.radiusMeters
+    return decoys.filter((decoy) => distanceMeters(at, decoy) <= radius)
+  }
+
+  /**
+   * Top this buyer's market up to `HONEYPOT_POOL_SIZE` decoys, and hand back
+   * every decoy in the cell afterwards.
+   *
+   * Stocked around the **buyer**, never around the cell: the shard is ~156 km
+   * across and the market is two miles, so a decoy seeded from the cell would be
+   * a dot nobody could reach and a count that lied. Topping up rather than
+   * minting per join is what stops a busy market from filling with phantoms —
+   * the target is a number of decoys near this buyer, not a number per arrival.
+   */
+  private async stockHoneypots(
+    at: LatLng,
+    dealId: string,
+    merchant: string,
+    now: number,
+  ): Promise<HoneypotBuyer[]> {
+    const live = await this.liveHoneypots(now)
+    if (!this.honeypotsAllowed) return live
+    const wanted = HONEYPOT_POOL_SIZE - this.nearbyHoneypots(at, live).length
+    if (wanted <= 0) return live
+
+    const minted: HoneypotBuyer[] = []
+    for (let i = 0; i < wanted; i++) {
+      const decoy = mintHoneypot({
+        id: crypto.randomUUID(),
+        dealId,
+        merchant,
+        origin: at,
+        radiusMeters: this.radiusMeters,
+        now,
+      })
+      await this.ctx.storage.put<HoneypotBuyer>(`${HONEYPOT_PREFIX}${decoy.id}`, decoy)
+      minted.push(decoy)
+    }
+    return [...live, ...minted]
+  }
+
+  /**
+   * Has this buyer met a decoy recently enough that another would be dishonest?
+   *
+   * Fails *closed* on a storage error, in the direction that costs a decoy
+   * rather than a buyer's evening: if we cannot tell whether somebody has
+   * already been stood up by a phantom, they have.
+   */
+  private async honeypotCooldown(userId: string, now: number): Promise<boolean> {
+    try {
+      const until = await this.ctx.storage.get<number>(`${HONEYPOT_COOLDOWN_PREFIX}${userId}`)
+      if (until === undefined) return false
+      if (until > now) return true
+      await this.ctx.storage.delete(`${HONEYPOT_COOLDOWN_PREFIX}${userId}`)
+      return false
+    } catch (error) {
+      console.error('honeypot cooldown read failed', error)
+      return true
+    }
+  }
+
+  /** Start this buyer's cooldown. Called the moment a decoy excuses itself. */
+  private async startHoneypotCooldown(userId: string, now: number): Promise<void> {
+    if (isHoneypotUserId(userId)) return
+    await this.ctx.storage.put<number>(
+      `${HONEYPOT_COOLDOWN_PREFIX}${userId}`,
+      now + HONEYPOT_COOLDOWN_MS,
+    )
+  }
+
+  /**
+   * File something a decoy saw, without ever letting it cost a handoff.
+   *
+   * Swallowed the way `recordStanding` is, and for a stronger reason: an abuse
+   * observation is the least important thing happening on this socket, and a D1
+   * outage must not turn one into a failed teardown.
+   */
+  private async noteHoneypotSignal(
+    record: MatchRecord,
+    actorUserId: string,
+    kind: HoneypotSignalKind,
+    at: number,
+  ): Promise<void> {
+    const decoy = honeypotSideOf(record)
+    if (decoy === null) return
+    try {
+      await recordHoneypotSignal(this.env.DB, {
+        matchId: record.matchId,
+        cell: record.cell,
+        honeypotUserId: record[decoy].userId,
+        actorUserId,
+        kind,
+        observedAt: at,
+      })
+    } catch (error) {
+      console.error('honeypot signal write failed', record.matchId, kind, error)
+    }
+  }
+
   override async fetch(request: Request): Promise<Response> {
     // Four ways in: a buyer's socket, a signature-verified Stripe event the
     // Worker forwarded here because this instance owns the match, an operator's
@@ -451,6 +637,10 @@ export class NuggPool extends DurableObject<Env> {
       locationSource,
     })
 
+    // One read of the decoy keyspace for both messages below, so the count in
+    // `welcome` and the count in `market` can never disagree with each other.
+    const decoys = await this.liveHoneypots(Date.now())
+
     this.send(server, {
       type: 'welcome',
       protocol: PROTOCOL_VERSION,
@@ -465,7 +655,12 @@ export class NuggPool extends DurableObject<Env> {
       // Scoped to the radius, not the shard, for the same reason `sendWaiting`
       // is: at this precision the shard is a region, and "42 waiting" two
       // counties away is not a fact about anybody's night.
-      waiting: this.withinRadius(origin).length,
+      //
+      // Decoys are counted here exactly as they are on the map, which is the
+      // whole point of them: a market with one buyer in it is indistinguishable
+      // from a broken app, and a count that excluded them would contradict the
+      // dots drawn from the same set.
+      waiting: this.withinRadius(origin).length + this.nearbyHoneypots(origin, decoys).length,
       user: { id: userId, name },
       expiry: this.windows,
       pickupTimeoutMs: this.pickupTimeoutMs,
@@ -473,7 +668,7 @@ export class NuggPool extends DurableObject<Env> {
     // Every socket starts without a seat, so it is shown the market the way
     // every idle socket is — counts, never the roster. A socket about to be
     // adopted into a live handoff below gets this too and simply moves past it.
-    this.send(server, this.marketAround(origin))
+    this.send(server, this.marketAround(origin, decoys))
 
     await this.adoptLiveHandoff(server, userId, connId)
 
@@ -624,6 +819,11 @@ export class NuggPool extends DurableObject<Env> {
     // less informative there: it still tells the caller to stop.
     const verdict = slidingWindow(state.chatHits ?? [], now, CHAT_RATE_WINDOW_MS, CHAT_RATE_LIMIT)
     if (!verdict.allowed) {
+      // Stamped on the connection, not filed as a signal here: filing one would
+      // need the match record, and the read this check sits in front of is
+      // exactly the I/O #79 moved out of the refusal path. `bowOutHoneypot`
+      // reads it back at the one moment it is already holding the record.
+      this.setState(ws, { ...state, floodedAt: now })
       this.fail(
         ws,
         'chat_rate_limited',
@@ -656,6 +856,15 @@ export class NuggPool extends DurableObject<Env> {
       } else {
         this.fail(ws, 'chat_empty', 'there was nothing readable in that message')
       }
+      return
+    }
+
+    // A decoy has no socket to relay to, so it answers instead. Nothing about
+    // the never-stored promise changes: the reply is composed in memory from a
+    // fixed table (`honeypotReply`) and the line that prompted it is not kept,
+    // forwarded or written anywhere.
+    if (record.disposition === 'honeypot') {
+      await this.replyAsHoneypot(ws, state, record, reviewed.text, now)
       return
     }
 
@@ -704,6 +913,22 @@ export class NuggPool extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     const now = Date.now()
     const records = await this.matchRecords()
+
+    // Decoys bow out first, and well before either of the two sweeps below could
+    // reach one: the expiry sweep would cancel the match and charge the *real*
+    // buyer a `late_cancel` for a pairing that was never real. The deadline is
+    // keyed on the record's own disposition rather than on the feature flag, so
+    // a decoy match already in flight still ends properly if an operator turns
+    // honeypots off underneath it.
+    for (const record of [...records.values()]) {
+      if (record.status !== 'pending') continue
+      if (record.disposition !== 'honeypot') continue
+      if (now - record.createdAt < HONEYPOT_BOW_OUT_MS) continue
+      await this.bowOutHoneypot(record, now)
+      records.delete(record.matchId)
+    }
+    await this.sweepHoneypots(now)
+
     for (const record of [...records.values()]) {
       if (record.status !== 'pending') continue
       if (!isPickupDisputed(record.confirmations, now, this.pickupTimeoutMs)) continue
@@ -863,7 +1088,7 @@ export class NuggPool extends DurableObject<Env> {
 
     // Anyone dropped has left everyone else's roster, so the map dots and pool
     // counts still showing them have to be refreshed.
-    if (plan.expire.length > 0 || plan.cancel.length > 0) this.broadcastWaiting()
+    if (plan.expire.length > 0 || plan.cancel.length > 0) await this.broadcastWaiting()
   }
 
   /**
@@ -900,7 +1125,11 @@ export class NuggPool extends DurableObject<Env> {
     // to read the code off them, so a receiver who turned up to nobody *cannot*
     // confirm; counting that against them would punish them for the other
     // buddy's no-show.
-    if (record !== undefined) {
+    // Never for a decoy pairing. The bow-out deadline is minutes ahead of this
+    // sweep so one should not get here at all, but a `late_cancel` booked
+    // against a real buyer for failing to meet a buddy the server invented would
+    // be the worst possible way to find out otherwise.
+    if (record !== undefined && record.disposition !== 'honeypot') {
       await this.recordStanding([{ userId: record.orderer.userId, event: 'late_cancel' }])
     }
 
@@ -1062,9 +1291,23 @@ export class NuggPool extends DurableObject<Env> {
       identity.userId,
       ...others.map((o) => o.state.userId),
     ])
+
+    // Stock the market with decoys *before* looking for a buddy, so a buyer
+    // arriving in an empty city has something on the map either way. They are
+    // put in front of the matcher as fallbacks only — `findMatch` drops every
+    // one of them the moment a real buyer is eligible — and not at all for a
+    // buyer who has just been stood up by one.
+    const decoys = await this.stockHoneypots(identity, dealId, deal.merchant, identity.joinedAt)
+    const cooling =
+      decoys.length === 0 || (await this.honeypotCooldown(identity.userId, identity.joinedAt))
+    const offered = cooling ? [] : this.nearbyHoneypots(identity, decoys)
+
     const decision = findMatch(
       toCandidate(identity, standings),
-      others.map((o) => toCandidate(o.state, standings)),
+      [
+        ...others.map((o) => toCandidate(o.state, standings)),
+        ...offered.map((decoy) => honeypotCandidate(decoy)),
+      ],
       this.radiusMeters,
       this.standingTiebreakMs,
     )
@@ -1077,6 +1320,16 @@ export class NuggPool extends DurableObject<Env> {
     // The buddy is whichever of the pair is not this connection.
     const buddyConnId =
       decision.orderer.id === identity.connId ? decision.receiver.id : decision.orderer.id
+
+    // A decoy, which has no socket and therefore none of the code below applies
+    // to it. Answered before the socket lookup rather than after, so a decoy can
+    // never be mistaken for a buddy who vanished.
+    const decoy = offered.find((entry) => entry.id === buddyConnId)
+    if (decoy !== undefined) {
+      await this.matchHoneypot(ws, identity, decoy, deal, decision.distanceMeters)
+      return
+    }
+
     const buddy = others.find((o) => o.state.connId === buddyConnId)
     if (buddy === undefined) {
       // Buddy vanished between the scan and here. Queue instead of pairing with a ghost.
@@ -1167,13 +1420,251 @@ export class NuggPool extends DurableObject<Env> {
     // Two buyers just left the waiting pool: everyone still queued in this
     // cell needs the roster refreshed, or their map would keep showing dots
     // for buddies who are no longer waiting.
-    this.broadcastWaiting()
+    await this.broadcastWaiting()
     // The match now has a confirmation deadline of its own.
     await this.scheduleSweep()
 
     // Last, so a processor that will not open the charges tears down a match
     // that was otherwise fully consistent.
     await this.startPayments(matchId, disposition, deal.label, settlement)
+  }
+
+  /**
+   * Pair a real buyer with a decoy.
+   *
+   * A deliberately separate path from `handleJoin`'s pairing rather than a
+   * branch inside it, because almost nothing about the other one applies: there
+   * is one socket, not two; there is no second standing to read; there is no
+   * payment to open; and there is no code to release. Sharing the code would
+   * mean every future change to real pairing silently applied here too, which is
+   * exactly how a decoy would eventually acquire a charge or a pickup code.
+   *
+   * Three things are load-bearing:
+   *
+   * - **The buyer is always the orderer.** `findMatch` guarantees it, and it is
+   *   re-derived here from the record rather than assumed. A buyer told to walk
+   *   somewhere and meet a person who does not exist is the thing this feature
+   *   must never do; holding a code you never get to use is merely a
+   *   disappointment.
+   * - **The disposition is asserted, not assumed.** If the money gate ever
+   *   answered anything but `honeypot` for a pair containing one, the right
+   *   response is no match at all — not a match this code believes is free.
+   * - **No pickup code reaches the wire.** `codeAtMatchTime('honeypot')` is
+   *   false, so `codeFor` would answer null anyway; it is written as a literal
+   *   here so a reader does not have to go and check.
+   */
+  private async matchHoneypot(
+    ws: WebSocket,
+    identity: BuyerIdentity,
+    decoy: HoneypotBuyer,
+    deal: DealSpec,
+    distance: number,
+  ): Promise<void> {
+    const disposition = this.dispositionFor({ orderer: identity.userId, receiver: decoy.userId })
+    if (disposition !== 'honeypot') {
+      // Unreachable while `paymentDisposition` answers identity first, which is
+      // the property `test/payments.test.ts` pins. Queue rather than pair: a
+      // decoy this pool might charge for is a decoy it must not seat.
+      console.error('NuggPool: refusing a decoy pairing that answered %s', disposition)
+      await this.enqueue(ws, identity)
+      return
+    }
+
+    const matchId = crypto.randomUUID()
+    const now = Date.now()
+    const settlement = settle(deal, 2)
+
+    // Off the roster the instant it is matched, exactly as a real buyer's socket
+    // leaves `waitingStates()`. A decoy in two places at once would be shown as
+    // a dot it is no longer standing on and offered to the next joiner as a
+    // buddy it cannot be.
+    await this.ctx.storage.delete(`${HONEYPOT_PREFIX}${decoy.id}`)
+
+    await this.ctx.storage.put<MatchRecord>(`match:${matchId}`, {
+      matchId,
+      dealId: deal.id,
+      cell: identity.cell,
+      createdAt: now,
+      distanceMeters: distance,
+      orderer: buyerOf(identity),
+      receiver: { connId: decoy.id, userId: decoy.userId, name: decoy.name },
+      // Random like any other, and never sent anywhere. A record whose code was
+      // a sentinel (`''`, say) would be a record a mistyped comparison could
+      // satisfy.
+      pickupCode: generatePickupCode(),
+      confirmations: noConfirmations(),
+      status: 'pending',
+      settlement,
+      settledAt: null,
+      disputedAt: null,
+      disposition,
+      honeypotTurns: 0,
+    })
+
+    this.setState(ws, { ...identity, status: 'matched', matchId, role: 'orderer' })
+    this.send(ws, {
+      type: 'matched',
+      matchId,
+      role: 'orderer',
+      share: settlement.shares[0],
+      settlement,
+      buddy: {
+        name: decoy.name,
+        distanceMeters: distance,
+        sauces: decoy.sauces,
+        // A decoy has no history to have a band derived from, and `new` is the
+        // band for exactly that — the same answer `standingsFor` would give.
+        standing: 'new',
+      },
+      pickupCode: null,
+    })
+
+    await this.broadcastWaiting()
+    // The match now has a bow-out deadline of its own; see `scheduleSweep`.
+    await this.scheduleSweep()
+  }
+
+  /**
+   * A decoy excuses itself, and the buyer goes back to the queue.
+   *
+   * **This is the honesty line expressed as code.** A honeypot that simply
+   * stopped answering would leave a real buyer holding a match until something
+   * else tore it down, and the teardown that catches a match somebody has
+   * confirmed is `disputeMatch`, which deliberately does *not* refund. So the
+   * decoy says the true thing — this is not happening — and the match ends
+   * through the refunding teardown a buddy who walks away produces, which is
+   * `buddy_left`.
+   *
+   * Reachable from two places and no others: the bow-out deadline in `alarm`,
+   * and a buyer who taps confirm or talks past the decoy's last line. The timer
+   * is the guarantee; the other two are only ever earlier.
+   *
+   * The dispute path is unreachable from here rather than merely avoided. A
+   * honeypot match never releases a pickup code, so `handleConfirmPickup`
+   * records no confirmation, so `confirmedRole` is null on every route into
+   * `disputeMatch` — nothing about that depends on this method running in time.
+   */
+  private async bowOutHoneypot(record: MatchRecord, now: number): Promise<void> {
+    const side = honeypotSideOf(record)
+    if (side === null) return
+    const decoy = record[side]
+
+    // The excuse first, on the same frame type a real buddy's line arrives on,
+    // so the buyer reads a reason rather than watching somebody evaporate.
+    for (const peer of this.matchSockets(record.matchId)) {
+      this.send(peer.ws, {
+        type: 'chat_message',
+        matchId: record.matchId,
+        from: side,
+        name: decoy.name,
+        text: HONEYPOT_FAREWELL,
+        at: now,
+      })
+      // Anything a decoy saw is filed here, at the one teardown every honeypot
+      // match passes through, rather than from the refusal that observed it —
+      // see `floodedAt`.
+      if (peer.state.floodedAt !== undefined) {
+        await this.noteHoneypotSignal(record, peer.state.userId, 'chat_flood', now)
+      }
+    }
+
+    // Defensive: a honeypot match never opens charges (`startPayments` returns
+    // before Stripe is read), so there is normally no ledger at all. If one
+    // somehow existed, this teardown refunds it like every other non-dispute.
+    let retired = record
+    let held: PaymentLeg[] = []
+    if (record.ledger !== undefined) {
+      const settled = await this.settleRefunds(record.matchId, record.ledger)
+      retired = { ...record, ledger: settled.ledger }
+      held = settled.held
+      await this.ctx.storage.put<MatchRecord>(`match:${record.matchId}`, retired)
+    }
+
+    // No `recordStanding` here, deliberately and unlike every other teardown:
+    // nobody failed to turn up, because nobody was ever coming. A `late_cancel`
+    // on a real buyer's account for a pairing that was never real would be the
+    // server marking somebody down for its own decoy.
+    await this.startHoneypotCooldown(record.orderer.userId, now)
+    await this.startHoneypotCooldown(record.receiver.userId, now)
+
+    for (const peer of this.matchSockets(record.matchId)) {
+      this.setState(peer.ws, {
+        ...identityOf(peer.state),
+        status: 'waiting',
+        // At the back of the queue, like every other requeue: a buyer returned
+        // by a decoy must not jump the buyers who waited honestly.
+        joinedAt: now,
+        lastSeenAt: now,
+        warned: false,
+      })
+      this.send(peer.ws, {
+        type: 'buddy_left',
+        matchId: record.matchId,
+        heldCents: centsFor(held, peer.state.role),
+      })
+    }
+
+    await this.retireMatch(record.matchId, retired, 'buddy_left')
+    await this.broadcastWaiting()
+    await this.scheduleSweep()
+  }
+
+  /**
+   * Answer one line of chat on a decoy's behalf.
+   *
+   * The composition is `honeypotReply`: pure, synchronous, offline and
+   * deterministic, reading the incoming line in memory to pick one of a handful
+   * of canned answers. **Nothing is stored and nothing leaves the Worker.** That
+   * is a decision rather than a shortcut — handing a buyer's line to a language
+   * model would make the sentence under the chat box ("Messages go straight to
+   * your bud and nowhere else — not to the ledger, not to us") false, and would
+   * need that sentence changed before the feature shipped.
+   *
+   * The only thing written is a *count* of replies, on the match record, which
+   * is what bounds the conversation. A decoy that has run out of things to say
+   * bows out rather than repeating itself: a conversation that could run forever
+   * is a conversation that keeps somebody standing somewhere.
+   */
+  private async replyAsHoneypot(
+    ws: WebSocket,
+    state: MatchedState,
+    record: MatchRecord,
+    text: string,
+    now: number,
+  ): Promise<void> {
+    const side = honeypotSideOf(record)
+    if (side === null) return
+
+    // Echoed to the sender first, exactly as the two-socket relay does, so both
+    // halves of the transcript are the server's canonical sanitized text.
+    this.send(ws, {
+      type: 'chat_message',
+      matchId: record.matchId,
+      from: state.role,
+      name: state.name,
+      text,
+      at: now,
+    })
+
+    const turn = record.honeypotTurns ?? 0
+    const reply = honeypotReply(text, turn)
+    if (reply === null) {
+      await this.bowOutHoneypot(record, now)
+      return
+    }
+
+    await this.ctx.storage.put<MatchRecord>(`match:${record.matchId}`, {
+      ...record,
+      honeypotTurns: turn + 1,
+    })
+    this.send(ws, {
+      type: 'chat_message',
+      matchId: record.matchId,
+      from: side,
+      name: record[side].name,
+      text: reply,
+      at: now,
+    })
   }
 
   /**
@@ -1185,8 +1676,8 @@ export class NuggPool extends DurableObject<Env> {
    *
    * Nothing but a `charge` disposition reaches Stripe. That is enforced here, on
    * the one path that talks to the processor, rather than by a predicate a future
-   * caller has to remember to ask: a demo pair returns before `this.stripe` is
-   * even read.
+   * caller has to remember to ask: a demo pair — and a decoy pairing — returns
+   * before `this.stripe` is even read.
    */
   private async startPayments(
     matchId: string,
@@ -1194,7 +1685,7 @@ export class NuggPool extends DurableObject<Env> {
     dealLabel: string,
     settlement: Settlement,
   ): Promise<void> {
-    if (disposition === 'demo' || disposition === 'uncharged') return
+    if (disposition === 'honeypot' || disposition === 'demo' || disposition === 'uncharged') return
     const stripe = disposition === 'charge' ? this.stripe : null
     if (stripe === null) {
       // Either `refuse`, or a secret that vanished between the join check and
@@ -1276,7 +1767,7 @@ export class NuggPool extends DurableObject<Env> {
       this.setState(peer.ws, principalOf(peer.state))
     }
     await this.retireMatch(matchId, retired, 'payment_unavailable')
-    this.broadcastWaiting()
+    await this.broadcastWaiting()
     await this.scheduleSweep()
   }
 
@@ -1432,7 +1923,7 @@ export class NuggPool extends DurableObject<Env> {
     }
 
     await this.retireMatch(record.matchId, retired, 'payment_failed')
-    this.broadcastWaiting()
+    await this.broadcastWaiting()
     await this.scheduleSweep()
   }
 
@@ -1525,6 +2016,28 @@ export class NuggPool extends DurableObject<Env> {
   private async reconcileHolds(): Promise<void> {
     const parked = await this.ctx.storage.list<HeldMatch>({ prefix: PENDING_HOLD_PREFIX })
     for (const held of parked.values()) await this.fileHold(held)
+  }
+
+  /**
+   * Clear decoys and their cooldowns off this cell.
+   *
+   * `liveHoneypots` prunes what has expired on every read, which covers the
+   * feature while it is *on*. This covers the two cases that read does not: a
+   * deployment where it was turned off (where the read deliberately never
+   * touches storage, so nothing would ever be pruned), and cooldown keys, which
+   * no roster read looks at. Opportunistic rather than scheduled, like the
+   * tombstone sweep — nobody is waiting on it, and a cell with nothing but
+   * decoys in it arms no alarm and needs none.
+   */
+  private async sweepHoneypots(now: number): Promise<void> {
+    if (!this.honeypotsAllowed) {
+      const listed = await this.ctx.storage.list({ prefix: HONEYPOT_PREFIX })
+      const keys = [...listed.keys()]
+      if (keys.length > 0) await this.ctx.storage.delete(keys)
+    }
+    const cooldowns = await this.ctx.storage.list<number>({ prefix: HONEYPOT_COOLDOWN_PREFIX })
+    const done = [...cooldowns].filter(([, until]) => until <= now).map(([key]) => key)
+    if (done.length > 0) await this.ctx.storage.delete(done)
   }
 
   /**
@@ -1640,7 +2153,7 @@ export class NuggPool extends DurableObject<Env> {
       warned: false,
     }
     this.setState(ws, waiting)
-    this.broadcastWaiting()
+    await this.broadcastWaiting()
     await this.scheduleSweep()
   }
 
@@ -1685,6 +2198,23 @@ export class NuggPool extends DurableObject<Env> {
     }
     if (record.status === 'complete') {
       this.fail(ws, 'already_confirmed', 'this match is already settled')
+      return
+    }
+    // A decoy cannot be handed a box, so there is nothing here to confirm. The
+    // match bows out on the spot rather than answering an error: the buyer has
+    // just said the handoff happened, and the true answer is that their bud is
+    // not coming — not "wait for the payment to clear", which is what the gate
+    // below would tell them.
+    //
+    // The code is the tripwire. A honeypot match never releases one and this
+    // app's own client sends `null` for an orderer, so a non-null code here is
+    // somebody trying values against the handshake. Recorded, and the teardown
+    // is identical either way — nothing a caller does changes the outcome, which
+    // is what keeps the observation worth having.
+    if (record.disposition === 'honeypot') {
+      const at = Date.now()
+      if (code !== null) await this.noteHoneypotSignal(record, state.userId, 'code_guess', at)
+      await this.bowOutHoneypot(record, at)
       return
     }
     // Money before nuggets. Both sides confirming is the only route to a D1
@@ -1899,7 +2429,7 @@ export class NuggPool extends DurableObject<Env> {
     }
     this.setState(ws, principalOf(state))
     // One fewer dot on everyone else's map.
-    this.broadcastWaiting()
+    await this.broadcastWaiting()
     await this.scheduleSweep()
   }
 
@@ -1930,7 +2460,7 @@ export class NuggPool extends DurableObject<Env> {
       // everyone else's roster — and may have been the last thing keeping this
       // cell's alarm armed.
       if (state.status === 'waiting') {
-        this.broadcastWaiting()
+        await this.broadcastWaiting()
         await this.scheduleSweep()
       }
       return
@@ -1961,8 +2491,11 @@ export class NuggPool extends DurableObject<Env> {
     // Matched, nobody had confirmed anything, and this is the socket that went
     // away: a cancellation after a match, charged to whoever walked. Unlike the
     // expiry path above there is no guessing here — the connection that closed
-    // is the one being counted.
-    await this.recordStanding([{ userId: state.userId, event: 'late_cancel' }])
+    // is the one being counted. Except against a decoy, where there was never
+    // anybody to walk away from.
+    if (record?.disposition !== 'honeypot') {
+      await this.recordStanding([{ userId: state.userId, event: 'late_cancel' }])
+    }
 
     for (const other of this.states()) {
       if (other.ws === ws) continue
@@ -1995,7 +2528,7 @@ export class NuggPool extends DurableObject<Env> {
     // buddy dots) from before they were matched, which for an instant match
     // is zero — and it also tells everyone nearby about the buyer who just got
     // requeued.
-    this.broadcastWaiting()
+    await this.broadcastWaiting()
     // The requeued buddy is back under the queue's idle timer, and the match's
     // own deadline is gone with the record.
     await this.scheduleSweep()
@@ -2011,21 +2544,29 @@ export class NuggPool extends DurableObject<Env> {
    * much larger privacy surface than the map it draws — a buyer fifty miles
    * away, who could never be matched here, is simply invisible.
    */
-  private sendWaiting(ws: WebSocket, state: WaitingState): void {
+  private sendWaiting(ws: WebSocket, state: WaitingState, decoys: readonly HoneypotBuyer[]): void {
     const nearby = this.withinRadius(state, state.connId)
     const eligible = nearby.filter((o) => o.state.dealId === state.dealId)
+    // Decoys go through exactly the same two filters as everybody else — radius
+    // for the map, radius *and* deal for the count — because being
+    // indistinguishable from a real waiting buyer on the map is the entire
+    // cold-start job. What is never indistinguishable is the outcome.
+    const decoysNear = this.nearbyHoneypots(state, decoys)
+    const decoysEligible = decoysNear.filter((decoy) => decoy.dealId === state.dealId)
     // The map roster is every deal within the radius, not just this buyer's: one
     // market can host more than one deal's queue at once, and the point of the
     // map is to explain the market rather than to show who could pair.
-    const buddies = nearby
+    const buddies = [...nearby.map((o) => o.state), ...decoysNear]
       // Quantized here, at the one chokepoint every waiting broadcast passes
       // through, so a buyer's exact position never reaches the wire.
-      .map((o) => snapToGrid(o.state))
+      .map((at) => snapToGrid(at))
 
     this.send(ws, {
       type: 'waiting',
-      waiting: eligible.length + 1,
-      queuedAhead: eligible.filter((o) => o.state.joinedAt < state.joinedAt).length,
+      waiting: eligible.length + decoysEligible.length + 1,
+      queuedAhead:
+        eligible.filter((o) => o.state.joinedAt < state.joinedAt).length +
+        decoysEligible.filter((decoy) => decoy.joinedAt < state.joinedAt).length,
       buddies,
     })
   }
@@ -2038,12 +2579,19 @@ export class NuggPool extends DurableObject<Env> {
    * roster — even of snapped, nameless dots — handed to anybody who connects
    * would make the positions of the people waiting near you free to scrape.
    * The dots are for buyers who took a seat.
+   *
+   * Decoys are counted here for the same reason `welcome` counts them: the two
+   * messages go to the same socket back to back, so a count that included them
+   * in one and not the other would contradict itself on screen. They are still
+   * only a *count* — a seatless socket never gets the roster either way.
    */
-  private marketAround(at: LatLng): MarketMessage {
+  private marketAround(at: LatLng, decoys: readonly HoneypotBuyer[]): MarketMessage {
     const nearby = this.withinRadius(at)
+    const decoysNear = this.nearbyHoneypots(at, decoys)
     const byDeal: Record<string, number> = {}
     for (const { state } of nearby) byDeal[state.dealId] = (byDeal[state.dealId] ?? 0) + 1
-    return { type: 'market', waiting: nearby.length, byDeal }
+    for (const decoy of decoysNear) byDeal[decoy.dealId] = (byDeal[decoy.dealId] ?? 0) + 1
+    return { type: 'market', waiting: nearby.length + decoysNear.length, byDeal }
   }
 
   /**
@@ -2159,6 +2707,13 @@ export class NuggPool extends DurableObject<Env> {
 
     for (const record of matchRecords) {
       if (record.status !== 'pending') continue
+      // A decoy's bow-out is a third match deadline, disjoint from the other two
+      // by construction: a honeypot match can never carry a confirmation (no
+      // pickup code is ever released for one), so `disputeDeadline` is always
+      // null for it, and `expirableMatches`' ten-minute window is far behind
+      // this one. It is the guarantee behind "a honeypot bows out, never goes
+      // silent" — the chat and confirm paths only ever get there sooner.
+      if (record.disposition === 'honeypot') dueAt(record.createdAt + HONEYPOT_BOW_OUT_MS)
       dueAt(disputeDeadline(record.confirmations, this.pickupTimeoutMs))
     }
 
@@ -2203,11 +2758,17 @@ export class NuggPool extends DurableObject<Env> {
    * recipient, so two buyers in one shard and forty miles apart get genuinely
    * different answers. A matched socket is told nothing — it is looking at a
    * receipt, not a market.
+   *
+   * The decoy roster is read once for the whole broadcast rather than once per
+   * recipient — a decoy has no socket, so its state lives in storage, and a
+   * `list()` per recipient would make a busy cell quadratic in its own queue.
+   * It costs nothing at all when the feature is off.
    */
-  private broadcastWaiting(): void {
+  private async broadcastWaiting(): Promise<void> {
+    const decoys = await this.liveHoneypots(Date.now())
     for (const { ws, state } of this.states()) {
-      if (state.status === 'waiting') this.sendWaiting(ws, state)
-      else if (state.status === 'idle') this.send(ws, this.marketAround(state.origin))
+      if (state.status === 'waiting') this.sendWaiting(ws, state, decoys)
+      else if (state.status === 'idle') this.send(ws, this.marketAround(state.origin, decoys))
     }
   }
 
@@ -2301,6 +2862,35 @@ function principalOf(state: Principal): ConnState {
 function buyerOf(identity: BuyerIdentity): MatchBuyer {
   const { connId, userId, name } = identity
   return { connId, userId, name }
+}
+
+/**
+ * Which side of a match is the decoy, or null when neither is.
+ *
+ * Derived from the *identity* rather than from the role, even though `findMatch`
+ * guarantees a decoy is always the receiver. The guarantee is worth having and
+ * worth not depending on twice: the money gate already reads these two ids, and
+ * a second place that answered "which side is fake" from a different fact is a
+ * second place they could disagree.
+ */
+function honeypotSideOf(record: MatchRecord): BuyerRole | null {
+  if (isHoneypotUserId(record.receiver.userId)) return 'receiver'
+  if (isHoneypotUserId(record.orderer.userId)) return 'orderer'
+  return null
+}
+
+/** A decoy as the matcher sees it: a queue entry that is never preferred. */
+function honeypotCandidate(decoy: HoneypotBuyer): Candidate {
+  return {
+    id: decoy.id,
+    dealId: decoy.dealId,
+    lat: decoy.lat,
+    lng: decoy.lng,
+    joinedAt: decoy.joinedAt,
+    // No standing, ever. A decoy has no history, and a band on one would be the
+    // server inventing a reputation to win a tiebreak it is not allowed to enter.
+    honeypot: true,
+  }
 }
 
 function toCandidate(

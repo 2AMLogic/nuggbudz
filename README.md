@@ -148,6 +148,12 @@ pairing, put `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars`; without it (and
 without Stripe secrets) a join is refused with `payment_unavailable` rather than
 quietly pairing for free.
 
+`HONEYPOT_BUYERS="1"` in `.dev.vars` seats decoy buyers so a lone browser sees a
+market rather than an empty circle — see
+[Honeypot buyers](#honeypot-buyers) for what they can and, more importantly,
+cannot do. It is off by default everywhere, including in every test lane, so a
+suite that expects an empty market stays correct.
+
 Add `POOL_UPGRADE_LIMIT="300"` there too before running `pnpm test:e2e`, and
 `POOL_ANON_UPGRADE_LIMIT="300"` beside it. The socket limiter keys on
 `CF-Connecting-IP`, which `pnpm dev` never sets, so every local client shares the
@@ -160,6 +166,7 @@ pnpm test             # pure logic: settlement, geo, matchmaking, auth, protocol
 pnpm dev --port 5199  # in one shell…
 pnpm smoke            # …then end-to-end pairing in another
 pnpm payment-gate     # …and the money gate, in whichever mode that server is in
+pnpm honeypot-check   # …and decoy buyers, in whichever mode that server is in
 pnpm typecheck
 pnpm lint
 ```
@@ -506,6 +513,126 @@ pool socket now requires one and an OAuth round trip cannot be driven
 unattended. It therefore runs against `pnpm dev`, not against a deployment; the
 REST surface of a deployment can still be checked with
 `curl https://nuggbudz.personal-account-251.workers.dev/api/health`.
+
+### Honeypot buyers
+
+A market with one buyer in it is indistinguishable from a broken app. The first
+person to open NuggBudz in a new city sees a circle, their own dot and nothing —
+and the thing they are being asked to believe is precisely that somebody else is
+nearby. Separately, nothing in the pool could tell a buyer from something
+enumerating the roster or messaging every buddy it was shown.
+
+A **honeypot** is a decoy buyer that answers both. It appears in `waiting` counts
+and as a dot, indistinguishable on the map from a real waiting buyer — that is
+the point — it can be matched, and it can hold a short conversation. It can
+**never** complete a pair.
+
+```bash
+HONEYPOT_BUYERS="1"     # in .dev.vars, or `wrangler deploy --var HONEYPOT_BUYERS:1`
+```
+
+**That one var answers exactly one question — "do decoys run on this
+deployment?" — and it is off unless somebody set it.** It is deliberately
+independent of `ALLOW_DEMO_PAIRING`, of `ALLOW_UNCHARGED_PAIRING` and of whether
+Stripe is configured. Running decoys on a charged production deployment is
+therefore an explicit decision rather than a side effect of which environment
+variable happens to be set — and what makes that decision *safe* is the money
+gate, never the flag.
+
+#### It cannot take money, and it cannot settle
+
+`paymentDisposition` answers `honeypot` from the two user ids **before the Stripe
+secrets are consulted**, exactly as it answers `demo` — so a decoy on a fully
+configured deployment cannot reach the processor. From there the rest follows
+structurally rather than by timing:
+
+- `codeAtMatchTime('honeypot')` is **false**, so no pickup code is ever released.
+- No code released ⇒ `handleConfirmPickup` refuses ⇒ no confirmation is ever
+  recorded.
+- No confirmation ⇒ `bothConfirmed` never fires ⇒ **no `matches` row**, and every
+  route into `disputeMatch` requires one side to have confirmed ⇒ **no `disputes`
+  row**.
+- No charge ⇒ no ledger ⇒ **no `holds` row** either.
+- And no reputation counter: the teardown below books none, and the two other
+  teardowns that could reach a decoy match (`cancelMatch`, `handleDisconnect`)
+  both name it and skip the `late_cancel` they would otherwise charge the real
+  buyer.
+
+#### It excuses itself; it never goes silent
+
+This is the honesty line, and it is the part that would be easiest to get wrong.
+A dispute **holds the money** on purpose (see above), and a decoy that simply
+stopped answering would walk a real buyer straight into that hold. So a decoy
+says the true thing — that it cannot make it — and the match ends through the
+**refunding** teardown a buddy who walks away produces (`buddy_left`). The buyer
+is returned to the queue, at the back, with no money moved and nothing on their
+record.
+
+It happens within `HONEYPOT_BOW_OUT_MS` (45 s), which is armed as a real alarm
+deadline and is far inside the ten-minute unconfirmed-match window that would
+otherwise cancel the match and charge the buyer for it. Tapping "Handed it over",
+or talking past the decoy's last line, only ever gets there sooner.
+
+And a buyer meets **at most one decoy per half hour** in a market
+(`HONEYPOT_COOLDOWN_MS`). One phantom buddy is ordinary market seeding; a buyer
+paired with a second and a third in a row is being kept in a queue by something
+that knows nobody is coming.
+
+#### It is a fallback in matching, never a competitor
+
+`findMatch` drops every decoy from contention the moment any real buyer is
+eligible, before the starvation-free fairness window is applied — so the window
+is computed over real buyers only and every pairing that could have been real
+still is. A chosen decoy is always the **receiver**, whatever it claims to have
+waited: the orderer walks to a counter and stands there, and a buyer told to go
+and meet somebody who does not exist is the thing this must never do.
+`test/matchmaker.test.ts` drives that as a two-hundred-round simulation with
+decoys restocked throughout.
+
+#### Chat: canned, offline, and still never stored
+
+A decoy answers from a **fixed table** in `shared/honeypot.ts` — pure,
+synchronous, deterministic, no model, no network. That is a deliberate decision
+and not a shortcut. The sentence under the chat box says a message goes to your
+bud "and nowhere else — not to the ledger, not to us"; handing a buyer's line to
+a language model would make that sentence false and would have needed the
+sentence changed first. As built, the line is read in memory to pick one of a
+handful of replies and is kept nowhere, so `pnpm smoke`'s never-stored scan is
+as true for a decoy conversation as for a real one. The only thing persisted is
+a *count* of replies, which is what bounds the conversation.
+
+#### The tripwire, and what a human does with it
+
+```
+GET /api/admin/honeypot?actor=<users.id>&sinceMs=<epoch>&limit=<n>
+```
+
+Behind the same `OPERATOR_USER_IDS` allowlist as disputes and holds, and
+**read-only**: a signal is an *observation*, not a case. There is nothing to
+resolve and no action endpoint, because nobody decided anything.
+
+Two kinds are recorded, and both are behaviours no legitimate client produces:
+
+| kind | what it means |
+|---|---|
+| `chat_flood` | the per-connection chat limiter tripped against a decoy. Six messages in ten seconds is not two strangers arranging to meet. |
+| `code_guess` | a `confirm_pickup` carrying a pickup code for a match that never released one. The app's own client sends `null` there. |
+
+"Was matched with a decoy" is deliberately **not** a signal: that is the ordinary
+cold-start case and would drown the queue on day one.
+
+**Read it like this.** An empty list is the normal answer and is itself
+informative. A handful of rows from many different `actorUserId`s is noise —
+clients retrying, somebody mashing a button. A *run* of rows from **one**
+`actorUserId`, or one `cell`, inside a short window is the thing this exists to
+surface, and the action it calls for lives outside this app: revoke that
+account's sessions, or ask whoever owns the deployment to rate-limit that caller
+at the edge.
+
+A row records which match, which decoy, which caller, which kind and when.
+**No chat content, ever** — `migrations/0008_honeypot_signals.sql` has no column
+for it, so no future caller can add one by passing a field. The tripwire watching
+the relay is not an exception to the promise the relay makes.
 
 ## Pitch deck
 

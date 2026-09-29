@@ -15,6 +15,7 @@
  * does not begin with `demo:`.
  */
 import { DEMO_USER_ID_PREFIX, isDemoUserId } from './demo'
+import { HONEYPOT_USER_ID_PREFIX, isHoneypotUserId } from './honeypot'
 
 /**
  * Canonical UUID — the shape of every account id this system mints, because
@@ -27,8 +28,17 @@ import { DEMO_USER_ID_PREFIX, isDemoUserId } from './demo'
  */
 const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
-/** Which path could have minted an id — or neither. */
-export type UserIdKind = 'account' | 'demo' | 'unauthentic'
+/**
+ * Which path could have minted an id — or none of them.
+ *
+ * `honeypot` is the third minting path and the only one the *server* invents for
+ * itself: no socket, no session, nobody on the other end. It is its own answer
+ * rather than folded into `demo` because the two are excluded for different
+ * reasons — a demo pair is a real handshake that is not revenue, and a honeypot
+ * is not a person — and because collapsing them would mean a honeypot inherited
+ * `demo`'s answers everywhere by accident rather than by decision.
+ */
+export type UserIdKind = 'account' | 'demo' | 'honeypot' | 'unauthentic'
 
 /** True when this id is shaped like the account id a real sign-in mints. */
 export function isAccountIdShaped(raw: unknown): raw is string {
@@ -52,6 +62,12 @@ export function classifyUserId(raw: unknown): UserIdKind {
   if (typeof raw !== 'string') return 'unauthentic'
   if (isDemoUserId(raw)) {
     return raw.length > DEMO_USER_ID_PREFIX.length ? 'demo' : 'unauthentic'
+  }
+  // Held to the same loose standard as a demo id, for the same reason: this
+  // answer books nothing and can never be charged, so demanding more than the
+  // prefix and something after it would protect nothing.
+  if (isHoneypotUserId(raw)) {
+    return raw.length > HONEYPOT_USER_ID_PREFIX.length ? 'honeypot' : 'unauthentic'
   }
   return isAccountIdShaped(raw) ? 'account' : 'unauthentic'
 }

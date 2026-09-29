@@ -67,6 +67,20 @@ ALLOW_UNCHARGED_PAIRING="1"
 #   `pnpm payment-gate` — holds queue and refund retry (PAYMENT_GATE_REQUIRE_ADMIN)
 # OPERATOR_USER_IDS="9a1d9a1d-0000-4000-8000-000000000033"
 
+# Seat honeypot buyers: decoys that populate an empty market and act as an abuse
+# tripwire. Off by default EVERYWHERE, including on a charged production
+# deployment — this var answers exactly one question and nothing else implies it.
+#
+# A decoy appears in the waiting count and as a dot, can be matched, and can hold
+# a short canned conversation; it can never be charged (the money gate answers
+# `honeypot` before Stripe is consulted), never releases a pickup code, and
+# therefore can never settle or be disputed. It excuses itself within 45s through
+# the refunding teardown. See the README's "Honeypot buyers" section.
+#
+# Turn it on to see a populated market from one browser; leave it off to run any
+# suite that expects an empty one.
+# HONEYPOT_BUYERS="1"
+
 # Where the Stripe REST calls go. Only ever set to point at
 # `scripts/fake-stripe.mjs`, which is how the charged path is driven end to end
 # without a Stripe account. Unset means the real API.

@@ -217,6 +217,27 @@ state.
   not `0`. A D1 write that fails parks the row under `holdfile:` and
   `reconcileHolds` replays it off the alarm, because a hold is filed for a record
   that is still `pending` and `reconcileTerminal` skips those by design.
+- **A honeypot is a decoy, and everything that makes it safe is structural.**
+  `shared/honeypot.ts` mints `honeypot:<uuid>` identities that populate an empty
+  market and act as an abuse tripwire; `HONEYPOT_BUYERS` answers that one
+  question and is off by default, on a charged deployment as much as anywhere
+  else. The money gate answers `honeypot` from identity *before* the Stripe
+  secrets are read, so a decoy cannot reach the processor — and
+  `codeAtMatchTime('honeypot')` is **false**, which is the single answer the
+  whole feature rests on: no code released means no confirmation recorded, which
+  makes `matches` (needs both) and `disputes` (every route needs one)
+  unreachable rather than merely avoided. A decoy then **excuses itself** through
+  the refunding `buddy_left` teardown well inside the unconfirmed-match window,
+  because a decoy that went silent would walk a real buyer into the hold a
+  dispute deliberately keeps — and it books no `late_cancel` against them, which
+  `cancelMatch` and `handleDisconnect` both name and skip. In matching it is a
+  **fallback, never a candidate**: `findMatch` drops every decoy the moment a
+  real buyer is eligible, so the starvation-free window is computed over real
+  buyers only, and a chosen decoy is always the *receiver* — nobody is ever sent
+  to a counter to meet somebody who does not exist. Its chat replies come from a
+  fixed table: pure, offline, no model, deliberately, because a model would make
+  the sentence under the chat box false. A signal records which match, which
+  caller and which kind, and **never what was said**.
 - **A finished match leaves the Durable Object only once D1 has it.** A settled
   split goes to `matches`, a dead handshake to `disputes`, and money a teardown
   could not hand back to `holds` — each a table of its own, never a status
@@ -328,6 +349,7 @@ pnpm dev          # Vite + Worker together, full stack
 pnpm test         # vitest — pure logic (settlement, geo, matchmaking, protocol)
 pnpm smoke        # end-to-end pairing against a running `pnpm dev`
 pnpm payment-gate # the money gate, in whichever mode that server reports
+pnpm honeypot-check # decoy buyers, in whichever mode that server reports
 pnpm fake-stripe  # a local stand-in for Stripe's REST API, for the charged path
 pnpm test:e2e     # Playwright — two browsers driving the real UI end to end
 pnpm typecheck    # wrangler types && tsc --noEmit
@@ -361,7 +383,10 @@ limiter keys on `CF-Connecting-IP`, which `pnpm dev` never sets, so locally ever
 client shares one bucket and the suite trips a limit sized for a venue NAT —
 visible as "Lost the connection. Try again.", not as a refusal. `pnpm payment-gate` is the fourth lane: it asserts whichever money
 mode the server it is pointed at reports, and it is the only thing that
-exercises the charged path through the real Durable Object.
+exercises the charged path through the real Durable Object. `pnpm honeypot-check`
+is the fifth, and needs `HONEYPOT_BUYERS="1"` (plus Stripe "configured" at a dead
+address, the way CI sets it) to exercise the decoy path; with the flag off it
+asserts the other direction — that a market stays empty.
 
 ## Style
 

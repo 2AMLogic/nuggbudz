@@ -58,6 +58,21 @@ export interface Env {
    */
   ALLOW_DEMO_PAIRING?: string
   /**
+   * Seat honeypot buyers — decoys that populate an empty market and act as an
+   * abuse tripwire. See `shared/honeypot.ts`.
+   *
+   * **One var, one question, and the default is off.** Deliberately independent
+   * of `ALLOW_DEMO_PAIRING`, of `ALLOW_UNCHARGED_PAIRING` and of whether Stripe
+   * is configured: "do decoys run on this deployment" is a product decision an
+   * operator makes on purpose, and inferring it from an unrelated flag is
+   * exactly the muddle #150 exists to undo. A charged production deployment runs
+   * honeypots only if somebody set this; what makes that *safe* is
+   * `paymentDisposition` answering `honeypot` before the secrets are read, never
+   * this var. Never set in `wrangler.jsonc`, for the same reason the other two
+   * never are.
+   */
+  HONEYPOT_BUYERS?: string
+  /**
    * Stripe credentials. Both set with `wrangler secret put`, never in
    * wrangler.jsonc, and optional only so a checkout without them still boots.
    *

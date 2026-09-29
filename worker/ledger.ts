@@ -24,6 +24,7 @@ import { isDemoUserId } from '../shared/demo'
 import type { DisputeReason, DisputeResolution } from '../shared/disputes'
 import type { BuyerRole, Settlement } from '../shared/economics'
 import type { HoldReason } from '../shared/holds'
+import { isHoneypotUserId } from '../shared/honeypot'
 import { classifyUserId } from '../shared/identity'
 
 /** Everything the ledger needs to know about one settled split. */
@@ -180,6 +181,27 @@ export function isDemoMatch(match: IdentifiedMatch): boolean {
 }
 
 /**
+ * Is one side of this a decoy rather than a person?
+ *
+ * Belt and braces, deliberately, and stated rather than inherited from the demo
+ * gate. A honeypot match can never settle and can never be disputed — no pickup
+ * code is ever released for one, so no confirmation is ever recorded, so neither
+ * terminal path is reachable — and it never holds money, because
+ * `paymentDisposition` answers `honeypot` before Stripe is consulted. So nothing
+ * should arrive here at all. If some future path made it possible, an operator's
+ * queue and a revenue report are the last two places to discover that the server
+ * was talking to itself.
+ */
+export function isHoneypotMatch(match: IdentifiedMatch): boolean {
+  return Object.values(match.userIds).some((userId) => isHoneypotUserId(userId))
+}
+
+/** Every reason a match's rows are not written: not real, or not a person. */
+function isUnbookable(match: IdentifiedMatch): boolean {
+  return isDemoMatch(match) || isHoneypotMatch(match)
+}
+
+/**
  * The part of a match either gate reads: who it says settled or disputed.
  *
  * Both gates take this rather than a `SettledMatch`, so the disputes queue
@@ -222,7 +244,7 @@ export function ledgerStatements(match: SettledMatch): LedgerStatement[] {
   // question first would answer "not a demo, book it" about an identity that
   // names nobody.
   assertAuthenticIdentities(match)
-  if (isDemoMatch(match)) return []
+  if (isUnbookable(match)) return []
 
   const { settlement } = match
   const statements: LedgerStatement[] = [
@@ -359,7 +381,7 @@ const INSERT_DISPUTE = `INSERT OR IGNORE INTO disputes (
  */
 export function disputeStatements(match: DisputedMatch): LedgerStatement[] {
   assertAuthenticIdentities(match)
-  if (isDemoMatch(match)) return []
+  if (isUnbookable(match)) return []
 
   return [
     {
@@ -633,7 +655,7 @@ const INSERT_HOLD = `INSERT OR IGNORE INTO holds (
  */
 export function holdStatements(match: HeldMatch): LedgerStatement[] {
   assertAuthenticIdentities(match)
-  if (isDemoMatch(match)) return []
+  if (isUnbookable(match)) return []
 
   return [
     {

@@ -90,6 +90,7 @@ export const MARKETS = {
   detroit: { lat: 42.3314, lng: -83.0458, label: 'Detroit' },
   albuquerque: { lat: 35.0844, lng: -106.6504, label: 'Albuquerque' },
   kansasCity: { lat: 39.0997, lng: -94.5786, label: 'Kansas City' },
+  stLouis: { lat: 38.627, lng: -90.1994, label: 'St. Louis' },
 }
 
 /**
@@ -164,6 +165,15 @@ export const FIXTURE_COORDS = {
   // same dev server as `pnpm smoke` and so needs the same separation.
   payHere: { lat: 40.4406, lng: -79.9959 },
   payNearby: { lat: 40.440723, lng: -79.995518 },
+  // The charged-dispute triples (`scripts/payment-gate-check.mjs`, issue #100):
+  // three pairs, each driven to a dispute in turn and each fed to a different
+  // operator resolution (`refund_receiver`, `voided`, a refused refund). Only
+  // one pair is ever live at once — each socket closes before the next pair
+  // opens — so all three reuse this one 40 m-apart coordinate pair rather than
+  // needing six distinct points. Its own market, because the payment-gate lane
+  // already owns `pittsburgh` for the unrelated charged-path scenarios above.
+  disputeHere: { lat: 38.627, lng: -90.1994 },
+  disputeNearby: { lat: 38.627323, lng: -90.199018 },
   // The browser lane (`e2e/`). Same table, because the separation rule is about
   // which Durable Object a fixture lands in, and both lanes drive the same one.
   e2eBuddyA: { lat: 33.749, lng: -84.388 },
@@ -320,6 +330,14 @@ export const SCENARIOS = {
     market: 'serverResolved',
     fixtures: [],
     what: 'two buyers who never send a coordinate are placed by the server and pair anyway',
+  },
+  chargedDisputePair: {
+    lane: 'payments',
+    market: 'stLouis',
+    fixtures: ['disputeHere', 'disputeNearby'],
+    what:
+      'a charged dispute holds the full total, and an operator resolution refunds exactly the ' +
+      'right leg — the receiver alone, both, or none when Stripe refuses',
   },
   e2ePair: {
     lane: 'e2e',

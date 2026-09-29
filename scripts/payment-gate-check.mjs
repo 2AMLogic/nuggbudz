@@ -64,6 +64,13 @@ const DEAL_ID = 'mcd-nuggets-20'
  */
 const HERE = FIXTURE_COORDS.payHere
 const NEARBY = FIXTURE_COORDS.payNearby
+// The charged-dispute triples below (rin/sam, tia/uma, vin/wyn) are a scenario
+// of their own — `chargedDisputePair` in scripts/pool-fixtures.mjs — rather
+// than a reuse of the pair above: they run in the same script but are a
+// distinct market so `test/fixture-separation.test.ts` isolates them from the
+// unrelated charged-path scenarios sharing HERE/NEARBY.
+const DISPUTE_HERE = FIXTURE_COORDS.disputeHere
+const DISPUTE_NEARBY = FIXTURE_COORDS.disputeNearby
 
 const log = (...a) => console.log(...a)
 let failures = 0
@@ -101,10 +108,21 @@ const BUYERS = {
   // anything, so the only trace of the money is the `holds` row this proves.
   ada: { sid: sessionId('pay-ada'), userId: accountId(12), name: 'Ada' },
   bex: { sid: sessionId('pay-bex'), userId: accountId(13), name: 'Bex' },
+  // The charged-dispute triples: each pair confirms one side and then loses the
+  // other, which disputes the match rather than refunding it (#20/#102). Each
+  // pair feeds exactly one resolution, because a dispute can only be resolved
+  // once — a second attempt is a 409, proven separately below.
+  rin: { sid: sessionId('pay-rin'), userId: accountId(14), name: 'Rin' },
+  sam: { sid: sessionId('pay-sam'), userId: accountId(15), name: 'Sam' },
+  tia: { sid: sessionId('pay-tia'), userId: accountId(16), name: 'Tia' },
+  uma: { sid: sessionId('pay-uma'), userId: accountId(17), name: 'Uma' },
+  vin: { sid: sessionId('pay-vin'), userId: accountId(18), name: 'Vin' },
+  wyn: { sid: sessionId('pay-wyn'), userId: accountId(19), name: 'Wyn' },
   // The operator. Never opens a pool socket and owns no coordinate — this one
   // exists to hold a session `OPERATOR_USER_IDS` can name, which is the only
-  // way into the holds queue and the retry route. Without the var the admin
-  // checks report SKIP, unless PAYMENT_GATE_REQUIRE_ADMIN says otherwise.
+  // way into the holds queue, the retry route, and dispute resolution. Without
+  // the var the admin checks report SKIP, unless PAYMENT_GATE_REQUIRE_ADMIN
+  // says otherwise.
   op: { sid: sessionId('pay-operator'), userId: accountId(33), name: 'Ops' },
 }
 
@@ -940,6 +958,247 @@ if (mode === 'unconfigured') {
     check('the refund stub is restored', clearedAgain.refunds === 0, JSON.stringify(clearedAgain))
 
     for (const socket of [gia, hal]) socket.ws.close()
+  }
+
+  // --- a charged dispute holds real money, and an operator resolves it ---
+  //
+  // Every scenario above tears down BEFORE anybody confirms, so none of them
+  // can reach a dispute — a dispute needs a *confirmed* role on the record
+  // (`worker/pool.ts`'s `handleDisconnect`, `confirmedRole(record.confirmations)
+  // !== null`). Driven here the same way `scripts/smoke.mjs`'s `disputePair`
+  // avoids `PICKUP_CONFIRM_TIMEOUT_MS`: the receiver confirms with the real
+  // code, then the orderer's socket closes before it confirms its own half.
+  // `pnpm smoke` proves this teardown holds $0, because it runs
+  // `ALLOW_UNCHARGED_PAIRING`; only a charged server can prove it holds $8.98
+  // and that an operator's resolution moves the right amount, on the right leg,
+  // and only when Stripe actually agrees to it (#100).
+  if (FAKE_STRIPE !== null) {
+    /**
+     * Pair two buyers on the shared HERE/NEARBY market, pay both legs, have the
+     * receiver confirm with the orderer's real code, then close the orderer's
+     * socket before it can confirm its own half — which files a dispute instead
+     * of a refund, holding the whole collected total.
+     */
+    async function driveToDispute(ordererBuyer, receiverBuyer) {
+      const orderer = open(ordererBuyer, DISPUTE_HERE)
+      const receiver = open(receiverBuyer, DISPUTE_NEARBY)
+      await Promise.all([orderer.opened, receiver.opened])
+      await checkDistinctIdentities(orderer, receiver)
+      const disputeCell = orderer.inbox.find((m) => m.type === 'welcome').cell
+      orderer.join()
+      await orderer.expect('waiting')
+      receiver.join()
+      const [mo, mr] = await Promise.all([orderer.expect('matched'), receiver.expect('matched')])
+      check(
+        'the dispute-bound pair still pairs when money is live',
+        mo.matchId === mr.matchId,
+        `${mo.matchId}/${mr.matchId}`,
+      )
+      const ro = await orderer.expect('payment_required')
+      const rr = await receiver.expect('payment_required')
+      await deliverWebhook(intentOf(ro), 'payment_intent.succeeded', {
+        match_id: mo.matchId,
+        role: mo.role,
+        cell: disputeCell,
+      })
+      await deliverWebhook(intentOf(rr), 'payment_intent.succeeded', {
+        match_id: mo.matchId,
+        role: mr.role,
+        cell: disputeCell,
+      })
+      const [co] = await Promise.all([
+        orderer.expect('payment_cleared'),
+        receiver.expect('payment_cleared'),
+      ])
+      receiver.confirm(co.pickupCode)
+      await receiver.expect('pickup_confirmed')
+      orderer.ws.close()
+      const disputed = await receiver.expect('pickup_disputed')
+      receiver.ws.close()
+      return { matchId: mo.matchId, disputed }
+    }
+
+    const { matchId: disputeOneId, disputed: disputedOne } = await driveToDispute(
+      BUYERS.rin,
+      BUYERS.sam,
+    )
+    check(
+      'the orderer walking away after the receiver confirms raises a dispute',
+      disputedOne.confirmedBy === 'receiver',
+      JSON.stringify(disputedOne),
+    )
+    check(
+      // `pickup_disputed` tells each buddy only their OWN leg, the same way
+      // `buddy_left` does — never the counterparty's amount. The receiver is
+      // the only socket left open when this arrives (the orderer's closed
+      // socket is what raised the dispute), so this is the receiver's share;
+      // the D1 row below is what proves the full total is what is actually held.
+      "the receiver is told their own share is held, not the buddy's",
+      disputedOne.heldCents === expected.shares[1].payCents,
+      `${disputedOne.heldCents} vs ${expected.shares[1].payCents}`,
+    )
+
+    await new Promise((r) => setTimeout(r, 400))
+    const filedOne = ledgerQuery(`SELECT * FROM disputes WHERE match_id = '${disputeOneId}'`)
+    check(
+      'the charged dispute is filed in D1 holding the same total, refunded_cents unset',
+      filedOne.length === 1 &&
+        filedOne[0].held_cents === expected.totalCollectedCents &&
+        filedOne[0].refunded_cents === null,
+      JSON.stringify(filedOne[0] ?? null),
+    )
+    const beforeResolve = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
+    check(
+      'nothing was refunded, or even attempted, on the way into a dispute',
+      beforeResolve.refundAttempts.every((r) => !r.idempotencyKey.includes(disputeOneId)),
+      JSON.stringify(
+        beforeResolve.refundAttempts.filter((r) => r.idempotencyKey.includes(disputeOneId)),
+      ),
+    )
+
+    const adminProbe = await fetch(`${BASE}/api/admin/disputes`, { headers: cookie(BUYERS.op) })
+    if (adminProbe.status !== 200) {
+      const why =
+        `this server has no operator for the payment-gate fixture. Add\n      ` +
+        `OPERATOR_USER_IDS="${BUYERS.op.userId}"\n      to .dev.vars and restart the dev server to run them.`
+      if (process.env.PAYMENT_GATE_REQUIRE_ADMIN) {
+        check(
+          'operator charged-dispute resolution',
+          false,
+          `PAYMENT_GATE_REQUIRE_ADMIN is set but ${why}`,
+        )
+      } else {
+        log(`SKIP  operator charged-dispute resolution — ${why}`)
+      }
+    } else {
+      // refund_receiver: exactly the receiver's own leg, the rest stays held.
+      const resolveReceiver = await fetch(`${BASE}/api/admin/disputes/${disputeOneId}/resolve`, {
+        method: 'POST',
+        headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+        body: JSON.stringify({ resolution: 'refund_receiver' }),
+      })
+      const receiverResolved = await resolveReceiver.json()
+      check(
+        'refund_receiver returns exactly the receiver share and holds the rest',
+        resolveReceiver.status === 200 &&
+          receiverResolved.refundedCents === expected.shares[1].payCents &&
+          receiverResolved.heldCents === expected.shares[0].payCents,
+        JSON.stringify(receiverResolved),
+      )
+      const rowAfterReceiver = ledgerQuery(
+        `SELECT * FROM disputes WHERE match_id = '${disputeOneId}'`,
+      )
+      check(
+        'the stamped row agrees with the response',
+        rowAfterReceiver[0]?.refunded_cents === expected.shares[1].payCents,
+        JSON.stringify(rowAfterReceiver[0] ?? null),
+      )
+      const afterReceiverRecorded = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
+      const receiverRefunds = afterReceiverRecorded.refunds.filter((r) =>
+        r.idempotencyKey.includes(disputeOneId),
+      )
+      check(
+        'exactly one refund was issued, keyed to the receiver leg alone',
+        receiverRefunds.length === 1 &&
+          receiverRefunds[0].idempotencyKey === `refund:${disputeOneId}:receiver`,
+        JSON.stringify(receiverRefunds),
+      )
+
+      // voided: both legs, on a second, still-open dispute.
+      const { matchId: disputeTwoId, disputed: disputedTwo } = await driveToDispute(
+        BUYERS.tia,
+        BUYERS.uma,
+      )
+      check(
+        'the second dispute also tells the receiver only their own share',
+        disputedTwo.heldCents === expected.shares[1].payCents,
+        `${disputedTwo.heldCents} vs ${expected.shares[1].payCents}`,
+      )
+      const resolveVoided = await fetch(`${BASE}/api/admin/disputes/${disputeTwoId}/resolve`, {
+        method: 'POST',
+        headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+        body: JSON.stringify({ resolution: 'voided' }),
+      })
+      const voidedResolved = await resolveVoided.json()
+      check(
+        'voided refunds both legs, holding nothing',
+        resolveVoided.status === 200 &&
+          voidedResolved.refundedCents === expected.totalCollectedCents &&
+          voidedResolved.heldCents === 0,
+        JSON.stringify(voidedResolved),
+      )
+      const afterVoidedRecorded = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
+      const voidedRefunds = afterVoidedRecorded.refunds.filter((r) =>
+        r.idempotencyKey.includes(disputeTwoId),
+      )
+      check(
+        'each leg is refunded exactly once, each keyed to its own role',
+        voidedRefunds.length === 2 &&
+          new Set(voidedRefunds.map((r) => r.idempotencyKey)).size === 2 &&
+          voidedRefunds.every((r) => r.idempotencyKey.startsWith(`refund:${disputeTwoId}:`)),
+        JSON.stringify(voidedRefunds),
+      )
+
+      // A refused refund is reported as held, never as refunded, on a third dispute.
+      const { matchId: disputeThreeId, disputed: disputedThree } = await driveToDispute(
+        BUYERS.vin,
+        BUYERS.wyn,
+      )
+      check(
+        'the third dispute also tells the receiver only their own share',
+        disputedThree.heldCents === expected.shares[1].payCents,
+        `${disputedThree.heldCents} vs ${expected.shares[1].payCents}`,
+      )
+      await failRefunds(402)
+      const resolveRefused = await fetch(`${BASE}/api/admin/disputes/${disputeThreeId}/resolve`, {
+        method: 'POST',
+        headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+        body: JSON.stringify({ resolution: 'voided' }),
+      })
+      const refusedResolved = await resolveRefused.json()
+      check(
+        'a refund Stripe refuses is answered as held, never as refunded',
+        resolveRefused.status === 200 &&
+          refusedResolved.refundedCents === 0 &&
+          refusedResolved.heldCents === expected.totalCollectedCents,
+        JSON.stringify(refusedResolved),
+      )
+      const rowAfterRefused = ledgerQuery(
+        `SELECT * FROM disputes WHERE match_id = '${disputeThreeId}'`,
+      )
+      check(
+        'the row stamps 0 — money collected, not returned — rather than leaving it NULL',
+        rowAfterRefused[0]?.refunded_cents === 0,
+        JSON.stringify(rowAfterRefused[0] ?? null),
+      )
+      const afterRefusedRecorded = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
+      const refusedAttempts = afterRefusedRecorded.refundAttempts.filter((r) =>
+        r.idempotencyKey.includes(disputeThreeId),
+      )
+      const refusedSuccesses = afterRefusedRecorded.refunds.filter((r) =>
+        r.idempotencyKey.includes(disputeThreeId),
+      )
+      check(
+        'both legs were really attempted and really refused, not merely never asked',
+        refusedAttempts.length === 2 && refusedSuccesses.length === 0,
+        `attempts ${JSON.stringify(refusedAttempts)}, successes ${JSON.stringify(refusedSuccesses)}`,
+      )
+
+      // Restored, so nothing after this runs against a stub that refuses refunds.
+      const restored = await failRefunds(0)
+      check('the refund stub is restored', restored.refunds === 0, JSON.stringify(restored))
+
+      const resolveAgain = await fetch(`${BASE}/api/admin/disputes/${disputeOneId}/resolve`, {
+        method: 'POST',
+        headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+        body: JSON.stringify({ resolution: 'settled' }),
+      })
+      check(
+        'a second resolution of an already-resolved charged dispute is refused',
+        resolveAgain.status === 409,
+        `status ${resolveAgain.status}`,
+      )
+    }
   }
 }
 

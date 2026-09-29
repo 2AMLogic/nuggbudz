@@ -165,8 +165,9 @@ function assertAuthenticIdentities(match: IdentifiedMatch): void {
 /**
  * Is this a demo pairing rather than a real split?
  *
- * `ALLOW_DEMO_PAIRING` mints throwaway `demo:` identities for unauthenticated
- * sockets so two phones can pair on a stage without Google sign-in. Those pairs
+ * Unauthenticated sockets carry throwaway `demo:` identities, and
+ * `ALLOW_DEMO_PAIRING` lets those take a seat so two phones can pair on a stage
+ * without Google sign-in (`seatVerdict`). Those pairs
  * run the whole handshake, receipt included, but they are not revenue, and the
  * deck's figures are derived from this ledger — so a stage demo must not be able
  * to book money rows into it. `match_buyers` stores an attacker-chosen

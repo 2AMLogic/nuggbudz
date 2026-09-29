@@ -135,6 +135,13 @@ export const PROTOCOL_HISTORY: readonly [ProtocolVersionNote, ...ProtocolVersion
     added: [],
     changed: ['buddy_left'],
   },
+  {
+    version: 10,
+    summary:
+      'Sign-in moved from the socket to the seat (#150): an unauthenticated upgrade is welcomed under an anonymous identity instead of refused, a socket without a seat is sent `market` counts (never the `buddies` roster), and `join` from an identity that may not take a seat is refused with `sign_in_required` — which an older client would read as a generic error rather than as the prompt to sign in.',
+    added: ['market'],
+    changed: ['welcome', 'error'],
+  },
 ]
 
 /**
@@ -259,7 +266,12 @@ export interface WelcomeMessage {
    */
   radiusMeters: number
   waiting: number
-  /** Who the server thinks you are, straight off your session. */
+  /**
+   * Who the server thinks you are: straight off your session, or — since #150 —
+   * the anonymous `demo:` identity a signed-out browser is welcomed under. An
+   * anonymous socket is shown the market like any other; whether it may take a
+   * seat is decided when it asks for one (`sign_in_required`), not here.
+   */
   user: {
     id: string
     name: string
@@ -311,6 +323,33 @@ export interface WaitingMessage {
    * with is noise on the screen and a privacy surface off it.
    */
   buddies: CellBuddy[]
+}
+
+/**
+ * The market around a socket that holds no seat — counts, and nothing else.
+ *
+ * Sent to every idle socket, signed in or not, whenever the queue near it
+ * changes, and once straight after `welcome`. This is what a signed-out visitor
+ * sees before being asked for an account: how many people are waiting within
+ * their radius right now, which is the product's whole argument.
+ *
+ * Deliberately **no roster**. `buddies` — even as snapped, nameless dots — goes
+ * only to a socket that took a seat, on `waiting`. A browse-only socket can be
+ * opened by anybody without an account, so handing it the dots would make
+ * "where are the people near me" free to scrape, and signing in would stop
+ * being what earns the sight of them.
+ */
+export interface MarketMessage {
+  type: 'market'
+  /** Buyers queued within your radius, on any deal. */
+  waiting: number
+  /**
+   * The same count split by deal id. Nobody here holds a seat, so this is also
+   * exactly how many would be queued ahead of you if you took one on that deal
+   * now — the browse-only answer to `WaitingMessage.queuedAhead`. A deal with
+   * nobody waiting is absent rather than zero.
+   */
+  byDeal: Record<string, number>
 }
 
 export interface MatchedMessage {
@@ -559,6 +598,12 @@ export type ProtocolErrorCode =
   | 'payment_unavailable'
   /** Both halves have not cleared yet, so there is nothing to confirm. */
   | 'payment_pending'
+  /**
+   * This identity may browse but not take a seat: an anonymous browser on a
+   * deployment where `ALLOW_DEMO_PAIRING` is off. The client's cue to show the
+   * sign-in interstitial — see `seatVerdict` in `shared/identity.ts`.
+   */
+  | 'sign_in_required'
   | ChatErrorCode
 
 export interface ErrorMessage {
@@ -570,6 +615,7 @@ export interface ErrorMessage {
 export type ServerMessage =
   | WelcomeMessage
   | WaitingMessage
+  | MarketMessage
   | MatchedMessage
   | PaymentRequiredMessage
   | PaymentClearedMessage
@@ -603,6 +649,7 @@ const MESSAGE_TYPE_KEYS: Record<ProtocolMessageType, true> = {
   chat: true,
   welcome: true,
   waiting: true,
+  market: true,
   matched: true,
   payment_required: true,
   payment_cleared: true,

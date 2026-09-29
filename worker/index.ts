@@ -58,20 +58,24 @@ app.get('/api/health', (c) => {
   const demoAllowed = demoPairingEnabled(c.env.ALLOW_DEMO_PAIRING)
 
   /**
-   * The demo identity is handed out here, and here is not an accident.
+   * The anonymous identity is handed out here, and here is not an accident.
    *
    * It cannot be minted on the socket upgrade, which is where it is *used*: a
    * `Set-Cookie` on a 101 response is not reliably stored by every browser, and
    * a cookie silently dropped would look exactly like having no sticky identity
    * — which is the failure this whole mechanism exists to prevent. It has to be
    * a plain HTTP response, and this is the one every client already fetches
-   * before it can connect: the answer that says whether demo pairing is on is
-   * the answer that hands you your demo identity. Minted only when the server
-   * actually pairs without accounts, and only when the caller has no usable one
-   * already, so a curl or a monitor gets a cookie it will ignore and nothing
-   * else changes.
+   * before it connects.
+   *
+   * Minted whether or not demo pairing is on (#150). Identity is one of two
+   * kinds — a session, or this anonymous browser — and `ALLOW_DEMO_PAIRING`
+   * no longer decides which kinds *exist*, only whether the anonymous kind may
+   * take a seat (`seatVerdict`, on the `join` path). A strict deployment still
+   * welcomes a signed-out browser to look at the market, under this identity.
+   * Only when the caller has no usable one already, so a curl or a monitor
+   * gets a cookie it will ignore and nothing else changes.
    */
-  if (demoAllowed && demoTokenFromCookieHeader(c.req.header('Cookie')) === null) {
+  if (demoTokenFromCookieHeader(c.req.header('Cookie')) === null) {
     c.header('Set-Cookie', demoCookie(mintDemoToken(), { secure: isSecureRequest(c.req.url) }))
   }
 
@@ -79,8 +83,10 @@ app.get('/api/health', (c) => {
     ok: true,
     service: 'nuggbudz',
     protocol: PROTOCOL_VERSION,
-    // The client reads this to offer a name field instead of a sign-in button
-    // that cannot work, and to say on screen that it is pairing without accounts.
+    // Whether an anonymous browser may take a seat. The client reads this to
+    // offer a name field for one, and to say on screen that it is pairing
+    // without accounts. Reporting only: the decision is `seatVerdict`, made on
+    // the server when a seat is asked for, whatever this says.
     demoPairing: demoAllowed,
     /**
      * Whether this server can charge for a match, and therefore whether it will
@@ -177,10 +183,18 @@ function edgeCoords(request: Request): RawCoords | null {
  * Upgrade to the matching socket for the caller's neighbourhood.
  *
  * Two things are decided here and never by the client: who you are, from your
- * session cookie, and which cell you are in, from a location this Worker
- * resolves. A caller who could name their own cell would park themselves in
- * someone else's market; a caller who could name themselves would show a
- * stranger any name they liked.
+ * session cookie (or, with none, the anonymous identity off this browser's
+ * cookie), and which cell you are in, from a location this Worker resolves. A
+ * caller who could name their own cell would park themselves in someone else's
+ * market; a caller who could name themselves would show a stranger any name
+ * they liked.
+ *
+ * What is *not* decided here any more is whether you may pair (#150). Every
+ * caller is welcomed and shown the market — the count of people waiting near
+ * them is the product's whole argument, and a 401 here asked a visitor for a
+ * Google account before they had seen it. The seat is where an account is
+ * required, and that is answered once, in the Durable Object's `join` path
+ * (`seatVerdict`), right beside the payment decision it protects.
  *
  * The location has three rungs (see `shared/location.ts`), and the default one
  * needs no permission prompt at all: coordinates arrive only if the buyer turned
@@ -189,10 +203,6 @@ function edgeCoords(request: Request): RawCoords | null {
  */
 app.get('/api/pool/ws', async (c) => {
   const active = await sessionFromRequest(c.env, c.req.raw)
-  const demoAllowed = demoPairingEnabled(c.env.ALLOW_DEMO_PAIRING)
-  if (active === null && !demoAllowed) {
-    return c.json({ error: 'sign in required' }, 401)
-  }
 
   if (c.req.header('Upgrade') !== 'websocket') {
     return c.text('expected a websocket upgrade', 426)
@@ -212,12 +222,19 @@ app.get('/api/pool/ws', async (c) => {
   const clientKey = deriveClientKey(c.req.header('CF-Connecting-IP')) ?? 'unknown'
 
   // Checked here, before the pool is addressed, so a flood costs a KV read and
-  // no Durable Object time. Outside demo mode, an unauthenticated flood never
-  // reaches this line — the session check above refuses it first. In demo mode
-  // an unauthenticated caller does reach the limiter, which stays safe because
-  // it keys on `clientKey` (from `CF-Connecting-IP`), not on user id: minting a
-  // fresh `demo:<uuid>` per socket does not buy a new bucket.
-  const rate = await checkUpgradeRate(c.env, clientKey)
+  // no Durable Object time.
+  //
+  // Until #150 an unauthenticated flood never reached this line outside demo
+  // mode: the session check refused it first, and that 401 was quietly the
+  // flood backstop. It is gone, so the answer is stated rather than inherited
+  // (see `UpgradeBucket`): an upgrade with no session is counted in a bucket of
+  // its own, tighter than the signed-in one and separate from it, keyed on
+  // `clientKey` rather than on identity — minting a fresh anonymous id does not
+  // buy a new bucket. Behind it, the pool caps how many anonymous sockets one
+  // address may hold open in a cell (`anonSocketTag`), because a window only
+  // bounds how fast sockets arrive, not how many pile up.
+  const anonymous = active === null
+  const rate = await checkUpgradeRate(c.env, clientKey, anonymous ? 'anonymous' : 'session')
   if (!rate.allowed) {
     c.header('Retry-After', String(rate.retryAfterSeconds))
     return c.json({ error: 'too many connection attempts, slow down' }, 429)
@@ -242,8 +259,10 @@ app.get('/api/pool/ws', async (c) => {
   // reach the Durable Object with server-derived values only.
   const url = new URL(c.req.url)
   /**
-   * Identity is the session when there is one, and the browser's demo cookie
-   * otherwise. A demo caller may propose a display name but never a user id.
+   * Identity is the session when there is one, and the browser's anonymous
+   * (`demo:`) cookie otherwise. An anonymous caller may propose a display name
+   * but never a user id — and on a deployment with demo pairing off it can
+   * browse under that identity but not take a seat with it (`seatVerdict`).
    *
    * This used to mint a fresh `demo:<uuid>` per upgrade, and the comment here
    * said that was what kept two tabs from claiming one identity. It was, and
@@ -261,8 +280,8 @@ app.get('/api/pool/ws', async (c) => {
    * why `handleJoin` names the tab you are already in rather than failing
    * generically.
    *
-   * A caller with no demo cookie still pairs, under a throwaway minted here and
-   * nowhere stored. They are the old behaviour: fine for two devices that each
+   * A caller with no demo cookie is still welcomed, under a throwaway minted
+   * here and nowhere stored. They are the old behaviour: fine for two devices that each
    * fetched `/api/health`, and *not* sticky for a raw socket client that never
    * did. That path degrades to the manual one — the handoff link still shows
    * them six characters to read and type — rather than to a dead end.
@@ -282,6 +301,11 @@ app.get('/api/pool/ws', async (c) => {
   url.searchParams.set('locationSource', fix.source)
   url.searchParams.set('userId', identity.userId)
   url.searchParams.set('displayName', identity.displayName)
+  // Only an anonymous socket carries its address down, and only so the pool can
+  // cap how many of them one address holds open. `set` above and `delete` here
+  // both overwrite whatever the caller put on the query string.
+  if (anonymous) url.searchParams.set('anonKey', clientKey)
+  else url.searchParams.delete('anonKey')
   return stub.fetch(new Request(url, c.req.raw))
 })
 

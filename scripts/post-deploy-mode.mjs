@@ -17,7 +17,22 @@
  * Usage: node scripts/post-deploy-mode.mjs
  *   DEPLOY_HEALTH_URL=https://nuggbudz.com/api/health  (default)
  */
+import { assessClientKey, BUILD_INFO_FILE, parseBuildInfo } from './build-info.mjs'
+
 const HEALTH_URL = process.env.DEPLOY_HEALTH_URL ?? 'https://nuggbudz.com/api/health'
+
+/** The client half of payments: what the deployed bundle was built with. */
+async function readBuildInfo() {
+  try {
+    const url = new URL(`/${BUILD_INFO_FILE}`, HEALTH_URL).href
+    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) })
+    if (!res.ok) return null
+    // A missing asset falls through to the SPA's index.html, which is not JSON.
+    return parseBuildInfo(await res.json())
+  } catch {
+    return null
+  }
+}
 
 async function main() {
   let health
@@ -81,6 +96,12 @@ async function main() {
       process.exitCode = 1
       break
   }
+
+  // The Worker's secrets and the bundle's publishable key are set by different
+  // steps and only one is visible to /api/health (#149).
+  const client = assessClientKey(String(health.payments), await readBuildInfo())
+  console.log(client.message)
+  if (!client.ok) process.exitCode = 1
 }
 
 await main()

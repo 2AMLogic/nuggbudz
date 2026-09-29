@@ -1220,10 +1220,27 @@ if (adminProbe.status !== 200) {
     headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
     body: JSON.stringify({ resolution: 'settled' }),
   })
+  const refusedTwice = await resolveTwice.json()
   check(
-    'a second resolution is refused rather than overwriting the first',
-    resolveTwice.status === 409,
-    `status ${resolveTwice.status}`,
+    'a second resolution is refused rather than overwriting the first, and says why',
+    resolveTwice.status === 409 && refusedTwice.reason === 'decided_differently',
+    `status ${resolveTwice.status}, ${JSON.stringify(refusedTwice)}`,
+  )
+
+  // The other 409, which is a different fact and used to be the same sentence
+  // (#103): this asks for the resolution that *is* stored. On an uncharged server
+  // its refund was complete the moment it was decided — there was nothing to hand
+  // back — so there is nothing to retry, and the reason says which no this is.
+  const resolveSameAgain = await fetch(`${BASE}/api/admin/disputes/${receiverJ.matchId}/resolve`, {
+    method: 'POST',
+    headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+    body: JSON.stringify({ resolution: 'voided' }),
+  })
+  const refusedComplete = await resolveSameAgain.json()
+  check(
+    'and re-asking for the same resolution is refused once its refund is complete',
+    resolveSameAgain.status === 409 && refusedComplete.reason === 'refund_complete',
+    `status ${resolveSameAgain.status}, ${JSON.stringify(refusedComplete)}`,
   )
   const afterSecond = ledgerQuery(
     `SELECT resolution FROM disputes WHERE match_id = '${receiverJ.matchId}'`,

@@ -364,6 +364,21 @@ export function hasOutstandingMoney(ledger: PaymentLedger): boolean {
 }
 
 /**
+ * Is this ledger sitting on money a buyer is actually out of pocket for?
+ *
+ * Deliberately narrower than `hasOutstandingMoney` above, and the gap between
+ * the two is the whole reason both exist. A `pending` leg is money nobody has
+ * taken yet — a webhook to wait for, and a reason to keep a tombstone. A
+ * `succeeded` leg on a match that is over is money *collected for a box that
+ * does not exist*, which is a hold: somebody has to get it back, and until they
+ * do it belongs in an operator's queue rather than in one Durable Object's
+ * storage. `worker/pool.ts` files a `holds` row on exactly this predicate.
+ */
+export function holdsCollectedMoney(ledger: PaymentLedger): boolean {
+  return collectedCents(ledger) > 0
+}
+
+/**
  * Close a ledger whose match is being deleted, and say whether anything about it
  * still has to be remembered.
  *

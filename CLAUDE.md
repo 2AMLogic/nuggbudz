@@ -182,10 +182,32 @@ state.
   its unfinished money behind as a tombstone (`retireMatch`, the one place a
   `match:` key is removed), so a PaymentIntent that clears *after* its match died
   is still refunded rather than answered `unknown_match`.
+- **A refund Stripe refused is a `holds` row, and holds are parallel to disputes,
+  never folded into them.** A tombstone lives in one cell's storage and there is
+  no registry of live cells, so until #85 a refused refund on a *non-dispute*
+  teardown was money nobody could enumerate — and unlike a dispute there is no
+  human in the loop by construction, because nobody raised it. `retireMatch` now
+  takes a **required** `TeardownReason`, and files a `holds` row when
+  `parseHoldReason` answers it *and* `holdsCollectedMoney` is true — before the
+  `match:` key is deleted, the same ordering `persistTerminal` enforces. The two
+  predicates are both load-bearing: `hasOutstandingMoney` (pending *or*
+  collected) is what keeps a tombstone, and `holdsCollectedMoney` (collected
+  alone) is what makes a hold, because a `pending` leg is a webhook to wait for
+  rather than money anybody has lost. A dispute's hold is deliberate and already
+  in `disputes`, so it names itself `'disputed'` and files nothing — the same
+  money in two operator queues is worse than in one. `GET /api/admin/holds` is
+  the queue; `POST /api/admin/holds/:matchId/retry` is the only action, because
+  nobody *decided* a hold and there is nothing to resolve. Re-asking is safe
+  because of `refundIdempotencyKey`, and `stampHoldRefund` runs only after Stripe
+  answers — `refunded_cents` NULL means no retry has been answered for, which is
+  not `0`. A D1 write that fails parks the row under `holdfile:` and
+  `reconcileHolds` replays it off the alarm, because a hold is filed for a record
+  that is still `pending` and `reconcileTerminal` skips those by design.
 - **A finished match leaves the Durable Object only once D1 has it.** A settled
-  split goes to `matches`, a dead handshake to `disputes` — a table of its own,
-  never a status column, so every revenue query stays a plain `WHERE settled_at
-  IS NOT NULL`. `persistTerminal` is the one answer both paths read, and the
+  split goes to `matches`, a dead handshake to `disputes`, and money a teardown
+  could not hand back to `holds` — each a table of its own, never a status
+  column, so every revenue query stays a plain `WHERE settled_at IS NOT NULL`.
+  `persistTerminal` is the one answer both terminal paths read, and the
   record is deleted **after** it returns true, never before; a failed write keeps
   the record and `reconcileTerminal` replays it off the next alarm. Get that
   order backwards and nothing looks broken until a D1 blip erases the only
@@ -198,6 +220,22 @@ state.
   resolutions are named for what they do to the money (`refund_receiver`, not
   `sided_with_receiver`), and `refunded_cents` is stamped only after Stripe
   answers — `NULL` means "not answered for", which is not `0`.
+- **A resolution is decided once and paid out until it lands.** The `409` guards a
+  second *decision*, never a second *attempt* at the same one: a refund Stripe
+  declined, or a resolution whose refund call never completed, was money held with
+  no route back through the only endpoint that can release it (#103).
+  `resolutionDisposition` in `shared/disputes.ts` is the one place that tells the
+  three apart — `decide`, `retry`, or a `409` naming itself `decided_differently`
+  or `refund_complete` — and it reads `outstanding_cents`, which is what the
+  resolution promised to return and has not, *as the Durable Object reported it*.
+  Never derive that from `refunded_cents` against `held_cents`: `settled` refunds
+  nobody on purpose and would read as forever unfinished, and `refund_orderer`
+  pays back one half of money that is still holding the other. A retry claims
+  nothing and rewrites nothing — `resolved_by`, `resolved_at`, `resolution` and the
+  note are the decision, and only the money moves — so `refunded_cents`
+  accumulates like `holds.refunded_cents` rather than being `SET`, because the
+  object reports what *this* attempt recovered. A dispute's held money still files
+  no `holds` row: it is already in one operator queue.
 - **A comment body is never a bare `@`-token, and a review verdict is never
   posted by hand.** `gh pr comment --body @path` does not expand `@path`, it
   posts the literal string — and `@-`, the stdin spelling of the same mistake,
@@ -284,10 +322,22 @@ pnpm run deploy      # strict deploy — sign-in only (`pnpm deploy` is a pnpm b
 pnpm run deploy:demo # stage deploy — adds --var ALLOW_DEMO_PAIRING:1, see README "Demo pairing"
 ```
 
-`pnpm test` does not cover the Durable Object. `pnpm smoke` does, and needs a
-dev server on port 5199. `pnpm test:e2e` boots one itself (or reuses one
-already running there) and additionally exercises the screen a person actually
-looks at. Run all three before calling a change done.
+`pnpm test` does not cover the Durable Object *in its runtime*. `pnpm smoke`
+does, and needs a dev server on port 5199. `pnpm test:e2e` boots one itself (or
+reuses one already running there) and additionally exercises the screen a person
+actually looks at. Run all three before calling a change done.
+
+The one exception is deliberate and narrow: `vitest.config.ts` aliases
+`cloudflare:workers` to `test/stubs/cloudflare-workers.ts` — a bare base class,
+nothing more — so `NuggPool`'s own methods can be driven against a fake
+`ctx`/`DB` in plain Node. It exists for the defect class the runtime lanes cannot
+see cheaply: bookkeeping *inside* one `alarm()` tick, where a wrong answer is a
+silent extra D1 write or a stale re-armed alarm rather than a broken handshake
+(#87 — a `Map` keyed by the `match:<id>` storage key while all three of its
+prunes passed a bare `matchId`, so every prune was a no-op that `tsc`, `biome`
+and a source-string assertion all read as correct). Never let a stub grow
+behaviour a test then asserts about; anything about the real runtime still
+belongs in `smoke` or `test:e2e`.
 
 Pairing needs `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars` on a checkout with no
 Stripe keys — otherwise a join is refused rather than paired for free, which is

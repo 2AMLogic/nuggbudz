@@ -128,6 +128,13 @@ export const PROTOCOL_HISTORY: readonly [ProtocolVersionNote, ...ProtocolVersion
     added: [],
     changed: ['matched'],
   },
+  {
+    version: 9,
+    summary:
+      '`buddy_left` gained `heldCents`, closing the one teardown frame that carried no money fields — the abandonment path always refunds, but a refund is only a refund once Stripe confirms it, and until now a survivor whose refund was refused was told nothing about it.',
+    added: [],
+    changed: ['buddy_left'],
+  },
 ]
 
 /**
@@ -412,6 +419,18 @@ export interface PaymentFailedMessage {
 export interface BuddyLeftMessage {
   type: 'buddy_left'
   matchId: string
+  /**
+   * What you paid and is being held, in cents — a refund the processor refused.
+   * Zero in the ordinary case, where the refund cleared.
+   *
+   * The abandonment teardown always refunds, unlike a dispute — but a refund is
+   * only a refund once Stripe confirms it, and a per-intent refund can be
+   * refused independently of the other leg. This is the same distinction
+   * `PaymentFailedMessage`/`MatchExpiredMessage`/`PickupDisputedMessage` already
+   * make: a buyer with cents here has not been refunded and is not told they
+   * have been.
+   */
+  heldCents: number
 }
 
 /** One side of the handoff is in. Sent to both buddies, so both see progress. */

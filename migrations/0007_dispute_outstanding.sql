@@ -1,0 +1,23 @@
+-- How much of a resolution's refund never came back.
+--
+-- `refunded_cents` alone cannot answer whether a resolution is finished, and the
+-- absence of that answer is what left a failed refund with no way back through
+-- the API (#103): a second POST was refused `409` as though it were a second
+-- *decision*, when it was a second *attempt* at the same one.
+--
+-- The obvious arithmetic does not work. `refunded_cents < held_cents` reads a
+-- `settled` dispute — which refunds nobody on purpose — as forever unfinished,
+-- and reads a `refund_orderer` that paid back one half of money still holding
+-- the other as complete even when the half it owed was declined. Neither is
+-- recoverable from the row, because `held_cents` is a total and the split
+-- between the two legs lives in the Durable Object.
+--
+-- So the Durable Object reports it: the legs this resolution owed that Stripe
+-- did not confirm, summed, as of the last attempt. Retry eligibility is then one
+-- predicate — NULL or greater than zero — and the same rule every money column
+-- here follows applies: stamped only after Stripe answers, so NULL means "no
+-- refund has been answered for", which is not 0. A row resolved before this
+-- column existed is therefore NULL, which reads as retryable; that retry is a
+-- no-op against an already-refunded tombstone and closes the row, which is the
+-- self-healing direction.
+ALTER TABLE disputes ADD COLUMN outstanding_cents INTEGER;

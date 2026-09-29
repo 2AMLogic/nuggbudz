@@ -361,7 +361,7 @@ export function usePool() {
                 stage: 'waiting',
                 match: null,
                 payment: null,
-                notice: 'Your bud dropped out. Back in the queue.',
+                notice: `Your bud dropped out. Back in the queue.${heldSuffix(message.heldCents)}`,
                 // Their half of the conversation left with them.
                 chat: [],
                 chatError: null,

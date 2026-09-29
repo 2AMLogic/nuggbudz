@@ -68,7 +68,9 @@ being held for a human.
 
 The dispute itself is filed in D1 — who confirmed, when, why the handshake died,
 and how much is held — and an operator resolves it from there. See
-[Disputes](#disputes-and-who-resolves-them).
+[Disputes](#disputes-and-who-resolves-them). A refund Stripe *refuses* on one of
+those other teardowns is filed too, in its own queue, with a retry: see
+[Holds](#holds-and-money-stripe-would-not-give-back).
 
 A seat in the pool is not forever. A buyer who goes quiet for 15 minutes is
 warned and then dropped, and a match nobody confirms within 10 minutes is called
@@ -287,9 +289,23 @@ The refund is issued against the charges the dead match left behind, and — lik
 every other refund here — the row records only what Stripe *confirmed*.
 `refunded_cents` stays `NULL` until the call has been answered for at all, which
 is not the same as `0`; on a server with no Stripe secrets it is `0`, meaning
-"no charge was taken, nothing to refund". Resolving a dispute twice is refused
-(`409`) rather than silently overwriting the first decision, which is enforced in
-SQL (`WHERE resolved_at IS NULL`) rather than by a read-then-write.
+"no charge was taken, nothing to refund".
+
+**The decision is made once; its refund can be asked for again.** Overturning a
+resolution is refused (`409 decided_differently`) and always was, enforced in SQL
+(`WHERE resolved_at IS NULL`) rather than by a read-then-write. But a refund can
+fail like any other — Stripe declines it, or the call never completes — and that
+used to get the same `409`, which left money held with no way back through the one
+route that exists to release it. So re-POSTing the **same** resolution retries the
+refund: safe any number of times, because every refund is keyed
+`refund:<matchId>:<role>` and a leg Stripe has already handed back is no longer
+owed. `outstanding_cents` is what the resolution promised to return and has not,
+as the Durable Object reported it — `NULL` or greater than zero is retryable, and
+zero is a `409 refund_complete` because there is nothing left to do. A retry pays
+out; it never rewrites `resolved_by`, `resolved_at`, `resolution` or the note.
+Comparing `refunded_cents` against `held_cents` cannot answer this: `settled`
+refunds nobody on purpose, and `refund_orderer` pays back one half of money that
+is still holding the other.
 
 **Authorization is a session plus an allowlist, not a shared token.**
 `OPERATOR_USER_IDS` names `users.id` values; the caller still has to be signed in
@@ -301,6 +317,42 @@ honoured, and with the var unset **there are no operators**: every `/api/admin/*
 route answers the same `404` the rest of the API gives an unknown path, so a
 signed-in buyer cannot even learn the surface is there. It is deliberately absent
 from `wrangler.jsonc`, for the same reason `ALLOW_DEMO_PAIRING` is.
+
+### Holds, and money Stripe would not give back
+
+A dispute holds money on purpose. The other way money gets stuck is that a
+teardown *asked* for the refund and Stripe refused it — a match nobody confirmed
+in time, a pair that could not be charged, a buddy who closed the tab. Nobody
+disputed anything, so by construction there is no human in the loop, and the
+charges live on as a tombstone inside the one Durable Object that owned the
+match. There is no registry of live cells to fan out to, so before `holds`
+existed that money could not be enumerated at all.
+
+So the same rule the disputes queue follows applies here: at the moment the
+match record is deleted, and **before** it is deleted, a row goes into D1's
+`holds` table — the teardown (`match_expired`, `payment_unavailable`,
+`buddy_left`, `payment_failed`), both buddies, the cell that still holds the
+charges, and the integer cents outstanding. A teardown whose refund Stripe
+honoured writes nothing: it owes nobody anything, and an operator's queue that
+lists it is a queue nobody reads.
+
+```bash
+curl -s --cookie "nb_session=…" https://nuggbudz.com/api/admin/holds
+curl -s -X POST --cookie "nb_session=…" \
+  https://nuggbudz.com/api/admin/holds/<matchId>/retry
+```
+
+There is nothing to *resolve* — nobody decided a hold — so the only action is to
+ask again. That is safe any number of times because every refund is keyed on
+`refund:<matchId>:<role>`, and a leg Stripe has already handed back is no longer
+owed. What a retry recovers is stamped on the row only after Stripe answers, the
+same discipline `disputes.refunded_cents` follows: `NULL` means no retry has
+been answered for, which is not `0`. A hold that reaches zero is released and
+drops out of the queue; retrying a released one is refused (`409`).
+
+`holds` is a third table rather than more rows in `disputes`, because the two
+are different questions. A dispute is a decision somebody owes an answer to; a
+hold is a failure somebody owes a retry to.
 
 ### Demo pairing
 
@@ -389,8 +441,9 @@ slide and the code disagree in either direction. See
 Current milestone: **M0 — live pairing.** Done: the matching engine, settlement
 math, radius matching, a working two-phone pairing flow, and Google sign-in.
 
-Next up, tracked as issues: payouts to merchants through Stripe Connect, a
-retry queue for a refund that fails at Stripe, and buddy reputation.
+Next up, tracked as issues: payouts to merchants through Stripe Connect, an
+automatic sweep over the holds queue rather than an operator-triggered retry,
+and buddy reputation.
 
 ## Development
 

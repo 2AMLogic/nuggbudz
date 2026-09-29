@@ -8,22 +8,24 @@ Prioritized roadmap of upcoming work, maintained by the Guide role.
 
 Issues requiring immediate attention (`loom:urgent`).
 
-- **#3**: Charge both halves through Stripe and take the pairing fee —
-  settlement is computed and displayed but no money moves. PR #19 is in the
-  doctor loop (`loom:changes-requested`); the last known lease on issue #11
-  had lapsed, so this needs the next sweep (or an attended pickup).
+- **#126**: Restore the photoreal half of the brand — composite the render over
+  photographic plates.
 
-> #2 (Google sign-in) merged `05b9799`; #28 (McDonald's-only) merged
-> `e22229b`; #16, #5, #4, #6, #7's predecessor work, #9 and #10 all landed. See
-> WORK_LOG.md.
+> #3 (Stripe charging) shipped in PR #19; #8 (buddy reputation) and the holds
+> queue landed after it. #2 (Google sign-in) merged `05b9799`; #28
+> (McDonald's-only) merged `e22229b`; #16, #5, #4, #6, #7's predecessor work,
+> #9 and #10 all landed. See WORK_LOG.md.
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-*All seeded backlog is claimed. New operator-filed items waiting on triage/
-curator: #36 (custom domain), #37 (wrangler `dev --var` bug), #48
-(`sanitizeDemoName` hardening), #14 (pairing-flow nonce).*
+*#126 (photoreal brand) and #37 (wrangler `dev --var` bug) carry `loom:issue`.
+Operator-filed items waiting on triage/curator: #147 (store locations on the
+map), #148 (the orderer's order link), #149 (production takes no payment
+information), #150 (late sign-in, one bypass in one place), #151 (honeypot
+buyers), plus #36 (custom domain), #48 (`sanitizeDemoName` hardening) and #14
+(pairing-flow nonce).*
 
 ## In Progress
 

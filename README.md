@@ -441,9 +441,14 @@ slide and the code disagree in either direction. See
 Current milestone: **M0 — live pairing.** Done: the matching engine, settlement
 math, radius matching, a working two-phone pairing flow, and Google sign-in.
 
+Buddy reputation landed with it: standing is a band, never a count, and it acts
+as a tiebreak inside a window anchored to the longest waiter, so the queue stays
+starvation-free.
+
 Next up, tracked as issues: payouts to merchants through Stripe Connect, an
 automatic sweep over the holds queue rather than an operator-triggered retry,
-and buddy reputation.
+and showing the pair which restaurant to meet at (#147) — the map draws the
+market today, but a matched pair is told to go meet with no place named.
 
 ## Development
 

@@ -1,0 +1,20 @@
+# .loom/resync-ignore — paths Loom must not overwrite or delete on resync.
+#
+# See .loom/docs/repo-owned-files.md for the full rule. Each entry below
+# pins a deliberate, repo-specific divergence from the upstream rjwalters/loom
+# defaults/ tree — guidance landed directly in this repo's installed copy
+# because it is not (yet) upstreamed.
+#
+# Entries use the ".loom/"-relative report form: "commands/loom/judge.md",
+# not ".claude/commands/loom/judge.md" (the latter would not match).
+
+# #80 (commit 882f1cb): doctor.md and judge.md carry the merge-not-rebase
+# warning for real-content conflicts (PR #73 re-decided a Judge's recorded
+# merge-commit resolution via rebase and silently reintroduced a fixture
+# cell collision), plus the rule to name which side of a real conflict was
+# kept in the PR comment. rjwalters/loom's defaults/ has no equivalent, so
+# resync-installed.sh's local-fix guard blocked both files and every
+# scheduled fleet resync of this repo failed.
+# Unpin once the equivalent fix lands in rjwalters/loom's defaults/ tree.
+commands/loom/doctor.md
+commands/loom/judge.md

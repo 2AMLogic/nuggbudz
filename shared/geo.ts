@@ -158,6 +158,25 @@ export function decodeCell(hash: string): BoundingBox {
 const METERS_PER_DEGREE_LAT = 111_320
 
 /**
+ * A point a given number of metres north and east of another.
+ *
+ * The inverse of `distanceMeters`, and here for the same reason that one is:
+ * `shared/geo.ts` holds the conversions, so no call site carries its own idea of
+ * how many degrees a metre is. Flat-earth over the distances this is used for —
+ * a two-mile market, not a flight path — where the error against the haversine
+ * round trip is well under a metre.
+ *
+ * Longitude degrees shrink toward the poles, so `cos(lat)` is clamped away from
+ * zero exactly as `snapToGrid` clamps it: without that, a point at extreme
+ * latitude divides an eastward offset up to infinity.
+ */
+export function offsetMeters(origin: LatLng, northMeters: number, eastMeters: number): LatLng {
+  const lat = origin.lat + northMeters / METERS_PER_DEGREE_LAT
+  const cosLat = Math.max(Math.cos((origin.lat * Math.PI) / 180), 1e-6)
+  return { lat, lng: origin.lng + eastMeters / (METERS_PER_DEGREE_LAT * cosLat) }
+}
+
+/**
  * Snap a coordinate to a coarse grid, in place of the buyer's real position.
  *
  * This is the only place a waiting buyer's location leaves the server: the

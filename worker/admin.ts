@@ -11,6 +11,7 @@ import {
 import { isOperator, parseOperatorIds } from '../shared/operators'
 import { sessionFromRequest } from './auth'
 import type { Env } from './env'
+import { listHoneypotSignals } from './honeypot'
 import {
   claimDispute,
   type DisputeRecord,
@@ -241,6 +242,53 @@ adminRoutes.get('/holds', async (c) => {
     ...(limit === undefined ? {} : { limit }),
   })
   return c.json({ holds, openOnly })
+})
+
+/**
+ * What decoy buyers have seen lately — the abuse tripwire's queue.
+ *
+ * Read-only, and there is deliberately no action endpoint beside it. A dispute
+ * is a decision somebody owes an answer to and a hold is a refund somebody owes
+ * a retry to; a honeypot signal is neither. It is an *observation*: this caller
+ * flooded a decoy's chat, or tried pickup codes against a match that never had
+ * one — behaviours no legitimate client produces, which is the only reason they
+ * are recorded at all.
+ *
+ * What a human does with it, stated here because a tripwire nobody reads is not
+ * one: check it when a market looks wrong, and read three things off it. An
+ * empty list is the normal answer and is itself informative. A handful of rows
+ * from many `actorUserId`s is noise — clients retrying, somebody mashing a
+ * button. A run of rows from **one** `actorUserId`, or one `cell`, inside a
+ * short window is the thing this exists to surface, and the action it calls for
+ * lives outside this app: revoke that account's sessions, or ask the operator
+ * who owns the deployment to rate-limit that caller at the edge. Narrow to one
+ * caller with `?actor=<users.id>` and to a window with `?sinceMs=<epoch>`.
+ *
+ * No chat content is here, by construction — see `migrations/0008`. What was
+ * said is not stored anywhere, and the tripwire is not an exception to that.
+ */
+adminRoutes.get('/honeypot', async (c) => {
+  const operator = await operatorOf(c.env, c.req.raw)
+  if (operator === null) return c.json(notFound, 404)
+
+  const rawLimit = c.req.query('limit')
+  const limit = rawLimit === undefined ? undefined : Number.parseInt(rawLimit, 10)
+  if (limit !== undefined && !Number.isInteger(limit)) {
+    return c.json({ error: 'limit must be an integer' }, 400)
+  }
+  const rawSince = c.req.query('sinceMs')
+  const sinceMs = rawSince === undefined ? undefined : Number.parseInt(rawSince, 10)
+  if (sinceMs !== undefined && !Number.isInteger(sinceMs)) {
+    return c.json({ error: 'sinceMs must be an integer' }, 400)
+  }
+  const actorUserId = c.req.query('actor')
+
+  const signals = await listHoneypotSignals(c.env.DB, {
+    ...(limit === undefined ? {} : { limit }),
+    ...(sinceMs === undefined ? {} : { sinceMs }),
+    ...(actorUserId === undefined ? {} : { actorUserId }),
+  })
+  return c.json({ signals })
 })
 
 /**

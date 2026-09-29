@@ -182,6 +182,30 @@ wrangler d1 migrations apply nuggbudz --remote
 
 ### Payments, and what happens without them
 
+**Turning payments on is three steps, not two:** `wrangler secret put
+STRIPE_SECRET_KEY`, `wrangler secret put STRIPE_WEBHOOK_SECRET`, **and a rebuild**
+with `VITE_STRIPE_PUBLISHABLE_KEY` set, because that key is compiled into the
+bundle and a secret cannot reach it. Secrets alone leave a deployment that
+refuses to pair anyone who is not a demo buyer, and whose card form cannot mount
+("This build has no Stripe publishable key"). The two `secret put` calls are
+human steps; an agent cannot perform them.
+
+`pnpm run deploy` stamps `dist/client/build-info.json` after the build (the key's
+mode, `live`/`test`/`none`, found by scanning the emitted bundle, never the key
+itself), and `scripts/post-deploy-mode.mjs` compares it to `/api/health`'s
+`payments`. A deployment that is `payments: live` while the bundle carries no
+publishable key exits non-zero.
+
+**Open product decision (not resolved here): demo vs. charged pairing.** A strict
+deploy is sign-in only, and demo pairs are never charged, so today going live with
+charged pairing means unauthenticated pairing stops working the same day and the
+demo everyone has been shown stops with it. Keeping production on `deploy:demo`
+keeps the demo but means demo buyers are never charged. Which to run is the
+operator's call. #150 (gate sign-in at `join` rather than at the socket) would
+loosen this, since a signed-out visitor could still see the market on a charged
+deployment; as of this writing #150 is **open**, so the current regime is the one
+above.
+
 Three keys, two of them secret:
 
 | Key | Where it lives | Why |

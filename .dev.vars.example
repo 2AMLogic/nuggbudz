@@ -30,6 +30,10 @@ GOOGLE_CLIENT_SECRET=""
 # in wrangler.jsonc and is sized for a venue NAT, not for a test runner. Hitting
 # it looks like "Lost the connection. Try again." rather than like a refusal.
 # POOL_UPGRADE_LIMIT="300"
+#
+# The same, for upgrades with no session — a separate, tighter bucket since
+# signed-out visitors can browse the market (#150). Every landing page opens one.
+# POOL_ANON_UPGRADE_LIMIT="300"
 
 # Stripe. Both of these are secrets in a deployed environment
 # (`wrangler secret put`), and a pool with either of them missing REFUSES TO

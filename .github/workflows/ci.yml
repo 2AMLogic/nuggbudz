@@ -104,10 +104,13 @@ jobs:
       # is not that shape, and hitting the limit surfaces as a socket that closes
       # rather than as a refusal you can read — "Lost the connection. Try again."
       # Raised for this step's server only. Never `wrangler.jsonc`.
+      # Every landing page now opens a browse socket too (#150), and a signed-out
+      # one is counted in the anonymous bucket -- raised alongside, same reason.
       - run: |
           {
             echo 'ALLOW_UNCHARGED_PAIRING="1"'
             echo 'POOL_UPGRADE_LIMIT="300"'
+            echo 'POOL_ANON_UPGRADE_LIMIT="300"'
           } > .dev.vars
       # Drives the real UI in two browser contexts; playwright.config.ts's
       # webServer boots `pnpm dev` itself, so there is no separate wait-on step.

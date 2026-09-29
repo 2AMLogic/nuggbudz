@@ -1,14 +1,18 @@
 /**
  * Abuse limits for the pool socket, as pure decisions.
  *
- * Two independent checks guard `/api/pool/ws`:
+ * Independent checks guard `/api/pool/ws`:
  *
  * - a per-IP sliding window on upgrade *attempts*, stored in KV and checked
- *   in the Worker, so a flood is turned away before any Durable Object runs;
- * - a cap on *concurrent* sockets per signed-in account per cell, checked
- *   against the cell's live sockets, because only the cell knows when a socket
- *   has closed. It is keyed on the account rather than the IP because carrier
- *   NAT puts many unrelated buyers behind one address.
+ *   in the Worker, so a flood is turned away before any Durable Object runs.
+ *   Since #150 there are two of these buckets per address, one for signed-in
+ *   upgrades and a tighter one for anonymous ones (see `UpgradeBucket`);
+ * - a cap on *concurrent* anonymous sockets per IP per cell, checked against
+ *   the cell's live sockets by hibernation tag, because only the cell knows
+ *   when a socket has closed (`anonSocketTag`);
+ * - a cap on *concurrent* sockets per signed-in account per cell
+ *   (`accountSocketTag`), keyed on the account rather than the IP because
+ *   carrier NAT puts many unrelated buyers behind one address.
  *
  * The storage lives with the callers; everything here is plain data in, verdict
  * out, so the thresholds can be tested without a Workers runtime.
@@ -54,6 +58,40 @@ export function underConcurrencyCap(open: number, cap: number): boolean {
  */
 export function accountSocketTag(userId: string): string {
   return `user:${userId}`
+}
+
+/**
+ * Which upgrade window an attempt is counted in.
+ *
+ * Until #150 an unauthenticated upgrade outside demo mode never reached the
+ * limiter at all — the session check refused it first, and that refusal was
+ * doing double duty as the flood backstop. Opening the socket to signed-out
+ * visitors took the backstop away, so the answer is written down here rather
+ * than inherited: anonymous upgrades are counted in a bucket of their own,
+ * sized tighter than the signed-in one (`POOL_ANON_UPGRADE_LIMIT`), and kept
+ * *separate* from it so a crowd browsing signed-out behind one venue NAT can
+ * never spend the budget of the signed-in buyers standing next to them.
+ */
+export type UpgradeBucket = 'session' | 'anonymous'
+
+/** The KV key an upgrade attempt is counted under, per bucket. */
+export function upgradeRateKey(bucket: UpgradeBucket, clientKey: string): string {
+  return bucket === 'session'
+    ? `ratelimit:pool-ws:${clientKey}`
+    : `ratelimit:pool-ws-anon:${clientKey}`
+}
+
+/**
+ * The hibernation tag an anonymous socket is counted under.
+ *
+ * Keyed on the connecting address (`clientKey`) rather than the identity,
+ * because an anonymous identity costs nothing to mint — a caller with no demo
+ * cookie gets a fresh one per socket — so a per-identity cap would cap nothing.
+ * It bounds how many idle sockets one address can hold open in one cell, which
+ * is what every queue change then has to fan a `market` count out to.
+ */
+export function anonSocketTag(clientKey: string): string {
+  return `anon:${clientKey}`
 }
 
 /**

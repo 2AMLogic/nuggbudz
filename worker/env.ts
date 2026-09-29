@@ -10,6 +10,18 @@ export interface Env {
   POOL_MAX_SOCKETS_PER_CELL: string
   POOL_UPGRADE_LIMIT: string
   POOL_UPGRADE_WINDOW_SECONDS: string
+  /**
+   * Upgrade attempts one address may make *without a session* per window — a
+   * bucket of its own, tighter than `POOL_UPGRADE_LIMIT` (#150). See
+   * `UpgradeBucket` in `shared/ratelimit.ts`.
+   */
+  POOL_ANON_UPGRADE_LIMIT: string
+  /**
+   * Anonymous sockets one address may hold open at once in one cell. The hard
+   * backstop behind the window above: a window bounds how fast sockets arrive,
+   * this bounds how many can pile up. See `anonSocketTag`.
+   */
+  POOL_ANON_SOCKETS_PER_IP: string
   /** How long a one-sided pickup confirmation waits before it is a dispute. */
   PICKUP_CONFIRM_TIMEOUT_MS?: string
   /** Silence from a queued buyer before their entry is dropped. */
@@ -36,10 +48,13 @@ export interface Env {
   /** Overrides the OAuth callback origin when the Worker sits behind a proxy. */
   PUBLIC_ORIGIN?: string
   /**
-   * Demo escape hatch: when truthy, an unauthenticated pool socket is given a
-   * throwaway identity instead of a 401. Never set in `wrangler.jsonc` — it is
-   * passed at deploy time so a checkout, `pnpm test` and CI all keep exercising
-   * the strict authenticated path. See `shared/demo.ts`.
+   * Demo escape hatch, and since #150 it answers exactly one question: may an
+   * *anonymous* identity take a seat? Every socket is welcomed whether or not
+   * this is set — a signed-out visitor can always browse the market — so the
+   * flag is read in one place, `seatVerdict` on the `join` path, and nowhere
+   * else. Never set in `wrangler.jsonc` — it is passed at deploy time so a
+   * checkout, `pnpm test` and CI all keep exercising the strict path. See
+   * `shared/demo.ts`.
    */
   ALLOW_DEMO_PAIRING?: string
   /**

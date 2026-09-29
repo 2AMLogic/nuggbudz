@@ -145,6 +145,8 @@ const BUYERS = {
   // `pending`, raced against the orderer's own disconnect teardown.
   chatFloodOne: { sid: sessionId('smoke-chat-f1'), userId: accountId(37), name: 'Flood One' },
   chatFloodTwo: { sid: sessionId('smoke-chat-f2'), userId: accountId(38), name: 'Flood Two' },
+  // The signed-in buyer a signed-out browser watches take a seat (#150).
+  browseSeated: { sid: sessionId('smoke-browse-seat'), userId: accountId(39), name: 'Seated' },
   // The operator. Never opens a pool socket and owns no coordinate — this one
   // exists to hold a session that `OPERATOR_USER_IDS` can name, which is the
   // only way into the dispute-resolution routes. Put
@@ -342,7 +344,10 @@ seedSessions()
 applyMigrations()
 seedUsers()
 resetReputation()
-const cookie = (buyer) => ({ Cookie: `nb_session=${buyer.sid}` })
+// A buyer with no `sid` is a browser nobody signed in to: it sends no session.
+const cookie = (buyer) => (buyer.sid === undefined ? {} : { Cookie: `nb_session=${buyer.sid}` })
+/** Not in `BUYERS`, so no session is ever seeded for it. */
+const ANONYMOUS = { name: 'Browser' }
 
 // --- REST surface ---
 const health = await fetch(`${BASE}/api/health`).then((r) => r.json())
@@ -482,21 +487,85 @@ const forgedMe = await fetch(`${BASE}/api/auth/me`, {
 })
 check('a forged session id is not a session', forgedMe.status === 401, `status ${forgedMe.status}`)
 
-// An unauthenticated upgrade must be refused before any socket exists.
-const at = FIXTURE_COORDS.robb
-const anonUpgrade = await fetch(`${BASE}/api/pool/ws?lat=${at.lat}&lng=${at.lng}`)
-check('unauthenticated pool upgrade is 401', anonUpgrade.status === 401, `${anonUpgrade.status}`)
+// --- browsing without a seat (#150) ---
+// The socket used to refuse a signed-out caller with a 401 before anything
+// existed. It is open to everyone now, and the account is what a *seat* costs:
+// this is the strict path, so the whole block assumes demo pairing is off.
+check(
+  'this server seats accounts only — smoke covers the strict path',
+  health.demoPairing === false,
+  `demoPairing=${health.demoPairing}`,
+)
+const plainGet = await fetch(`${BASE}/api/pool/ws`)
+check(
+  'a signed-out request is no longer refused for want of a session',
+  plainGet.status === 426,
+  `status ${plainGet.status} — 426 is "that was not an upgrade", not a sign-in wall`,
+)
 
-const anonSocketOpened = await new Promise((resolve) => {
-  const ws = new WebSocket(`${WS}/api/pool/ws?lat=${at.lat}&lng=${at.lng}`)
-  ws.addEventListener('open', () => {
-    ws.close()
-    resolve(true)
-  })
-  ws.addEventListener('error', () => resolve(false))
-  setTimeout(() => resolve(false), 4000)
-})
-check('unauthenticated websocket never opens', anonSocketOpened === false)
+const browser = open(ANONYMOUS, FIXTURE_COORDS.browseAnon.lat, FIXTURE_COORDS.browseAnon.lng)
+await browser.opened
+const browserWelcome = await browser.expect('welcome')
+check(
+  'a signed-out socket is welcomed, under an anonymous identity',
+  typeof browserWelcome.user?.id === 'string' && browserWelcome.user.id.startsWith('demo:'),
+  JSON.stringify(browserWelcome.user),
+)
+check(
+  'and placed like any other socket',
+  browserWelcome.locationSource === 'client' && browserWelcome.radiusMeters > 0,
+  `${browserWelcome.locationSource} ${browserWelcome.radiusMeters}m`,
+)
+const firstMarket = await browser.expect('market')
+check(
+  'and shown the market straight away — nobody waiting yet',
+  firstMarket.waiting === 0,
+  JSON.stringify(firstMarket),
+)
+
+const seatedBuyer = open(
+  BUYERS.browseSeated,
+  FIXTURE_COORDS.browseSeated.lat,
+  FIXTURE_COORDS.browseSeated.lng,
+)
+await seatedBuyer.opened
+seatedBuyer.join()
+await seatedBuyer.expect('waiting')
+const counted = await until(() =>
+  browser.inbox.findLast((m) => m.type === 'market' && m.waiting === 1),
+)
+check(
+  'a signed-out socket sees the count move when a buyer nearby takes a seat',
+  counted !== null && counted.byDeal?.['mcd-nuggets-20'] === 1,
+  JSON.stringify(counted),
+)
+check(
+  'and is never sent the roster — no `waiting`, no dots, no names',
+  browser.inbox.every(
+    (m) =>
+      m.type !== 'waiting' &&
+      !JSON.stringify(m).includes('buddies') &&
+      !JSON.stringify(m).includes(BUYERS.browseSeated.name),
+  ),
+  JSON.stringify(browser.inbox.map((m) => m.type)),
+)
+
+browser.join()
+const seatRefused = await browser.expectError()
+check(
+  'a signed-out join is refused on the wire, naming the sign-in',
+  seatRefused.code === 'sign_in_required',
+  `${seatRefused.code}: ${seatRefused.message}`,
+)
+check(
+  'and takes no seat, so nobody is paired with it',
+  (await browser.settles('waiting')) === false &&
+    browser.inbox.every((m) => m.type !== 'matched') &&
+    seatedBuyer.inbox.every((m) => m.type !== 'matched'),
+  JSON.stringify([browser.inbox.map((m) => m.type), seatedBuyer.inbox.map((m) => m.type)]),
+)
+browser.ws.close()
+seatedBuyer.ws.close()
 
 // Sign-in start and callback answer honestly whether or not Google is configured
 // in this environment, and in particular never 500.

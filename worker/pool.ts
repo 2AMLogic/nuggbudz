@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers'
 import { CHAT_RATE_LIMIT, CHAT_RATE_WINDOW_MS, reviewChatText } from '../shared/chat'
 import { findDeal, isDealOffered } from '../shared/deals'
+import { demoPairingEnabled } from '../shared/demo'
 import {
   type DisputeReason,
   parseDisputeReason,
@@ -33,6 +34,7 @@ import {
   isHoneypotUserId,
   mintHoneypot,
 } from '../shared/honeypot'
+import { seatVerdict } from '../shared/identity'
 import { type LocationSource, parseCoords, parseLocationSource } from '../shared/location'
 import { type Candidate, findMatch } from '../shared/matchmaker'
 import {
@@ -48,12 +50,13 @@ import {
 } from '../shared/pickup'
 import {
   type JoinMessage,
+  type MarketMessage,
   PROTOCOL_VERSION,
   type ProtocolErrorCode,
   parseClientMessage,
   type ServerMessage,
 } from '../shared/protocol'
-import { slidingWindow } from '../shared/ratelimit'
+import { anonSocketTag, slidingWindow, underConcurrencyCap } from '../shared/ratelimit'
 import { STANDING_TIEBREAK_WINDOW_MS, type StandingBand } from '../shared/reputation'
 import { parseSauceSelection, type SauceSelection } from '../shared/sauces'
 import { boolVar, type Env, intVar, stripeConfigured } from './env'
@@ -163,6 +166,9 @@ const HONEYPOT_COOLDOWN_PREFIX = 'hpcool:'
  * reconciliation record for money this pool failed to give back.
  */
 const TOMBSTONE_RETENTION_MS = 4 * 24 * 60 * 60 * 1_000
+
+/** Anonymous sockets one address may hold open in a cell, when the var is unset. */
+const DEFAULT_ANON_SOCKETS_PER_IP = 20
 
 /**
  * Who is on the other end of a socket.
@@ -598,8 +604,26 @@ export class NuggPool extends DurableObject<Env> {
       return new Response('missing server-derived location', { status: 400 })
     }
 
+    // An anonymous socket (#150) is counted against its address, and refused
+    // past the cap before anything is accepted — see `anonSocketTag`. The Worker
+    // sets `anonKey` only when there is no session, and overwrites whatever a
+    // caller put there, so a signed-in socket is never counted here.
+    const anonKey = params.get('anonKey') ?? ''
+    const tags: string[] = []
+    if (anonKey.length > 0) {
+      const tag = anonSocketTag(anonKey)
+      const cap = Math.max(
+        1,
+        intVar(this.env.POOL_ANON_SOCKETS_PER_IP, DEFAULT_ANON_SOCKETS_PER_IP),
+      )
+      if (!underConcurrencyCap(this.ctx.getWebSockets(tag).length, cap)) {
+        return new Response('too many open connections from this address', { status: 429 })
+      }
+      tags.push(tag)
+    }
+
     const { 0: client, 1: server } = new WebSocketPair()
-    this.ctx.acceptWebSocket(server)
+    this.ctx.acceptWebSocket(server, tags)
 
     const connId = crypto.randomUUID()
     const cell = params.get('cell') ?? ''
@@ -612,6 +636,10 @@ export class NuggPool extends DurableObject<Env> {
       origin,
       locationSource,
     })
+
+    // One read of the decoy keyspace for both messages below, so the count in
+    // `welcome` and the count in `market` can never disagree with each other.
+    const decoys = await this.liveHoneypots(Date.now())
 
     this.send(server, {
       type: 'welcome',
@@ -632,13 +660,15 @@ export class NuggPool extends DurableObject<Env> {
       // whole point of them: a market with one buyer in it is indistinguishable
       // from a broken app, and a count that excluded them would contradict the
       // dots drawn from the same set.
-      waiting:
-        this.withinRadius(origin).length +
-        this.nearbyHoneypots(origin, await this.liveHoneypots(Date.now())).length,
+      waiting: this.withinRadius(origin).length + this.nearbyHoneypots(origin, decoys).length,
       user: { id: userId, name },
       expiry: this.windows,
       pickupTimeoutMs: this.pickupTimeoutMs,
     })
+    // Every socket starts without a seat, so it is shown the market the way
+    // every idle socket is — counts, never the roster. A socket about to be
+    // adopted into a live handoff below gets this too and simply moves past it.
+    this.send(server, this.marketAround(origin, decoys))
 
     await this.adoptLiveHandoff(server, userId, connId)
 
@@ -1134,6 +1164,26 @@ export class NuggPool extends DurableObject<Env> {
     }
     if (state.status === 'matched') {
       this.fail(ws, 'already_matched', 'this connection is already matched')
+      return
+    }
+
+    /**
+     * Whether this identity may take a seat at all — asked here, and only here.
+     *
+     * Every socket is welcomed now, signed in or not (#150), so this is the
+     * boundary an account guards: not the market, the seat. It sits in the
+     * `join` path rather than at the upgrade or in the client because this is
+     * where the money is decided — an anonymous identity is `demo:`, and
+     * `paymentDisposition` answers `demo` for any pair containing one *before*
+     * Stripe is consulted. A seat granted to an anonymous socket on a charged
+     * deployment would therefore be a free pair, so the check that a free pair
+     * is permitted lives beside the code that makes the pair free.
+     *
+     * First among the identity checks, so a refused browser is told the one
+     * thing it can act on rather than something about a deal or a tab.
+     */
+    if (seatVerdict(state.userId, demoPairingEnabled(this.env.ALLOW_DEMO_PAIRING)) !== 'seat') {
+      this.fail(ws, 'sign_in_required', 'sign in to take a seat — browsing the market needs none')
       return
     }
 
@@ -2522,6 +2572,29 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
+   * What an idle socket at `at` is told about the market: counts only.
+   *
+   * Radius-scoped for the same reason `sendWaiting` is, and deliberately without
+   * `buddies`. An idle socket may be one nobody signed in to open (#150), and a
+   * roster — even of snapped, nameless dots — handed to anybody who connects
+   * would make the positions of the people waiting near you free to scrape.
+   * The dots are for buyers who took a seat.
+   *
+   * Decoys are counted here for the same reason `welcome` counts them: the two
+   * messages go to the same socket back to back, so a count that included them
+   * in one and not the other would contradict itself on screen. They are still
+   * only a *count* — a seatless socket never gets the roster either way.
+   */
+  private marketAround(at: LatLng, decoys: readonly HoneypotBuyer[]): MarketMessage {
+    const nearby = this.withinRadius(at)
+    const decoysNear = this.nearbyHoneypots(at, decoys)
+    const byDeal: Record<string, number> = {}
+    for (const { state } of nearby) byDeal[state.dealId] = (byDeal[state.dealId] ?? 0) + 1
+    for (const decoy of decoysNear) byDeal[decoy.dealId] = (byDeal[decoy.dealId] ?? 0) + 1
+    return { type: 'market', waiting: nearby.length + decoysNear.length, byDeal }
+  }
+
+  /**
    * The waiting buyers inside the match radius of a point, optionally excluding
    * one connection (normally the buyer being told).
    *
@@ -2677,21 +2750,25 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
-   * Refresh every waiting socket's roster after a join, cancel or disconnect.
+   * Refresh every socket's view of the market after a join, cancel or
+   * disconnect: a waiting socket's roster, and an idle socket's counts.
    *
    * Every socket in the shard is told, but each is told only about its own
-   * radius: `sendWaiting` re-derives "nearby" from the recipient, so two buyers
-   * in one shard and forty miles apart get genuinely different rosters.
+   * radius: `sendWaiting` and `marketAround` re-derive "nearby" from the
+   * recipient, so two buyers in one shard and forty miles apart get genuinely
+   * different answers. A matched socket is told nothing — it is looking at a
+   * receipt, not a market.
    *
    * The decoy roster is read once for the whole broadcast rather than once per
    * recipient — a decoy has no socket, so its state lives in storage, and a
-   * `list()` per waiting buyer would make a busy cell quadratic in its own
-   * queue. It costs nothing at all when the feature is off.
+   * `list()` per recipient would make a busy cell quadratic in its own queue.
+   * It costs nothing at all when the feature is off.
    */
   private async broadcastWaiting(): Promise<void> {
     const decoys = await this.liveHoneypots(Date.now())
-    for (const { ws, state } of this.waitingStates()) {
-      this.sendWaiting(ws, state, decoys)
+    for (const { ws, state } of this.states()) {
+      if (state.status === 'waiting') this.sendWaiting(ws, state, decoys)
+      else if (state.status === 'idle') this.send(ws, this.marketAround(state.origin, decoys))
     }
   }
 

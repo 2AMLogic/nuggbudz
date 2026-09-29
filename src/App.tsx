@@ -2,14 +2,16 @@ import type { DealSpec, Settlement, SpreadAnalysis } from '@shared/economics'
 import { formatCents } from '@shared/economics'
 import { formatMiles } from '@shared/geo'
 import { describeLocationSource, type LocationSource } from '@shared/location'
+import type { CellBuddy } from '@shared/protocol'
 import { saucesForMerchant } from '@shared/sauces'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { HandoffCard } from './components/HandoffCard'
 import { RadiusMap } from './components/RadiusMap'
 import { RenderConsole } from './components/RenderConsole'
 import { Line, Perf, Roll } from './components/Roll'
 import { SaucePicker } from './components/SaucePicker'
 import { SettlementReceipt } from './components/SettlementReceipt'
+import { stashPendingSeat, takePendingSeat } from './hooks/pendingSeat'
 import { useCoords } from './hooks/useCoords'
 import { useHandoff } from './hooks/useHandoff'
 import { usePool } from './hooks/usePool'
@@ -22,6 +24,13 @@ interface DealWithMath extends DealSpec {
 }
 
 const DEMO_NAME_KEY = 'nuggbudz.demoName'
+
+/**
+ * The landing map's roster, which is always empty: a socket without a seat is
+ * sent counts and never dots (#150). One constant rather than a fresh `[]` per
+ * render, because the map redraws whenever its roster changes identity.
+ */
+const NO_BUDDIES: CellBuddy[] = []
 
 /**
  * How long a handoff link waits before deciding nobody claimed it.
@@ -135,9 +144,69 @@ export function App() {
     return () => window.clearTimeout(settle)
   }, [handoff.code, attach])
 
+  /**
+   * Look at the market without taking a seat (#150).
+   *
+   * Opened on the landing screen for everybody, signed in or not: the count of
+   * people waiting within the radius is the argument for the whole thing, and it
+   * used to be unreachable until after a Google sign-in. The server sends a
+   * socket like this counts and never the roster, and it asks nothing of the
+   * visitor — no prompt, no name, no account. Precise coordinates go up only if
+   * the buyer already turned them on, exactly as for a seat.
+   *
+   * Called on arrival and after leaving a queue or a match, never on a lost
+   * connection: a browse socket that fails simply leaves the screen without its
+   * count, rather than retrying into the rate limit.
+   */
+  const fix = coords.fix
+  // Read by the effect below without being one of its triggers: a stage change
+  // is not a reason to open a socket, but a seat in progress is a reason not to.
+  const stageRef = useRef(pool.stage)
+  stageRef.current = pool.stage
+  const browse = useCallback(() => {
+    attach({ lat: fix?.lat, lng: fix?.lng, demoName: readStoredDemoName().trim() || undefined })
+  }, [attach, fix])
+  useEffect(() => {
+    // A handoff link attaches for itself, above.
+    if (handoff.code !== null) return
+    // Never over a socket that is queued or matched — this effect is for the
+    // landing screen, and replacing a seat's socket would be walking out of line.
+    if (stageRef.current !== 'idle') return
+    browse()
+    // Re-run only when the buyer turns precise location on, so the count is for
+    // the circle they will actually be matched in.
+  }, [browse, handoff.code])
+
+  /**
+   * Back from the sign-in round trip, to the seat that sent them there.
+   *
+   * Read once, the moment the session answers. Signed in: the deal and sauces
+   * they had chosen are put back and the seat is taken, because tapping "Find a
+   * bud" was the request and the sign-in was only in the way of it. Not signed
+   * in — the consent screen was declined, say — the choices are still put back,
+   * and nothing is joined.
+   */
+  const join = pool.join
+  const adoptSauces = sauces.adopt
+  useEffect(() => {
+    if (session.pending) return
+    const pending = takePendingSeat()
+    if (pending === null) return
+    setDealId(pending.dealId)
+    if (pending.sauces !== null) adoptSauces(pending.sauces)
+    if (session.user === null) return
+    join({ dealId: pending.dealId, sauces: pending.sauces ?? undefined })
+  }, [session.pending, session.user, join, adoptSauces])
+
   /** In demo mode an unauthenticated buyer pairs under a name they type. */
   const demoReady = demoPairing === true && session.user === null && demoName.trim().length > 0
-  const identified = session.user !== null || demoReady
+  /**
+   * Whether "Find a bud" is worth tapping. Signed out on a server that seats only
+   * accounts, it is — the tap is what brings up the sign-in, after the buyer has
+   * seen the deal, their half and the market. The *decision* is the server's:
+   * this only keeps the button from asking for a name the server will never use.
+   */
+  const identified = session.user !== null || demoPairing !== true || demoReady
 
   /**
    * Take the seat. No location prompt: coordinates are sent only if the buyer
@@ -169,8 +238,27 @@ export function App() {
    * printing that code.
    */
   const leaveMatch = () => {
-    handoff.dismiss()
     pool.leave()
+    // Forgetting a handoff link re-runs the browse effect on its own; only a
+    // match reached without one needs the market reopened here.
+    if (handoff.code === null) browse()
+    handoff.dismiss()
+  }
+
+  /** Leave the queue, and go back to looking at the market. */
+  const leaveQueue = () => {
+    pool.leave()
+    browse()
+  }
+
+  /**
+   * The interstitial's one action: write down the seat being taken, then go to
+   * sign in. The callback lands back on `/`, where the effect above picks the
+   * seat up again.
+   */
+  const signInForSeat = () => {
+    if (dealId !== null) stashPendingSeat({ dealId, sauces: sauces.selection })
+    session.signIn()
   }
 
   const selected = deals.find((deal) => deal.id === dealId) ?? null
@@ -220,8 +308,9 @@ export function App() {
           code={handoff.code}
           resolving={handoffResolving}
           onDismiss={() => {
-            handoff.dismiss()
+            // The browse effect reopens the market once the link is forgotten.
             pool.leave()
+            handoff.dismiss()
           }}
         />
       </Shell>
@@ -290,8 +379,61 @@ export function App() {
               : `You are paired the moment someone within ${within} wants the same box. Keep this open.`}
           </p>
 
-          <button type="button" onClick={pool.leave} className="btn btn-outline mt-7">
+          <button type="button" onClick={leaveQueue} className="btn btn-outline mt-7">
             Leave the queue
+          </button>
+        </section>
+      </Shell>
+    )
+  }
+
+  /** How many are queued for the chosen deal within the radius, off the browse socket. */
+  const marketCount =
+    pool.market === null || dealId === null ? null : (pool.market.byDeal[dealId] ?? 0)
+  const marketLine =
+    marketCount === null || pool.radiusMeters === null
+      ? null
+      : marketCount === 0
+        ? `Nobody is waiting within ${formatMiles(pool.radiusMeters)} yet — the first seat is yours.`
+        : `${marketCount} waiting within ${formatMiles(pool.radiusMeters)} right now.`
+
+  /**
+   * The interstitial (#150): the server refused the seat because nobody is signed
+   * in. Everything that makes the account worth having is already on screen —
+   * the deal, the half, the market — and the one thing asked for is the thing
+   * the seat needs. Shown only for a signed-out browser: a signed-in one is
+   * never refused this way.
+   */
+  if (pool.signInRequired && session.user === null) {
+    return (
+      <Shell radiusMeters={pool.radiusMeters} source={pool.locationSource}>
+        <section aria-live="polite">
+          <p className="tag">One step before your seat</p>
+          <h2 className="mt-1 text-[2rem]">
+            <span className="display">Sign in to take it</span>
+          </h2>
+
+          <Perf label={selected?.merchant ?? 'Deal'} />
+          <Line label="Your order" value={selected?.label ?? '—'} />
+          <Line
+            label="Your half"
+            value={formatCents(selected?.settlement.shares[1]?.payCents ?? 0)}
+            emphasis="total"
+          />
+          {marketLine !== null && (
+            <p className="mt-4 font-body text-sm leading-snug text-chrome">{marketLine}</p>
+          )}
+
+          <p className="mt-4 font-body text-sm leading-snug text-steel">
+            Looking is free; a seat needs an account, so your bud knows who they are meeting and a
+            split can be settled afterwards. Your deal and sauces come back with you.
+          </p>
+
+          <button type="button" onClick={signInForSeat} className="btn btn-chrome mt-6">
+            Sign in with Google
+          </button>
+          <button type="button" onClick={pool.dismissSignIn} className="btn btn-outline mt-3">
+            Not now
           </button>
         </section>
       </Shell>
@@ -308,6 +450,23 @@ export function App() {
       <Perf label="Tonight's spread" />
 
       {loadError !== null && <p className="font-body text-sm text-ketchup">{loadError}</p>}
+
+      {/* The market, before anyone is asked for anything (#150): a count and the
+          circle it is counted in, off a socket that holds no seat. No dots —
+          those are for buyers who took one. */}
+      {marketLine !== null && (
+        <p className="mb-3 font-body text-sm leading-snug text-chrome">{marketLine}</p>
+      )}
+      {pool.own !== null && pool.radiusMeters !== null && placement !== null && (
+        <div className="mb-3">
+          <RadiusMap
+            you={pool.own}
+            radiusMeters={pool.radiusMeters}
+            buddies={NO_BUDDIES}
+            centreLabel={placement.label}
+          />
+        </div>
+      )}
 
       <div className="flex flex-col gap-2">
         {deals.map((deal) => {
@@ -381,8 +540,8 @@ export function App() {
       ) : session.user === null ? (
         <>
           <p className="font-body text-sm leading-snug text-steel">
-            Sign in so your bud knows who they are meeting, and so a split can be settled
-            afterwards.
+            Look around as long as you like. Taking a seat needs an account, so your bud knows who
+            they are meeting and a split can be settled afterwards.
           </p>
           <button type="button" onClick={session.signIn} className="btn btn-outline mt-4">
             Sign in with Google
@@ -395,7 +554,8 @@ export function App() {
             type="button"
             onClick={() => {
               pool.leave()
-              void session.signOut()
+              // Back to browsing, as the anonymous browser this now is.
+              void session.signOut().then(browse)
             }}
             className="btn-plain w-auto"
           >

@@ -90,12 +90,26 @@ state.
   the table and the repo's own `distanceMeters`, because two scenarios inside each
   other's radius fail as a race rather than as a broken test. Never add a fixture
   coordinate at a call site.
-- **Identity comes from the session, never from a message.** The pool socket is
-  authenticated at upgrade time and the display name a buddy sees is read off
-  the session in KV. A `name` on the wire is ignored, not trusted, and a caller
-  cannot supply a user id on any path. In demo mode only, the display name
-  itself is caller-supplied — on the upgrade query string, not on the session
-  or on any message — since there is no signed-in session to read one from.
+- **Identity comes from the session, never from a message.** The pool socket's
+  identity is fixed at upgrade time — the session, or with none the anonymous
+  `demo:` identity off the browser's cookie — and the display name a buddy sees
+  is read off the session in KV. A `name` on the wire is ignored, not trusted,
+  and a caller cannot supply a user id on any path. For an anonymous identity
+  only, the display name itself is caller-supplied — on the upgrade query
+  string, not on any message — since there is no session to read one from.
+- **Sign-in guards the seat, not the socket (#150).** Every socket is welcomed
+  and shown the market; `seatVerdict` in `shared/identity.ts`, called from the
+  pool's `join` path and nowhere else, is the one answer to whether an identity
+  may take a seat, and `ALLOW_DEMO_PAIRING` is the one input it reads for an
+  anonymous one. Never decide it a second time at the upgrade or in the client
+  (the client reads `/api/health`'s `demoPairing` to offer a name field, never
+  to skip the gate): an anonymous identity is `demo:`, `paymentDisposition` answers `demo`
+  for it before Stripe is consulted, so a seat that slipped past this gate on a
+  charged deployment is a free pair. A socket without a seat is sent `market`
+  counts and never the `buddies` roster. The upgrade limiter is the flood
+  backstop the old 401 used to be, so anonymous upgrades keep their own tighter
+  window (`POOL_ANON_UPGRADE_LIMIT`) and a per-address concurrent cap in the pool
+  (`POOL_ANON_SOCKETS_PER_IP`) — don't fold them into the signed-in bucket.
 - **Nuggchat is relayed and never stored.** A message between matched buddies is
   handed to the other socket or refused — nothing reaches D1, Durable Object
   storage or KV, and there is no history to fetch on reconnect. That is a
@@ -363,7 +377,8 @@ belongs in `smoke` or `test:e2e`.
 
 Pairing needs `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars` on a checkout with no
 Stripe keys — otherwise a join is refused rather than paired for free, which is
-the point. `pnpm test:e2e` also needs `POOL_UPGRADE_LIMIT="300"` there: the
+the point. `pnpm test:e2e` also needs `POOL_UPGRADE_LIMIT="300"` (and
+`POOL_ANON_UPGRADE_LIMIT="300"`) there: the
 limiter keys on `CF-Connecting-IP`, which `pnpm dev` never sets, so locally every
 client shares one bucket and the suite trips a limit sized for a venue NAT —
 visible as "Lost the connection. Try again.", not as a refusal. `pnpm payment-gate` is the fourth lane: it asserts whichever money

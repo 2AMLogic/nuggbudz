@@ -96,6 +96,12 @@ export interface Env {
    */
   STRIPE_API_BASE?: string
   /**
+   * Where the nearby-stores search goes. Unset means the public Overpass
+   * instance; set it to a dead address to watch the map degrade to having no
+   * stores on it, which is the behaviour pairing relies on when Overpass is down.
+   */
+  OVERPASS_URL?: string
+  /**
    * Pair without charging anybody. Truthy only in local development and in the
    * test lanes that drive pairing end to end (`pnpm smoke`, `pnpm test:e2e`).
    *

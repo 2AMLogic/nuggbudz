@@ -91,6 +91,7 @@ export const MARKETS = {
   albuquerque: { lat: 35.0844, lng: -106.6504, label: 'Albuquerque' },
   kansasCity: { lat: 39.0997, lng: -94.5786, label: 'Kansas City' },
   stLouis: { lat: 38.627, lng: -90.1994, label: 'St. Louis' },
+  elPaso: { lat: 31.7619, lng: -106.485, label: 'El Paso' },
 }
 
 /**
@@ -140,6 +141,13 @@ export const FIXTURE_COORDS = {
   chatDisputeTwo: { lat: 39.739395, lng: -104.990154 },
   chatLeaveOne: { lat: 32.7767, lng: -96.797 },
   chatLeaveTwo: { lat: 32.776895, lng: -96.796866 },
+  // The sustained-flood-against-a-just-disputed-match pair (issue #120): the
+  // orderer vanishes right after the receiver confirms, and the receiver
+  // floods immediately rather than waiting for `pickup_disputed` — waiting
+  // would mean this connection's own status has already dropped out of
+  // `matched` by the time the flood starts.
+  chatFloodOne: { lat: 31.7619, lng: -106.485 },
+  chatFloodTwo: { lat: 31.762095, lng: -106.484876 },
   // The bystander who holds a real pickup code and is not in that match. Stands
   // 15 m from `gus`, in the handshake pair's own market and therefore in their
   // own Durable Object — the point of the probe is that the server refuses them
@@ -288,6 +296,14 @@ export const SCENARIOS = {
     market: 'dallas',
     fixtures: ['chatLeaveOne', 'chatLeaveTwo'],
     what: 'the chat channel closes, and clears, when a buddy walks away',
+  },
+  chatFloodAfterTerminal: {
+    lane: 'smoke',
+    market: 'elPaso',
+    fixtures: ['chatFloodOne', 'chatFloodTwo'],
+    what:
+      'a sustained flood against a match that just left `pending` is refused as a rate limit, ' +
+      'not as "not matched" (#120)',
   },
   saucePair: {
     lane: 'smoke',

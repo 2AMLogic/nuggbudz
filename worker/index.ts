@@ -11,6 +11,7 @@ import {
 } from '../shared/demo'
 import { analyzeSpread, settle } from '../shared/economics'
 import { DEFAULT_POOL_CELL_PRECISION, geohash } from '../shared/geo'
+import { honeypotsEnabled } from '../shared/honeypot'
 import {
   coordsSupplied,
   DEMO_ORIGIN,
@@ -105,6 +106,21 @@ app.get('/api/health', (c) => {
       c.env.STRIPE_API_BASE === undefined || c.env.STRIPE_API_BASE.length === 0
         ? 'default'
         : 'custom',
+    /**
+     * Whether this server seats decoy buyers (`shared/honeypot.ts`).
+     *
+     * Reported for the same reason `demoPairing` and `payments` are: a mode that
+     * changes what a market looks like is a mode a checker has to be able to
+     * *assert* rather than infer from the behaviour it was supposed to be
+     * testing. `scripts/honeypot-check.mjs` takes whichever branch this reports,
+     * so a server that silently came up with the flag off would make its
+     * assertions vacuous rather than red.
+     *
+     * It is also the answer to "is this deployment running decoys?" — a question
+     * an operator should be able to settle with one curl rather than by reading
+     * a deploy command.
+     */
+    honeypots: honeypotsEnabled(c.env.HONEYPOT_BUYERS),
   })
 })
 

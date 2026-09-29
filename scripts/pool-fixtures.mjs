@@ -92,6 +92,7 @@ export const MARKETS = {
   kansasCity: { lat: 39.0997, lng: -94.5786, label: 'Kansas City' },
   stLouis: { lat: 38.627, lng: -90.1994, label: 'St. Louis' },
   elPaso: { lat: 31.7619, lng: -106.485, label: 'El Paso' },
+  oklahomaCity: { lat: 35.4676, lng: -97.5164, label: 'Oklahoma City' },
 }
 
 /**
@@ -182,6 +183,15 @@ export const FIXTURE_COORDS = {
   // already owns `pittsburgh` for the unrelated charged-path scenarios above.
   disputeHere: { lat: 38.627, lng: -90.1994 },
   disputeNearby: { lat: 38.627323, lng: -90.199018 },
+  // The honeypot lane (`scripts/honeypot-check.mjs`). Two buyers 40 m apart who
+  // are never live at the same time: each opens, is paired with a *decoy*, tears
+  // that match down and closes before the next one opens. They need a market of
+  // its own for a sharper reason than most — the whole assertion is "this buyer
+  // had nobody real to pair with", so a stray buyer from a neighbouring scenario
+  // would not add noise, it would make the check pass for the wrong reason by
+  // pairing them with a person.
+  honeypotSolo: { lat: 35.4676, lng: -97.5164 },
+  honeypotProbe: { lat: 35.467723, lng: -97.515906 },
   // The browser lane (`e2e/`). Same table, because the separation rule is about
   // which Durable Object a fixture lands in, and both lanes drive the same one.
   e2eBuddyA: { lat: 33.749, lng: -84.388 },
@@ -354,6 +364,15 @@ export const SCENARIOS = {
     what:
       'a charged dispute holds the full total, and an operator resolution refunds exactly the ' +
       'right leg — the receiver alone, both, or none when Stripe refuses',
+  },
+  honeypotFallback: {
+    lane: 'payments',
+    market: 'oklahomaCity',
+    fixtures: ['honeypotSolo', 'honeypotProbe'],
+    what:
+      'a buyer alone in a market is paired with a decoy that can never be charged, never ' +
+      'releases a code, answers a line of chat and then excuses itself through the refunding ' +
+      'teardown — leaving no matches, disputes, holds or reputation row behind',
   },
   e2ePair: {
     lane: 'e2e',

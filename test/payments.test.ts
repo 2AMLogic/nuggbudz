@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { findDeal } from '../shared/deals'
 import { settle } from '../shared/economics'
+import { honeypotUserId } from '../shared/honeypot'
 import {
   allLegsPaid,
   applyPaymentOutcome,
@@ -583,12 +584,13 @@ describe('paymentDisposition', () => {
   const REAL_A = '9f1c2b3d-0000-4000-8000-000000000001'
   const REAL_B = '9f1c2b3d-0000-4000-8000-000000000002'
   const DEMO = 'demo:0f0e0d0c-0000-4000-8000-000000000003'
+  const DECOY = honeypotUserId('1a2b3c4d-0000-4000-8000-000000000004')
 
   const cases: {
     stripeConfigured: boolean
     unchargedAllowed: boolean
     userIds: { orderer: string; receiver: string }
-    expected: 'charge' | 'demo' | 'uncharged' | 'refuse'
+    expected: 'charge' | 'honeypot' | 'demo' | 'uncharged' | 'refuse'
   }[] = [
     // Two real buyers: the only thing that decides is the server's own config.
     {
@@ -640,6 +642,50 @@ describe('paymentDisposition', () => {
       userIds: { orderer: DEMO, receiver: DEMO },
       expected: 'demo',
     },
+    // A decoy on either side, under every server configuration. Enumerated the
+    // same way the demo rows are, because the dangerous cell is again the one
+    // nobody thought to write down: secrets bound, a real buyer on one side, and
+    // a decoy on the other — which must never charge that real buyer for a
+    // handoff that cannot happen.
+    {
+      stripeConfigured: true,
+      unchargedAllowed: false,
+      userIds: { orderer: REAL_A, receiver: DECOY },
+      expected: 'honeypot',
+    },
+    {
+      stripeConfigured: true,
+      unchargedAllowed: false,
+      userIds: { orderer: DECOY, receiver: REAL_B },
+      expected: 'honeypot',
+    },
+    {
+      stripeConfigured: true,
+      unchargedAllowed: true,
+      userIds: { orderer: REAL_A, receiver: DECOY },
+      expected: 'honeypot',
+    },
+    {
+      stripeConfigured: false,
+      unchargedAllowed: true,
+      userIds: { orderer: REAL_A, receiver: DECOY },
+      expected: 'honeypot',
+    },
+    {
+      stripeConfigured: false,
+      unchargedAllowed: false,
+      userIds: { orderer: REAL_A, receiver: DECOY },
+      expected: 'honeypot',
+    },
+    // A decoy beside a demo identity is still a decoy: the honeypot branch is
+    // answered first, and it has to be — `demo` releases a pickup code at match
+    // time and a honeypot must never get one.
+    {
+      stripeConfigured: true,
+      unchargedAllowed: false,
+      userIds: { orderer: DEMO, receiver: DECOY },
+      expected: 'honeypot',
+    },
   ]
 
   for (const c of cases) {
@@ -647,6 +693,29 @@ describe('paymentDisposition', () => {
       expect(paymentDisposition(c)).toBe(c.expected)
     })
   }
+
+  it('never charges a decoy pairing on a fully configured production deploy', () => {
+    // The same ordering property the demo case relies on, and the one the issue
+    // asks be proved on a *fully configured* deployment rather than on a laptop
+    // with no secrets: identity is read before `stripeConfigured` is consulted,
+    // so there is no configuration under which a decoy reaches Stripe.
+    for (const stripeConfigured of [true, false]) {
+      for (const unchargedAllowed of [true, false]) {
+        for (const userIds of [
+          { orderer: REAL_A, receiver: DECOY },
+          { orderer: DECOY, receiver: REAL_B },
+          { orderer: DECOY, receiver: DECOY },
+        ]) {
+          expect(paymentDisposition({ stripeConfigured, unchargedAllowed, userIds })).not.toBe(
+            'charge',
+          )
+          expect(paymentDisposition({ stripeConfigured, unchargedAllowed, userIds })).toBe(
+            'honeypot',
+          )
+        }
+      }
+    }
+  })
 
   it('never charges a demo pair, even on a fully configured production deploy', () => {
     // The ordering property: demo is decided before the secrets are consulted, so
@@ -689,6 +758,15 @@ describe('codeAtMatchTime', () => {
 
   it('holds the code back for a match that is being charged', () => {
     expect(codeAtMatchTime('charge')).toBe(false)
+  })
+
+  it('never releases a code for a decoy pairing', () => {
+    // The single `false` the whole feature's safety argument rests on. No code
+    // released means `pickupUnlocked` is false forever, so `handleConfirmPickup`
+    // refuses, so no confirmation is ever recorded — which makes a `matches` row
+    // (needs both) and a `disputes` row (every route needs one) unreachable by
+    // construction rather than by a timer firing in the right order.
+    expect(codeAtMatchTime('honeypot')).toBe(false)
   })
 
   it('holds the code back for a match that cannot be charged at all', () => {

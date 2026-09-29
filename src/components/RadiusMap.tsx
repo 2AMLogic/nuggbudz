@@ -1,5 +1,6 @@
 import { formatMiles } from '@shared/geo'
 import type { CellBuddy } from '@shared/protocol'
+import { describeStoresOnMap, type StoresOnMap } from '@shared/stores'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useEffect, useRef } from 'react'
@@ -13,6 +14,14 @@ export interface RadiusMapProps {
   buddies: CellBuddy[]
   /** How the centre was arrived at, e.g. 'your exact location'. */
   centreLabel: string
+  /**
+   * The chain's stores in the circle, or null when nothing is known about them —
+   * still loading, or Overpass could not answer — in which case the map says
+   * nothing about stores at all rather than implying there are none.
+   */
+  stores: StoresOnMap | null
+  /** Whose stores those are, e.g. "McDonald's". */
+  merchant: string
 }
 
 /*
@@ -25,6 +34,7 @@ const CHROME = '#e8ecf7'
 const NUGGET = '#ffb02e'
 const TUBE = '#080520'
 const PHOSPHOR = '#4dffa6'
+const KETCHUP = '#ff4f79'
 
 /** Map height in CSS pixels; `h-48` in Tailwind's default scale. */
 const MAP_HEIGHT_PX = 192
@@ -41,6 +51,20 @@ function dot(color: string, label: string): L.DivIcon {
 
 const YOU_ICON = dot(NUGGET, 'You')
 const BUDDY_ICON = dot(PHOSPHOR, 'A buddy waiting nearby')
+
+/**
+ * A store is a place, not a person, so it is a square rather than a dot — the
+ * difference survives a colour-blind eye and a greyscale screenshot, which a
+ * third colour alone would not. The label is fixed: a store's name comes from
+ * OSM and never goes near this HTML string; it rides on the marker's `title`,
+ * which Leaflet sets as a DOM property.
+ */
+const STORE_ICON = L.divIcon({
+  className: 'cell-map-store',
+  html: `<span aria-label="A store" style="display:block;width:11px;height:11px;border-radius:2px;background:${KETCHUP};border:2px solid ${TUBE};box-shadow:0 0 0 1px ${CHROME};"></span>`,
+  iconSize: [11, 11],
+  iconAnchor: [5.5, 5.5],
+})
 
 /**
  * The zoom at which a circle of `radiusMeters` fills most of the map's height.
@@ -73,7 +97,14 @@ function zoomForRadius(radiusMeters: number, lat: number): number {
  * `shared/geo.ts`) and are filtered to this radius server-side; this component
  * draws dots, it does not add or remove precision.
  */
-export function RadiusMap({ you, radiusMeters, buddies, centreLabel }: RadiusMapProps) {
+export function RadiusMap({
+  you,
+  radiusMeters,
+  buddies,
+  centreLabel,
+  stores,
+  merchant,
+}: RadiusMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const layerRef = useRef<L.LayerGroup | null>(null)
@@ -141,11 +172,22 @@ export function RadiusMap({ you, radiusMeters, buddies, centreLabel }: RadiusMap
       fillOpacity: 0.14,
     }).addTo(layer)
 
+    // Stores first, so a buddy standing at the counter is drawn over the store.
+    for (const store of stores?.stores ?? []) {
+      L.marker([store.lat, store.lng], {
+        icon: STORE_ICON,
+        keyboard: false,
+        title: store.address === null ? store.name : `${store.name}, ${store.address}`,
+      }).addTo(layer)
+    }
     L.marker([you.lat, you.lng], { icon: YOU_ICON, keyboard: false }).addTo(layer)
     for (const buddy of buddies) {
       L.marker([buddy.lat, buddy.lng], { icon: BUDDY_ICON, keyboard: false }).addTo(layer)
     }
-  }, [you, radiusMeters, buddies])
+  }, [you, radiusMeters, buddies, stores])
+
+  const within = formatMiles(radiusMeters)
+  const storeWords = stores === null ? null : describeStoresOnMap(stores, merchant, within)
 
   return (
     <div className="mt-4">
@@ -153,10 +195,13 @@ export function RadiusMap({ you, radiusMeters, buddies, centreLabel }: RadiusMap
         ref={containerRef}
         className="inset h-48 w-full"
         role="img"
-        aria-label={`Map centred on ${centreLabel}, showing everyone you could be paired with within ${formatMiles(
-          radiusMeters,
-        )}: you and ${buddies.length} other buyer${buddies.length === 1 ? '' : 's'} waiting`}
+        aria-label={`Map centred on ${centreLabel}, showing everyone you could be paired with within ${within}: you and ${buddies.length} other buyer${buddies.length === 1 ? '' : 's'} waiting${storeWords === null ? '' : `, and ${storeWords}`}`}
       />
+      {storeWords !== null && (
+        <p className="mt-1 font-body text-xs leading-snug text-steel" data-testid="map-stores">
+          {storeWords.charAt(0).toUpperCase() + storeWords.slice(1)}.
+        </p>
+      )}
       <p className="mt-1 text-right font-mono text-[0.58rem] tracking-[0.05em] text-steel uppercase">
         Map data &copy;{' '}
         {/* OSMF asks that attribution link to the copyright page; that link is

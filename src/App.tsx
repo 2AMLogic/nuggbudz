@@ -3,7 +3,8 @@ import { formatCents } from '@shared/economics'
 import { formatMiles } from '@shared/geo'
 import { describeLocationSource, type LocationSource } from '@shared/location'
 import { saucesForMerchant } from '@shared/sauces'
-import { useEffect, useState } from 'react'
+import { storesForMap } from '@shared/stores'
+import { useEffect, useMemo, useState } from 'react'
 import { HandoffCard } from './components/HandoffCard'
 import { RadiusMap } from './components/RadiusMap'
 import { RenderConsole } from './components/RenderConsole'
@@ -15,6 +16,7 @@ import { useHandoff } from './hooks/useHandoff'
 import { usePool } from './hooks/usePool'
 import { useSauces } from './hooks/useSauces'
 import { useSession } from './hooks/useSession'
+import { useStores } from './hooks/useStores'
 
 interface DealWithMath extends DealSpec {
   settlement: Settlement
@@ -178,6 +180,16 @@ export function App() {
   const placement =
     pool.locationSource === null ? null : describeLocationSource(pool.locationSource)
 
+  // Only once the server has placed this socket, and only while the map that
+  // draws them is on screen. The request carries the deal and nothing else.
+  const searching = pool.stage === 'connecting' || pool.stage === 'waiting'
+  const nearby = useStores(dealId, searching && pool.own !== null)
+  const { own, radiusMeters } = pool
+  const mapStores = useMemo(
+    () => (own === null || radiusMeters === null ? null : storesForMap(nearby, own, radiusMeters)),
+    [nearby, own, radiusMeters],
+  )
+
   if (
     pool.match !== null &&
     (pool.stage === 'matched' || pool.stage === 'settled' || pool.stage === 'disputed')
@@ -266,6 +278,8 @@ export function App() {
                 radiusMeters={pool.radiusMeters}
                 buddies={pool.buddies}
                 centreLabel={placement.label}
+                stores={mapStores}
+                merchant={nearby?.merchant ?? ''}
               />
               <p className="mt-1 font-body text-xs leading-snug text-steel">{placement.detail}</p>
             </>

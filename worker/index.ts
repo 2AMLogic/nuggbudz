@@ -10,7 +10,7 @@ import {
   sanitizeDemoName,
 } from '../shared/demo'
 import { analyzeSpread, settle } from '../shared/economics'
-import { DEFAULT_POOL_CELL_PRECISION, geohash } from '../shared/geo'
+import { DEFAULT_MATCH_RADIUS_METERS, DEFAULT_POOL_CELL_PRECISION, geohash } from '../shared/geo'
 import {
   coordsSupplied,
   DEMO_ORIGIN,
@@ -20,10 +20,12 @@ import {
 } from '../shared/location'
 import { PROTOCOL_VERSION } from '../shared/protocol'
 import { clientKey as deriveClientKey } from '../shared/ratelimit'
+import { brandForMerchant, type NearbyStores, storesWithin } from '../shared/stores'
 import { adminRoutes } from './admin'
 import { authRoutes, sessionFromRequest } from './auth'
 import { boolVar, type Env, intVar, stripeConfigured } from './env'
 import { type PaymentOutcomeRequest, serverPaymentMode } from './lib/payments'
+import { lookupStores } from './lib/stores'
 import { parsePaymentEvent, verifyStripeSignature } from './lib/stripe'
 import { INTERNAL_PAYMENT_PATH } from './pool'
 import { checkUpgradeRate } from './ratelimit'
@@ -281,6 +283,46 @@ app.get('/api/pool/ws', async (c) => {
   url.searchParams.set('userId', identity.userId)
   url.searchParams.set('displayName', identity.displayName)
   return stub.fetch(new Request(url, c.req.raw))
+})
+
+/**
+ * The chain's stores inside the market the pool would place you in.
+ *
+ * Centred the way the pool upgrade centres a socket — the edge's guess, else the
+ * demo origin — and never on anything the caller sends: a `lat`/`lng` here is
+ * ignored rather than honoured, so this cannot be used to ask Overpass about
+ * anywhere on earth, and so a rush at one venue lands on one cache key. The
+ * browser never talks to Overpass itself, which would hand a third party the
+ * buyer's position.
+ *
+ * A 503 is an ordinary answer: the map simply draws no stores, and nothing about
+ * pairing waits on this route.
+ */
+app.get('/api/stores', async (c) => {
+  const deal = findDeal(c.req.query('dealId') ?? '')
+  if (deal === undefined || !isDealOffered(deal.id)) {
+    return c.json({ error: 'unknown deal' }, 404)
+  }
+  const brand = brandForMerchant(deal.merchant)
+  if (brand === null) return c.json({ error: 'no store data for this merchant' }, 404)
+
+  const fix = resolveLocation(null, edgeCoords(c.req.raw), DEMO_ORIGIN)
+  const radiusMeters = intVar(c.env.MATCH_RADIUS_METERS, DEFAULT_MATCH_RADIUS_METERS)
+  const found = await lookupStores(
+    { cache: c.env.SESSIONS, overpassUrl: c.env.OVERPASS_URL || undefined },
+    brand,
+    fix,
+    radiusMeters,
+  )
+  if (found === null) return c.json({ error: 'store data is unavailable right now' }, 503)
+
+  const body: NearbyStores = {
+    centre: { lat: fix.lat, lng: fix.lng },
+    radiusMeters,
+    merchant: deal.merchant,
+    stores: storesWithin(found, fix, radiusMeters),
+  }
+  return c.json(body)
 })
 
 /**

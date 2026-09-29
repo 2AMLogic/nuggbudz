@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { geohash } from '../shared/geo'
+import { DEFAULT_POOL_CELL_PRECISION, geohash } from '../shared/geo'
 import {
   coordsSupplied,
   DEMO_ORIGIN,
@@ -11,6 +11,28 @@ import {
 } from '../shared/location'
 
 const SOURCES: LocationSource[] = ['client', 'edge', 'demo']
+
+/**
+ * Where the last rung actually puts a buyer — pinned, not derived.
+ *
+ * Issue #111: asserting `resolveLocation(null, null)` equals `{ ...DEMO_ORIGIN }`
+ * compares the function against the very constant it reads, so moving the origin
+ * moved the expectation with it and the test stayed green. These two values are
+ * golden: the shard and the coordinate were computed once outside this file, by
+ * running the repo's own `geohash` at `DEFAULT_POOL_CELL_PRECISION` against the
+ * origin of the day, and written down here as literals. Nothing in the test
+ * re-derives them, so relocating `DEMO_ORIGIN` goes red instead of following.
+ *
+ * Both are worth pinning, because neither subsumes the other. The cell is what
+ * the runtime cares about — every promptless socket lands in this one Durable
+ * Object, so a change here is a change of shard — but it is a ~156 km box, and
+ * which side of an edge the origin sits on decides how much slack that leaves:
+ * this one is close enough to the `9q8`/`9q9` edge that a move to Oakland already
+ * changes the cell, while a move the same distance west does not. The coordinate
+ * pins the move the cell cannot see.
+ */
+const DEMO_CELL = '9q8'
+const DEMO_COORDS = { lat: 37.7955, lng: -122.3937 }
 
 describe('parseCoords', () => {
   it('accepts numbers', () => {
@@ -94,7 +116,9 @@ describe('resolveLocation', () => {
   })
 
   it('falls to the demo origin when there is no cf to read at all', () => {
-    expect(resolveLocation(null, null)).toEqual({ ...DEMO_ORIGIN, source: 'demo' })
+    const fix = resolveLocation(null, null)
+    expect(geohash(fix.lat, fix.lng, DEFAULT_POOL_CELL_PRECISION)).toBe(DEMO_CELL)
+    expect(fix).toEqual({ ...DEMO_COORDS, source: 'demo' })
   })
 
   it('treats a partial or garbage cf as no cf at all', () => {

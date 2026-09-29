@@ -4,6 +4,7 @@ import type { LocationSource } from '@shared/location'
 import type {
   CellBuddy,
   ChatRelayMessage,
+  MarketMessage,
   MatchedMessage,
   PaymentRequiredMessage,
   ServerMessage,
@@ -76,6 +77,21 @@ export interface PoolState {
   radiusMeters: number | null
   /** Everyone else waiting within your radius, snapped to a coarse grid server-side. */
   buddies: CellBuddy[]
+  /**
+   * The market around a socket that holds no seat: how many are queued within
+   * your radius, overall and per deal. Counts only — the server sends no roster
+   * to a socket without a seat (#150). Null until a socket has been welcomed.
+   */
+  market: Pick<MarketMessage, 'waiting' | 'byDeal'> | null
+  /**
+   * The server refused a seat because this browser is not signed in (#150).
+   *
+   * Set from the refusal on the wire, never guessed here: whether an anonymous
+   * browser may take a seat is the server's one decision (`seatVerdict`), and a
+   * client that decided it for itself would be a second answer to drift from
+   * the first. Cleared by `dismissSignIn`, or by any new connection.
+   */
+  signInRequired: boolean
   match: MatchedMessage | null
   /**
    * The charge for your half, once the server has opened it with Stripe. Null
@@ -120,6 +136,8 @@ const INITIAL: PoolState = {
   own: null,
   radiusMeters: null,
   buddies: [],
+  market: null,
+  signInRequired: false,
   match: null,
   payment: null,
   error: null,
@@ -246,7 +264,9 @@ export function usePool() {
       close()
       // No optimistic position here: `welcome` carries the one the server
       // actually used, which is the only one the radius on the map is true for.
-      setState({ ...INITIAL, stage: 'connecting' })
+      // A socket that is not asking for a seat stays `idle`: it is looking at
+      // the market, not standing in line for it.
+      setState({ ...INITIAL, stage: seat === null ? 'idle' : 'connecting' })
 
       const socket = new WebSocket(socketUrl(request))
       socketRef.current = socket
@@ -285,6 +305,8 @@ export function usePool() {
                 radiusMeters: message.radiusMeters,
                 waiting: message.waiting,
               }
+            case 'market':
+              return { ...prev, market: { waiting: message.waiting, byDeal: message.byDeal } }
             case 'waiting':
               return {
                 ...prev,
@@ -446,6 +468,12 @@ export function usePool() {
                       }${heldSuffix(message.heldCents)}`,
               }
             case 'error':
+              // The seat was refused for want of an account. Not an error to
+              // print: it is the moment to offer the sign-in, and the socket
+              // stays open, idle, still showing the market.
+              if (message.code === 'sign_in_required') {
+                return { ...prev, stage: 'idle', signInRequired: true, error: null }
+              }
               // Two surfaces, one socket: the code decides which one hears about
               // it, so a mistyped pickup code is never reported as a chat problem.
               return isChatErrorCode(message.code)
@@ -461,11 +489,15 @@ export function usePool() {
         if (socketRef.current !== socket) return
         socketRef.current = null
         stopKeepalive()
-        setState((prev) =>
-          TERMINAL.includes(prev.stage)
-            ? prev
-            : { ...prev, stage: 'idle', error: 'Lost the connection. Try again.' },
-        )
+        setState((prev) => {
+          if (TERMINAL.includes(prev.stage)) return prev
+          // A socket that only ever looked at the market has nothing to report
+          // losing: the counts go, and the landing screen carries on without
+          // them. A refused browse upgrade — a rate limit, say — must not greet
+          // a visitor with an error about a seat they never asked for.
+          if (seat === null) return { ...prev, stage: 'idle', market: null }
+          return { ...prev, stage: 'idle', error: 'Lost the connection. Try again.' }
+        })
       }
     },
     [close, startKeepalive, stopKeepalive],
@@ -484,6 +516,11 @@ export function usePool() {
    * confirming is still a tap, and the server still checks the code and the role.
    */
   const attach = useCallback((request: SocketRequest) => connect(request, null), [connect])
+
+  /** Put the sign-in interstitial away without signing in. The socket stays. */
+  const dismissSignIn = useCallback(() => {
+    setState((prev) => ({ ...prev, signInRequired: false }))
+  }, [])
 
   /**
    * Say the handoff happened. The receiver sends the code off their bud's
@@ -510,5 +547,5 @@ export function usePool() {
     socket.send(JSON.stringify({ type: 'chat', text }))
   }, [])
 
-  return { ...state, join, attach, leave, confirmPickup, sendChat }
+  return { ...state, join, attach, leave, dismissSignIn, confirmPickup, sendChat }
 }

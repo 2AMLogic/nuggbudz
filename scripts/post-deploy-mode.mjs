@@ -6,7 +6,8 @@
  * ALLOW_DEMO_PAIRING:1`) both end in `wrangler deploy`, and until #74 neither
  * said anything afterwards about which mode the result left production in — a
  * plain `pnpm run deploy` silently disabled demo pairing with no error and no
- * warning, and the only symptom was every pool socket answering 401.
+ * warning, and the only symptom was every pool socket answering 401 (since
+ * #150, every signed-out `join` answering `sign_in_required` instead).
  *
  * This deliberately never trusts the command line that invoked `wrangler
  * deploy` — a claim derived from local flags would have been just as
@@ -39,8 +40,8 @@ async function main() {
 
   const demo = health.demoPairing === true
   const banner = demo
-    ? 'DEMO PAIRING IS ON  — unauthenticated sockets pair under a throwaway demo: identity.'
-    : 'DEMO PAIRING IS OFF — sign-in required; this is the strict production path.'
+    ? 'DEMO PAIRING IS ON  — signed-out browsers take seats under a throwaway demo: identity.'
+    : 'DEMO PAIRING IS OFF — anyone can browse, a seat needs sign-in; the strict production path.'
 
   console.log(`\nPost-deploy mode (${HEALTH_URL}): demoPairing=${health.demoPairing}`)
   console.log(banner)

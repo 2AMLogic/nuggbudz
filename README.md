@@ -148,11 +148,12 @@ pairing, put `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars`; without it (and
 without Stripe secrets) a join is refused with `payment_unavailable` rather than
 quietly pairing for free.
 
-Add `POOL_UPGRADE_LIMIT="300"` there too before running `pnpm test:e2e`. The
-socket limiter keys on `CF-Connecting-IP`, which `pnpm dev` never sets, so every
-local client shares the `unknown` bucket and a suite that opens several dozen
-sockets a minute trips a limit sized for a venue NAT. It surfaces as "Lost the
-connection. Try again." rather than as a refusal you can read.
+Add `POOL_UPGRADE_LIMIT="300"` there too before running `pnpm test:e2e`, and
+`POOL_ANON_UPGRADE_LIMIT="300"` beside it. The socket limiter keys on
+`CF-Connecting-IP`, which `pnpm dev` never sets, so every local client shares the
+`unknown` bucket and a suite that opens several dozen sockets a minute trips a
+limit sized for a venue NAT. It surfaces as "Lost the connection. Try again."
+rather than as a refusal you can read.
 
 ```bash
 pnpm test             # pure logic: settlement, geo, matchmaking, auth, protocol
@@ -354,31 +355,87 @@ drops out of the queue; retrying a released one is refused (`409`).
 are different questions. A dispute is a decision somebody owes an answer to; a
 hold is a failure somebody owes a retry to.
 
+### Browsing before signing in
+
+Taking a seat requires a signed-in account; **looking does not** (#150). The
+pool socket is open to everybody: a signed-out visitor is welcomed under an
+anonymous identity (the per-browser `nb_demo` cookie `/api/health` hands out),
+placed like any other socket, and sent `market` frames — how many are waiting
+within their radius, overall and per deal. That count is the product's whole
+argument, and asking for a Google account before showing it asked people to sign
+up to find out whether signing up was worth it.
+
+The account is asked for at the one moment it is needed: when the visitor taps
+"Find a bud". Whether an identity may take a seat is answered in exactly one
+place, `seatVerdict` in `shared/identity.ts`, called from the Durable Object's
+`join` path — never at the upgrade and never only in the client. An anonymous
+`join` on a server that seats accounts only is refused on the wire with
+`sign_in_required`, and the client turns that refusal into a sign-in
+interstitial. The seat being taken — deal and sauces, not the precise
+coordinates — is kept in `sessionStorage` across the Google round trip, and the
+buyer is seated on return without choosing again.
+
+Why the gate is the seat and not the socket, or anything later: money clears
+before the handshake starts, so a buyer met by a sign-in wall *after* pairing
+would abandon a match with their buddy's charge already in flight — and an
+anonymous tail has no account for `standingBand` to hold a no-show against.
+Why it has to be on the server: an anonymous identity is `demo:`, and
+`paymentDisposition` answers `demo` for any pair containing one before Stripe is
+consulted. An anonymous seat on a charged deployment would be a free pair.
+
+What a socket without a seat is **not** sent: the `buddies` roster. The snapped,
+nameless dots of who is waiting go only to a socket that took a seat, on
+`waiting`; an idle socket, signed in or not, gets counts. Otherwise the positions
+of the people waiting near you would be free to scrape by anybody who connects,
+and signing in would stop being what earns the sight of them.
+
+**The flood backstop, answered rather than inherited.** Until #150 the 401 at
+the upgrade was doing double duty: an unauthenticated flood never reached the
+rate limiter, because the session check refused it first. With the socket open,
+the limiter has to stand on its own, so anonymous upgrades are:
+
+- counted in a **separate, tighter** KV window (`POOL_ANON_UPGRADE_LIMIT`, 20 a
+  minute per address against the signed-in 30) — separate so a crowd browsing
+  signed-out on one venue NAT can never spend the budget of the signed-in buyers
+  standing next to them, and keyed on the address rather than the identity, so
+  minting a fresh anonymous id buys nothing; and
+- **capped concurrently** per address per shard (`POOL_ANON_SOCKETS_PER_IP`,
+  20), counted by hibernation tag inside the Durable Object. A window only
+  bounds how fast sockets arrive; this bounds how many one address can hold open,
+  which is what every queue change fans a `market` count out to.
+
 ### Demo pairing
 
-Pairing requires a signed-in account. That is right for production and fatal on
-a stage: without the two secrets above, sign-in answers 503 and the pool socket
-answers 401, so **nobody can pair at all**. There are two deploy scripts, and
-they leave production in two different modes — pick the one you mean:
+`ALLOW_DEMO_PAIRING` answers exactly one question: **may an anonymous identity
+take a seat?** Off, and a signed-out visitor browses and is asked to sign in when
+they tap. On, and they pair under a name they type, as below. Everything else —
+that a demo pair is never charged and never booked — follows from *who took the
+seat*, read off the two user ids, not from a second reading of the flag.
+
+Seating only accounts is right for production and fatal on a stage: without the
+two secrets above, sign-in answers 503, so **nobody can take a seat at all**.
+There are two deploy scripts, and they leave production in two different modes
+— pick the one you mean:
 
 ```bash
 pnpm run deploy         # strict: sign-in required, matches production
 pnpm run deploy:demo    # stage: vite build && wrangler deploy --var ALLOW_DEMO_PAIRING:1
 ```
 
-`pnpm run deploy` (plain) leaves the site **sign-in-only** — the same 401 for
-every unauthenticated pool socket described above. It is not a "safe default
+`pnpm run deploy` (plain) leaves the site **sign-in-only** — every signed-out
+visitor can browse, and every one of them is asked to sign in for a seat. It is
+not a "safe default
 that also happens to allow demo pairing"; use `deploy:demo` when a stage needs
 the escape hatch. Both scripts run the same `vite build && wrangler deploy`
 underneath and then print the mode the deployment actually ended up in, read
 back from the deployed Worker's own `/api/health` — never from which script you
 ran — so a config drift or a stale cached build cannot pass silently.
 
-With demo pairing on, an unauthenticated caller is given a throwaway `demo:`
-identity and pairs under a name they type; the UI says on screen that it is
-pairing without accounts. The caller may propose a *display name* but never a
-user id — the id is minted server-side, on a cookie `/api/health` sets, and is
-therefore **sticky per browser**.
+With demo pairing on, an unauthenticated caller's `demo:` identity may take a
+seat, and pairs under a name they type; the UI says on screen that it is pairing
+without accounts. The caller may propose a *display name* but never a user id —
+the id is minted server-side, on a cookie `/api/health` sets, and is therefore
+**sticky per browser**.
 
 **That stickiness costs the single-device demo, deliberately.** It has to exist:
 a phone's camera app opens the handoff link in a new tab, a new tab is a new
@@ -397,8 +454,9 @@ BASE=http://localhost:5199 node scripts/demo-pairing-check.mjs
 ```
 
 It reads `/api/health` and asserts the matching half: flag off ⇒ an
-unauthenticated upgrade is refused 401; flag on ⇒ two unauthenticated clients
-pair with each other, with `demo:` identities and the same $4.49 split.
+unauthenticated socket is welcomed but its `join` is refused with
+`sign_in_required`; flag on ⇒ two unauthenticated clients pair with each other,
+with `demo:` identities and the same $4.49 split.
 
 **`wrangler dev --var ALLOW_DEMO_PAIRING=on` is a different lever from the one
 above, and it does not reliably work — don't reach for it.** On the currently

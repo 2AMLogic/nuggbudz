@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers'
 import { CHAT_RATE_LIMIT, CHAT_RATE_WINDOW_MS, reviewChatText } from '../shared/chat'
 import { findDeal, isDealOffered } from '../shared/deals'
+import { demoPairingEnabled } from '../shared/demo'
 import {
   type DisputeReason,
   parseDisputeReason,
@@ -21,6 +22,7 @@ import {
 } from '../shared/expiry'
 import { DEFAULT_MATCH_RADIUS_METERS, distanceMeters, type LatLng, snapToGrid } from '../shared/geo'
 import { type HoldReason, parseHoldReason, parseHoldRetryRequest } from '../shared/holds'
+import { seatVerdict } from '../shared/identity'
 import { type LocationSource, parseCoords, parseLocationSource } from '../shared/location'
 import { type Candidate, findMatch } from '../shared/matchmaker'
 import {
@@ -36,12 +38,13 @@ import {
 } from '../shared/pickup'
 import {
   type JoinMessage,
+  type MarketMessage,
   PROTOCOL_VERSION,
   type ProtocolErrorCode,
   parseClientMessage,
   type ServerMessage,
 } from '../shared/protocol'
-import { slidingWindow } from '../shared/ratelimit'
+import { anonSocketTag, slidingWindow, underConcurrencyCap } from '../shared/ratelimit'
 import { STANDING_TIEBREAK_WINDOW_MS, type StandingBand } from '../shared/reputation'
 import { parseSauceSelection, type SauceSelection } from '../shared/sauces'
 import { boolVar, type Env, intVar, stripeConfigured } from './env'
@@ -128,6 +131,9 @@ const PENDING_HOLD_PREFIX = 'holdfile:'
  * reconciliation record for money this pool failed to give back.
  */
 const TOMBSTONE_RETENTION_MS = 4 * 24 * 60 * 60 * 1_000
+
+/** Anonymous sockets one address may hold open in a cell, when the var is unset. */
+const DEFAULT_ANON_SOCKETS_PER_IP = 20
 
 /**
  * Who is on the other end of a socket.
@@ -412,8 +418,26 @@ export class NuggPool extends DurableObject<Env> {
       return new Response('missing server-derived location', { status: 400 })
     }
 
+    // An anonymous socket (#150) is counted against its address, and refused
+    // past the cap before anything is accepted — see `anonSocketTag`. The Worker
+    // sets `anonKey` only when there is no session, and overwrites whatever a
+    // caller put there, so a signed-in socket is never counted here.
+    const anonKey = params.get('anonKey') ?? ''
+    const tags: string[] = []
+    if (anonKey.length > 0) {
+      const tag = anonSocketTag(anonKey)
+      const cap = Math.max(
+        1,
+        intVar(this.env.POOL_ANON_SOCKETS_PER_IP, DEFAULT_ANON_SOCKETS_PER_IP),
+      )
+      if (!underConcurrencyCap(this.ctx.getWebSockets(tag).length, cap)) {
+        return new Response('too many open connections from this address', { status: 429 })
+      }
+      tags.push(tag)
+    }
+
     const { 0: client, 1: server } = new WebSocketPair()
-    this.ctx.acceptWebSocket(server)
+    this.ctx.acceptWebSocket(server, tags)
 
     const connId = crypto.randomUUID()
     const cell = params.get('cell') ?? ''
@@ -446,6 +470,10 @@ export class NuggPool extends DurableObject<Env> {
       expiry: this.windows,
       pickupTimeoutMs: this.pickupTimeoutMs,
     })
+    // Every socket starts without a seat, so it is shown the market the way
+    // every idle socket is — counts, never the roster. A socket about to be
+    // adopted into a live handoff below gets this too and simply moves past it.
+    this.send(server, this.marketAround(origin))
 
     await this.adoptLiveHandoff(server, userId, connId)
 
@@ -907,6 +935,26 @@ export class NuggPool extends DurableObject<Env> {
     }
     if (state.status === 'matched') {
       this.fail(ws, 'already_matched', 'this connection is already matched')
+      return
+    }
+
+    /**
+     * Whether this identity may take a seat at all — asked here, and only here.
+     *
+     * Every socket is welcomed now, signed in or not (#150), so this is the
+     * boundary an account guards: not the market, the seat. It sits in the
+     * `join` path rather than at the upgrade or in the client because this is
+     * where the money is decided — an anonymous identity is `demo:`, and
+     * `paymentDisposition` answers `demo` for any pair containing one *before*
+     * Stripe is consulted. A seat granted to an anonymous socket on a charged
+     * deployment would therefore be a free pair, so the check that a free pair
+     * is permitted lives beside the code that makes the pair free.
+     *
+     * First among the identity checks, so a refused browser is told the one
+     * thing it can act on rather than something about a deal or a tab.
+     */
+    if (seatVerdict(state.userId, demoPairingEnabled(this.env.ALLOW_DEMO_PAIRING)) !== 'seat') {
+      this.fail(ws, 'sign_in_required', 'sign in to take a seat — browsing the market needs none')
       return
     }
 
@@ -1983,6 +2031,22 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
+   * What an idle socket at `at` is told about the market: counts only.
+   *
+   * Radius-scoped for the same reason `sendWaiting` is, and deliberately without
+   * `buddies`. An idle socket may be one nobody signed in to open (#150), and a
+   * roster — even of snapped, nameless dots — handed to anybody who connects
+   * would make the positions of the people waiting near you free to scrape.
+   * The dots are for buyers who took a seat.
+   */
+  private marketAround(at: LatLng): MarketMessage {
+    const nearby = this.withinRadius(at)
+    const byDeal: Record<string, number> = {}
+    for (const { state } of nearby) byDeal[state.dealId] = (byDeal[state.dealId] ?? 0) + 1
+    return { type: 'market', waiting: nearby.length, byDeal }
+  }
+
+  /**
    * The waiting buyers inside the match radius of a point, optionally excluding
    * one connection (normally the buyer being told).
    *
@@ -2131,15 +2195,19 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
-   * Refresh every waiting socket's roster after a join, cancel or disconnect.
+   * Refresh every socket's view of the market after a join, cancel or
+   * disconnect: a waiting socket's roster, and an idle socket's counts.
    *
    * Every socket in the shard is told, but each is told only about its own
-   * radius: `sendWaiting` re-derives "nearby" from the recipient, so two buyers
-   * in one shard and forty miles apart get genuinely different rosters.
+   * radius: `sendWaiting` and `marketAround` re-derive "nearby" from the
+   * recipient, so two buyers in one shard and forty miles apart get genuinely
+   * different answers. A matched socket is told nothing — it is looking at a
+   * receipt, not a market.
    */
   private broadcastWaiting(): void {
-    for (const { ws, state } of this.waitingStates()) {
-      this.sendWaiting(ws, state)
+    for (const { ws, state } of this.states()) {
+      if (state.status === 'waiting') this.sendWaiting(ws, state)
+      else if (state.status === 'idle') this.send(ws, this.marketAround(state.origin))
     }
   }
 

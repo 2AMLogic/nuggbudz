@@ -6,7 +6,9 @@
  * This checks the mode boundary instead, reading `/api/health` to find out which
  * side of it the server sits on:
  *
- *   demoPairing false ⇒ an unauthenticated upgrade must be refused (401).
+ *   demoPairing false ⇒ an unauthenticated socket is welcomed and may browse,
+ *                       but its `join` must be refused (`sign_in_required`) —
+ *                       since #150 the seat is the gate, not the socket.
  *   demoPairing true  ⇒ two unauthenticated clients must pair with each other,
  *                       under the names they proposed, with `demo:` identities,
  *                       run the whole pickup handshake to `pickup_complete`,
@@ -192,13 +194,37 @@ async function main() {
   }
 
   if (!demo) {
-    // Strict mode: the identity gate runs before the upgrade check, so a plain GET
-    // exercises it. (undici forbids setting Upgrade/Connection on a fetch, and a
-    // real socket would only surface the refusal as an opaque connection error.)
-    const res = await fetch(`${BASE}/api/pool/ws`)
-    check('unauthenticated upgrade refused', res.status === 401, `status ${res.status}`)
-    const body = await res.json().catch(() => ({}))
-    check('refusal says why', body.error === 'sign in required', JSON.stringify(body))
+    // Strict mode. Since #150 the socket is open to everybody and the *seat* is
+    // what needs an account, so the door this checks is the `join`: a signed-out
+    // browser is welcomed, and asking for a seat is refused on the wire.
+    const jar = await freshDemoIdentity('strict browser')
+    const anon = open('Nobody', jar)
+    try {
+      await anon.opened
+    } catch (err) {
+      check('an unauthenticated socket is welcomed rather than refused', false, String(err))
+      console.log(`\n${failures} CHECK(S) FAILED`)
+      process.exit(1)
+    }
+    const welcome = await anon.expect('welcome')
+    check(
+      'an unauthenticated socket is welcomed, under an anonymous identity',
+      typeof welcome.user?.id === 'string' && welcome.user.id.startsWith('demo:'),
+      JSON.stringify(welcome.user),
+    )
+    anon.join()
+    const refused = await anon.expect('error')
+    check(
+      'and its join is refused for want of an account',
+      refused.code === 'sign_in_required',
+      `${refused.code}: ${refused.message}`,
+    )
+    check(
+      'and takes no seat',
+      (await anon.settles('waiting')) === false,
+      JSON.stringify(anon.inbox.map((m) => m.type)),
+    )
+    anon.ws.close()
   } else {
     // Two browsers, two jars. Asserted before anything is opened, so a server that
     // stopped issuing identities — or started issuing one identity to everybody —

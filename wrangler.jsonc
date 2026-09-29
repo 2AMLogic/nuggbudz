@@ -57,6 +57,19 @@
     // costs one KV write (the free tier allows 1,000 per day).
     "POOL_UPGRADE_LIMIT": "30",
     "POOL_UPGRADE_WINDOW_SECONDS": "60",
+    // The same window for upgrades with no session (#150). Until then a
+    // signed-out upgrade never reached the limiter — the 401 refused it first —
+    // so opening the socket to browsers who have not signed in needs an answer
+    // of its own rather than an inherited one: a separate bucket, so a crowd
+    // browsing signed-out on one venue NAT can never spend the signed-in
+    // buyers' budget, and a tighter one, because a browse socket has no seat to
+    // protect. A page load costs one browse upgrade; a demo phone a few more.
+    "POOL_ANON_UPGRADE_LIMIT": "20",
+    // Anonymous sockets one address may hold open at once in one shard. The
+    // hard backstop behind the window above: every queue change fans a count
+    // out to each idle socket, so this bounds what one address can make that
+    // cost. Sized for a food court behind one NAT, not for a script.
+    "POOL_ANON_SOCKETS_PER_IP": "20",
     // A handoff is two taps seconds apart once the buddies are standing
     // together, so five minutes of silence from the second side means the
     // meeting did not happen — the match is disputed rather than settled.

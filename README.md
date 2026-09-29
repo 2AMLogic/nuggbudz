@@ -289,9 +289,23 @@ The refund is issued against the charges the dead match left behind, and — lik
 every other refund here — the row records only what Stripe *confirmed*.
 `refunded_cents` stays `NULL` until the call has been answered for at all, which
 is not the same as `0`; on a server with no Stripe secrets it is `0`, meaning
-"no charge was taken, nothing to refund". Resolving a dispute twice is refused
-(`409`) rather than silently overwriting the first decision, which is enforced in
-SQL (`WHERE resolved_at IS NULL`) rather than by a read-then-write.
+"no charge was taken, nothing to refund".
+
+**The decision is made once; its refund can be asked for again.** Overturning a
+resolution is refused (`409 decided_differently`) and always was, enforced in SQL
+(`WHERE resolved_at IS NULL`) rather than by a read-then-write. But a refund can
+fail like any other — Stripe declines it, or the call never completes — and that
+used to get the same `409`, which left money held with no way back through the one
+route that exists to release it. So re-POSTing the **same** resolution retries the
+refund: safe any number of times, because every refund is keyed
+`refund:<matchId>:<role>` and a leg Stripe has already handed back is no longer
+owed. `outstanding_cents` is what the resolution promised to return and has not,
+as the Durable Object reported it — `NULL` or greater than zero is retryable, and
+zero is a `409 refund_complete` because there is nothing left to do. A retry pays
+out; it never rewrites `resolved_by`, `resolved_at`, `resolution` or the note.
+Comparing `refunded_cents` against `held_cents` cannot answer this: `settled`
+refunds nobody on purpose, and `refund_orderer` pays back one half of money that
+is still holding the other.
 
 **Authorization is a session plus an allowlist, not a shared token.**
 `OPERATOR_USER_IDS` names `users.id` values; the caller still has to be signed in

@@ -420,8 +420,19 @@ export interface DisputeRecord {
   /**
    * What Stripe gave back. `null` on a resolved dispute is not zero: it means
    * the refund was never answered for, which is a state a human has to finish.
+   *
+   * Accumulated across attempts, like `holds.refunded_cents`: a resolution whose
+   * refund was declined can be re-asked, and each attempt recovers whichever
+   * legs it manages to.
    */
   refundedCents: number | null
+  /**
+   * What this resolution promised to return and has not, as of the last attempt
+   * Stripe answered. `null` for the same reason `refundedCents` is: no attempt
+   * has been answered for. Greater than zero is the whole retry condition —
+   * see `resolutionDisposition` in `shared/disputes.ts`.
+   */
+  outstandingCents: number | null
   note: string | null
 }
 
@@ -443,13 +454,14 @@ interface DisputeRow {
   resolved_by: string | null
   resolution: DisputeResolution | null
   refunded_cents: number | null
+  outstanding_cents: number | null
   note: string | null
 }
 
 const SELECT_DISPUTE_COLUMNS = `match_id, deal_id, cell, created_at, disputed_at, reason,
   confirmed_role, confirmed_at,
   orderer_user_id, orderer_name, receiver_user_id, receiver_name,
-  held_cents, resolved_at, resolved_by, resolution, refunded_cents, note`
+  held_cents, resolved_at, resolved_by, resolution, refunded_cents, outstanding_cents, note`
 
 function toDisputeRecord(row: DisputeRow): DisputeRecord {
   return {
@@ -470,6 +482,7 @@ function toDisputeRecord(row: DisputeRow): DisputeRecord {
     resolvedBy: row.resolved_by,
     resolution: row.resolution,
     refundedCents: row.refunded_cents,
+    outstandingCents: row.outstanding_cents,
     note: row.note,
   }
 }
@@ -527,10 +540,16 @@ export interface DisputeResolutionRequest {
  * changes a row, and the other is told no. A read-then-write would let both
  * believe they had decided, and only one decision moves the money.
  *
- * Claiming happens *before* the refund is attempted, and `refunded_cents` is
- * deliberately left NULL here. The same rule the payment ledger follows: a
- * refund is only a refund once Stripe says so, and this row must not claim one
- * that has not been asked for yet.
+ * Claiming happens *before* the refund is attempted, and `refunded_cents` /
+ * `outstanding_cents` are deliberately left NULL here. The same rule the payment
+ * ledger follows: a refund is only a refund once Stripe says so, and this row
+ * must not claim one that has not been asked for yet.
+ *
+ * This is the guard on a *first* decision only. Re-asking for the decision this
+ * wrote, because its refund never landed, claims nothing — there is nothing left
+ * to decide and nothing one operator can take from another, exactly as on the
+ * holds queue. `resolutionDisposition` in `shared/disputes.ts` is what decides
+ * which POSTs reach this at all.
  */
 export async function claimDispute(
   db: D1Database,
@@ -547,22 +566,48 @@ export async function claimDispute(
   return (result.meta.changes ?? 0) === 1
 }
 
+export interface DisputeRefundStamp {
+  /** What *this* attempt recovered, in integer cents. Added to what came before. */
+  refundedCents: number
+  /**
+   * What the resolution still owes after it — the Durable Object's own answer
+   * about the legs Stripe would not confirm, never a figure derived here.
+   */
+  outstandingCents: number
+}
+
 /**
  * Stamp what Stripe actually handed back, once it has answered.
  *
- * Only ever called after the refund round trip, and only for a dispute this
- * caller claimed. A resolution whose refund call failed leaves `refunded_cents`
- * NULL rather than 0, because "the money did not move" and "nothing was owed"
- * are different facts and a reconciliation needs to tell them apart.
+ * Only ever called after the refund round trip. A resolution whose refund call
+ * failed leaves both columns NULL rather than 0, because "the money did not
+ * move" and "nothing was owed" are different facts and a reconciliation needs to
+ * tell them apart.
+ *
+ * `refunded_cents` accumulates, exactly as `stampHoldRefund` does and for the
+ * same reason: a declined refund can be re-asked, each attempt recovers whichever
+ * legs it manages to, and the Durable Object reports what *that* attempt got
+ * rather than a running total. A plain `SET` here would lose the first attempt's
+ * ground on the second — and would overwrite a concurrent retry's recovery with
+ * the `0` the loser of that race is correctly told.
+ *
+ * `outstanding_cents` is replaced outright, because it is an absolute figure: it
+ * is what is still owed *now*, and reaching zero is the only thing that closes
+ * the retry path.
  */
 export async function stampDisputeRefund(
   db: D1Database,
   matchId: string,
-  refundedCents: number,
+  stamp: DisputeRefundStamp,
 ): Promise<void> {
   await db
-    .prepare('UPDATE disputes SET refunded_cents = ?2 WHERE match_id = ?1')
-    .bind(matchId, refundedCents)
+    .prepare(
+      `UPDATE disputes
+          SET refunded_cents = COALESCE(refunded_cents, 0) + ?2,
+              outstanding_cents = ?3
+        WHERE match_id = ?1`,
+    )
+    .bind(matchId, stamp.refundedCents, stamp.outstandingCents)
     .run()
 }
 

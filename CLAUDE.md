@@ -220,6 +220,22 @@ state.
   resolutions are named for what they do to the money (`refund_receiver`, not
   `sided_with_receiver`), and `refunded_cents` is stamped only after Stripe
   answers — `NULL` means "not answered for", which is not `0`.
+- **A resolution is decided once and paid out until it lands.** The `409` guards a
+  second *decision*, never a second *attempt* at the same one: a refund Stripe
+  declined, or a resolution whose refund call never completed, was money held with
+  no route back through the only endpoint that can release it (#103).
+  `resolutionDisposition` in `shared/disputes.ts` is the one place that tells the
+  three apart — `decide`, `retry`, or a `409` naming itself `decided_differently`
+  or `refund_complete` — and it reads `outstanding_cents`, which is what the
+  resolution promised to return and has not, *as the Durable Object reported it*.
+  Never derive that from `refunded_cents` against `held_cents`: `settled` refunds
+  nobody on purpose and would read as forever unfinished, and `refund_orderer`
+  pays back one half of money that is still holding the other. A retry claims
+  nothing and rewrites nothing — `resolved_by`, `resolved_at`, `resolution` and the
+  note are the decision, and only the money moves — so `refunded_cents`
+  accumulates like `holds.refunded_cents` rather than being `SET`, because the
+  object reports what *this* attempt recovered. A dispute's held money still files
+  no `holds` row: it is already in one operator queue.
 - **A comment body is never a bare `@`-token, and a review verdict is never
   posted by hand.** `gh pr comment --body @path` does not expand `@path`, it
   posts the literal string — and `@-`, the stdin spelling of the same mistake,

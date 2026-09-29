@@ -3,13 +3,17 @@ import {
   type DisputeResolution,
   disputeNote,
   parseDisputeResolution,
+  RESOLUTION_REFUSALS,
+  type ResolutionRefusal,
   refundedRoles,
+  resolutionDisposition,
 } from '../shared/disputes'
 import { isOperator, parseOperatorIds } from '../shared/operators'
 import { sessionFromRequest } from './auth'
 import type { Env } from './env'
 import {
   claimDispute,
+  type DisputeRecord,
   getDispute,
   getHold,
   listDisputes,
@@ -32,6 +36,13 @@ import { INTERNAL_DISPUTE_PATH, INTERNAL_HOLD_PATH } from './pool'
  * The two queues are parallel and never mixed. A dispute is a decision somebody
  * owes an answer to; a hold is a refund the processor refused, which nobody
  * decided and which has nothing to resolve — only something to retry.
+ *
+ * A dispute can need both. The decision is made once and is not overturnable
+ * here, but the refund it implies can fail like any other, and re-POSTing the
+ * *same* resolution is how it is asked for again — which is why a resolved
+ * dispute is not automatically a closed one (#103). A hold is still never filed
+ * for it: the money is already in one operator queue, and putting it in two is
+ * worse than leaving it in one.
  *
  * Authorization is a **session plus an allowlist**, not a shared bearer token.
  * A resolution moves money and the row it writes records `resolved_by`; a token
@@ -110,23 +121,43 @@ adminRoutes.post('/disputes/:matchId/resolve', async (c) => {
   const matchId = c.req.param('matchId')
   const existing = await getDispute(c.env.DB, matchId)
   if (existing === null) return c.json(notFound, 404)
-  if (existing.resolvedAt !== null) {
-    return c.json({ error: 'that dispute is already resolved', dispute: existing }, 409)
-  }
 
-  // The claim is the concurrency control, not the read above: two operators
-  // deciding at once both reach here and exactly one of them changes a row.
-  const claimed = await claimDispute(c.env.DB, {
-    matchId,
-    resolution,
-    // Off the session. A body may say what to decide, never who decided.
-    resolvedBy: operator.userId,
-    resolvedAt: Date.now(),
-    note: disputeNote(fields.note),
-  })
-  if (!claimed) {
-    return c.json({ error: 'that dispute is already resolved' }, 409)
+  // A resolved dispute is not automatically a closed one. The 409 below exists
+  // to stop a second *decision*; re-asking for the decision already stored,
+  // because its refund never came back, is a second *attempt* at the same one —
+  // and the only route there is to release that money (#103).
+  const disposition = resolutionDisposition(existing, resolution)
+  if (disposition.act === 'refuse') return c.json(refusal(disposition.reason, existing), 409)
+
+  if (disposition.act === 'decide') {
+    // The claim is the concurrency control, not the read above: two operators
+    // deciding at once both reach here and exactly one of them changes a row.
+    const claimed = await claimDispute(c.env.DB, {
+      matchId,
+      resolution,
+      // Off the session. A body may say what to decide, never who decided.
+      resolvedBy: operator.userId,
+      resolvedAt: Date.now(),
+      note: disputeNote(fields.note),
+    })
+    if (!claimed) {
+      // Somebody decided in the gap. Whether this caller may still push the
+      // money along is the same question asked of the row as it now stands: an
+      // identical decision is a retry, anything else is an overturn.
+      const decided = await getDispute(c.env.DB, matchId)
+      const after = decided === null ? null : resolutionDisposition(decided, resolution)
+      if (after?.act !== 'retry') {
+        const reason = after?.act === 'refuse' ? after.reason : 'decided_differently'
+        return c.json(refusal(reason, decided ?? existing), 409)
+      }
+    }
   }
+  // A retry deliberately claims nothing and rewrites nothing: `resolved_by`,
+  // `resolved_at`, `resolution` and the note are the decision, it stands, and
+  // this caller is only finishing paying it out. Two retries at once are safe
+  // for the reason the holds queue needs no claim either — the object refunds
+  // one event at a time, every refund is keyed `refund:<matchId>:<role>`, and
+  // the second finds nothing left owed.
 
   const money = await settleResolution(
     c.env,
@@ -136,19 +167,52 @@ adminRoutes.post('/disputes/:matchId/resolve', async (c) => {
     existing.heldCents,
   )
   if (money === null) {
-    // The decision stands and the money did not move. `refunded_cents` stays
-    // NULL, which is exactly the state this reports: a resolution nobody has
-    // finished paying out. Saying 0 here would claim the refund came back empty.
+    // The decision stands and the money did not move. `refunded_cents` and
+    // `outstanding_cents` stay NULL, which is exactly the state this reports: a
+    // resolution nobody has finished paying out. Saying 0 would claim the refund
+    // came back empty. POSTing the same resolution again is the way out.
     return c.json(
-      { error: 'the resolution was recorded but its refund could not be issued', matchId },
+      {
+        error: 'the resolution was recorded but its refund could not be issued',
+        reason: 'refund_unattempted',
+        retry: 'POST the same resolution again',
+        matchId,
+      },
       502,
     )
   }
 
-  await stampDisputeRefund(c.env.DB, matchId, money.refundedCents)
+  await stampDisputeRefund(c.env.DB, matchId, {
+    refundedCents: money.refundedCents,
+    outstandingCents: money.outstandingCents,
+  })
   const dispute = await getDispute(c.env.DB, matchId)
-  return c.json({ dispute, refundedCents: money.refundedCents, heldCents: money.heldCents })
+  return c.json({
+    dispute,
+    refundedCents: money.refundedCents,
+    heldCents: money.heldCents,
+    // What this resolution still owes. Greater than zero is an operator's cue
+    // to POST the same resolution again once whatever Stripe objected to is
+    // dealt with, and it is the same figure the next POST is judged against.
+    outstandingCents: money.outstandingCents,
+  })
 })
+
+/**
+ * Say no to a resolution POST, and say which no it is.
+ *
+ * Both refusals are 409s and an operator cannot act on either without knowing
+ * which: one means a colleague already decided something else, the other means
+ * there is genuinely nothing left to do. Before #103 they were the same sentence
+ * — and one of them was wrong, because a resolution whose refund failed was
+ * being refused as though it had succeeded.
+ */
+function refusal(
+  reason: ResolutionRefusal,
+  dispute: DisputeRecord,
+): { error: string; reason: ResolutionRefusal; dispute: DisputeRecord } {
+  return { error: RESOLUTION_REFUSALS[reason], reason, dispute }
+}
 
 /**
  * Every match still holding money from a teardown nobody disputed.
@@ -249,7 +313,8 @@ async function retryHold(
  *
  * Returns null when the refund could not be attempted at all, which the caller
  * turns into a resolved dispute with an unanswered refund rather than a lie
- * about one. A resolution that refunds nobody, or a dispute that was holding
+ * about one — and, since #103, one a second POST of the same resolution can
+ * finish. A resolution that refunds nobody, or a dispute that was holding
  * nothing, never leaves the Worker: there is no processor call to make.
  */
 async function settleResolution(
@@ -258,9 +323,12 @@ async function settleResolution(
   matchId: string,
   resolution: DisputeResolution,
   heldCents: number,
-): Promise<{ refundedCents: number; heldCents: number } | null> {
+): Promise<{ refundedCents: number; heldCents: number; outstandingCents: number } | null> {
   if (refundedRoles(resolution).length === 0 || heldCents === 0) {
-    return { refundedCents: 0, heldCents }
+    // Nothing was ever owed, so nothing is outstanding and there is nothing to
+    // retry: `settled` holds both halves on purpose, and a dispute holding
+    // nothing has no legs to refund.
+    return { refundedCents: 0, heldCents, outstandingCents: 0 }
   }
 
   const stub = env.NUGG_POOL.get(env.NUGG_POOL.idFromName(cell))
@@ -272,7 +340,18 @@ async function settleResolution(
     }),
   )
   if (!response.ok) return null
-  const result = (await response.json()) as { refundedCents?: unknown; heldCents?: unknown }
+  const result = (await response.json()) as {
+    refundedCents?: unknown
+    heldCents?: unknown
+    outstandingCents?: unknown
+  }
   if (typeof result.refundedCents !== 'number' || typeof result.heldCents !== 'number') return null
-  return { refundedCents: result.refundedCents, heldCents: result.heldCents }
+  // A body that does not say what is still owed is the 502 path, not a zero: a
+  // refund stamped as finished is the one state there is no way back from.
+  if (typeof result.outstandingCents !== 'number') return null
+  return {
+    refundedCents: result.refundedCents,
+    heldCents: result.heldCents,
+    outstandingCents: result.outstandingCents,
+  }
 }

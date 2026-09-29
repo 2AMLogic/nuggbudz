@@ -1,4 +1,4 @@
-import { parseSauceSelection, SAUCES_PER_SELECTION, type SauceSelection } from '@shared/sauces'
+import { parseSauceSelection, type SauceSelection, tapSauce } from '@shared/sauces'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 /**
@@ -36,12 +36,23 @@ function writeStored(selection: SauceSelection): void {
 }
 
 export interface SauceChoice {
-  /** Sauces tapped so far, in tap order: none, one, or the two that make a pair. */
+  /** The last two taps, oldest first: none, one, or the two that make a pair. */
   picks: readonly string[]
   /** The finished pair in catalogue order, or null while fewer than two are in. */
   selection: SauceSelection | null
-  /** Tap a sauce. Tapping one twice is a double order; a third tap starts over. */
+  /** Tap a sauce. Tapping one twice is a double order; past two, the oldest goes. */
   tap: (sauceId: string) => void
+  /**
+   * Commit the current pair as what this browser comes back to.
+   *
+   * Called when the buyer takes a seat, because joining is the moment a pair
+   * stops being something they were playing with and becomes the order they
+   * queued with. A tap already writes, so this is a no-op for a buyer who picked
+   * on this visit; it earns its keep for one who did not touch the picker at
+   * all — a stored pair that is merely *read* back is re-stamped by joining, so
+   * the account and this browser agree on the pair a bud was actually promised.
+   */
+  remember: () => void
 }
 
 /**
@@ -77,9 +88,7 @@ export function useSauces(signedIn: boolean): SauceChoice {
   const tap = useCallback(
     (sauceId: string) => {
       touched.current = true
-      // A full pair plus one tap is a fresh start, not a third sauce: two is the
-      // whole selection, so the newest tap becomes the new first pick.
-      const next = picks.length >= SAUCES_PER_SELECTION ? [sauceId] : [...picks, sauceId]
+      const next = tapSauce(picks, sauceId)
       setPicks(next)
       const complete = parseSauceSelection(next)
       if (complete !== null) persist(complete)
@@ -120,5 +129,9 @@ export function useSauces(signedIn: boolean): SauceChoice {
 
   const selection = useMemo(() => parseSauceSelection(picks), [picks])
 
-  return { picks, selection, tap }
+  const remember = useCallback(() => {
+    if (selection !== null) persist(selection)
+  }, [selection, persist])
+
+  return { picks, selection, tap, remember }
 }

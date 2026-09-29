@@ -232,6 +232,26 @@ export function parseSauceSelection(raw: unknown, merchant?: string): SauceSelec
 }
 
 /**
+ * Apply one tap to the taps already made: the picker's whole state rule.
+ *
+ * A sliding window of the last two taps, oldest evicted first. A buyer holding a
+ * finished pair who taps a third sauce means "that one instead of the one I
+ * picked first", not "throw both away and start again" — the earlier rule
+ * cleared the pair, so correcting the second half of a pair cost you the half
+ * you were happy with, and tapping one sauce three times alternated between a
+ * double and a single for no reason a buyer could see.
+ *
+ * Kept here rather than in the hook because it is the selection rule, not a
+ * React detail, and because `test/sauces.test.ts` can drive a tap sequence
+ * without a DOM. Taps are *not* canonicalised — they are what the buyer pressed,
+ * in that order, which is what eviction is defined against; `parseSauceSelection`
+ * is still the only thing that turns two of them into a stored selection.
+ */
+export function tapSauce(picks: readonly string[], sauceId: string): readonly string[] {
+  return [...picks, sauceId].slice(-SAUCES_PER_SELECTION)
+}
+
+/**
  * Resolve a selection's ids to their catalogue entries, in canonical order.
  *
  * Null when either id is unknown, which is how a caller holding a selection from

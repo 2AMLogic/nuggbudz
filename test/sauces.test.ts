@@ -15,6 +15,7 @@ import {
   SAUCES_PER_SELECTION,
   saucesForMerchant,
   sweetBand,
+  tapSauce,
 } from '../shared/sauces'
 import sauceSource from '../shared/sauces.ts?raw'
 
@@ -202,5 +203,48 @@ describe('the horoscope', () => {
     expect(describeSauceSelection(['mcd-ketchup'])).toBeNull()
     expect(describeSauceSelection(['mcd-ketchup', 'mcd-gone-from-the-menu'])).toBeNull()
     expect(horoscopeForSelection(['mcd-ketchup', 'mcd-gone-from-the-menu'])).toBeNull()
+  })
+})
+
+describe('tapping the picker', () => {
+  // Reported from the picker itself: a third tap used to clear the pair, so
+  // tapping one sauce three times alternated between a double and a single, and
+  // changing your mind about the second half of a pair cost you the first half
+  // too. The rule is a sliding window over the last two taps.
+  it('evicts the oldest tap once the pair is full', () => {
+    const taps = ['a', 'a', 'a', 'b', 'b', 'c', 'd']
+    let picks: readonly string[] = []
+    const seen: string[][] = []
+    for (const tap of taps) {
+      picks = tapSauce(picks, tap)
+      seen.push([...picks])
+    }
+
+    expect(seen).toEqual([
+      ['a'],
+      ['a', 'a'],
+      ['a', 'a'],
+      ['a', 'b'],
+      ['b', 'b'],
+      ['b', 'c'],
+      ['c', 'd'],
+    ])
+  })
+
+  it('never holds more than a selection, whatever it started from', () => {
+    // Including a seed longer than a pair, which is what a stale stored value or
+    // a menu change could hand it.
+    expect(tapSauce([], 'mcd-ketchup')).toEqual(['mcd-ketchup'])
+    expect(tapSauce(['a', 'b', 'c'], 'd')).toEqual(['c', 'd'])
+    expect(tapSauce(['a', 'b'], 'b')).toHaveLength(SAUCES_PER_SELECTION)
+  })
+
+  it('leaves taps in tap order and lets the parser canonicalise', () => {
+    // Taps are what the buyer pressed, in that order, which is what eviction is
+    // defined against; `parseSauceSelection` is still the only thing that decides
+    // how a pair is spelled once it is stored or compared.
+    const tapped = tapSauce(['mcd-ketchup'], 'mcd-tangy-bbq')
+    expect(tapped).toEqual(['mcd-ketchup', 'mcd-tangy-bbq'])
+    expect(parseSauceSelection(tapped)).toEqual(['mcd-tangy-bbq', 'mcd-ketchup'])
   })
 })

@@ -1815,7 +1815,9 @@ export class NuggPool extends DurableObject<Env> {
     // already been answered for. "No charge was taken, nothing to refund" is a
     // real outcome, not a failure.
     if (tombstone === undefined || roles.size === 0) {
-      return Response.json({ ok: true, refundedCents: 0, heldCents: 0 })
+      // Nothing owed, so nothing outstanding: this resolution is finished the
+      // moment it is decided, and the row it stamps is not one to retry.
+      return Response.json({ ok: true, refundedCents: 0, heldCents: 0, outstandingCents: 0 })
     }
 
     const owed = refundableLegs(tombstone.ledger).filter((leg) => roles.has(leg.role))
@@ -1831,6 +1833,12 @@ export class NuggPool extends DurableObject<Env> {
       // What is still sitting in the account after this: a refund Stripe refused
       // leaves money held, and saying so is the whole point of the distinction.
       heldCents: collectedCents(settled.ledger),
+      // What *this resolution* still owes, which is a narrower figure than the
+      // one above and the only one a retry can act on: `settled` holds both
+      // halves on purpose and owes nothing, and `refund_orderer` leaves the
+      // receiver's half collected by design. Money this resolution promised to
+      // hand back and Stripe would not — nothing else.
+      outstandingCents: settled.held.reduce((sum, leg) => sum + leg.amountCents, 0),
     })
   }
 

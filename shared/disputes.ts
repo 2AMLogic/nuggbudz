@@ -84,6 +84,86 @@ export function refundedRoles(resolution: DisputeResolution): readonly BuyerRole
   }
 }
 
+/**
+ * The two reasons a resolution a second POST asks for is refused outright.
+ *
+ * Both are `409`s and they are very different facts, which is why the response
+ * names which one it is rather than leaving an operator to re-read the row:
+ *
+ * - `decided_differently` — somebody already decided, and this POST asks for
+ *   something else. That is an attempt to overturn a decision that has already
+ *   moved money, and it is the case the `WHERE resolved_at IS NULL` guard in
+ *   `claimDispute` was written for.
+ * - `refund_complete` — this *is* the stored decision and its refund has
+ *   already landed in full. There is nothing left to retry.
+ *
+ * Anything else about an already-resolved dispute is a retry, not a refusal:
+ * re-asking for the *same* decision whose refund is unfinished is the one thing
+ * that endpoint exists to do, and it is safe by construction because every
+ * refund is keyed on `refund:<matchId>:<role>`.
+ */
+export const RESOLUTION_REFUSALS = {
+  decided_differently: 'that dispute was already resolved differently',
+  refund_complete: 'that dispute is already resolved and its refund is complete',
+} as const
+
+export type ResolutionRefusal = keyof typeof RESOLUTION_REFUSALS
+
+/** What a POST to the resolve route may do, given the row as it now stands. */
+export type ResolutionDisposition =
+  /** Nobody has decided yet: claim the row and pay out. */
+  | { act: 'decide' }
+  /** The same decision, with money it never managed to return. Ask again. */
+  | { act: 'retry' }
+  | { act: 'refuse'; reason: ResolutionRefusal }
+
+/**
+ * The part of a stored dispute that decides what a second POST may do.
+ *
+ * A structural type rather than `DisputeRecord`, so the rule stays in `shared/`
+ * and testable without a D1 binding — the same reason `refundedRoles` lives
+ * here rather than next to the SQL that reads it.
+ */
+export interface DecidedDispute {
+  resolvedAt: number | null
+  resolution: DisputeResolution | null
+  /**
+   * Integer cents this resolution promised to return and has not, as of the
+   * last refund attempt Stripe answered. `null` means no attempt has been
+   * answered for at all, which is not `0` — the same rule `refunded_cents`
+   * follows, and the state a resolution whose refund call failed is left in.
+   */
+  outstandingCents: number | null
+}
+
+/**
+ * Decide whether a resolution POST is a decision, a retry, or a refusal.
+ *
+ * The distinction this exists to draw: a `409` on an already-resolved dispute
+ * was blocking a second *attempt* at the same decision as though it were a
+ * second *decision* (#103). A resolution whose refund Stripe declined, or whose
+ * refund call never completed, left money held with no way back through the API
+ * — which is the one thing the route is there for.
+ *
+ * `outstandingCents` is what makes the question answerable from the row alone.
+ * Comparing `refunded_cents` against `held_cents` cannot do it: `settled`
+ * refunds nobody and would read as forever unfinished, and `refund_orderer`
+ * pays back one half of money that is still holding the other.
+ */
+export function resolutionDisposition(
+  decided: DecidedDispute,
+  asked: DisputeResolution,
+): ResolutionDisposition {
+  if (decided.resolvedAt === null) return { act: 'decide' }
+  // Fail closed on a resolved row whose decision cannot be read: a decision
+  // nobody can name is not one to overwrite on the strength of a request body.
+  if (decided.resolution !== asked) return { act: 'refuse', reason: 'decided_differently' }
+  if (decided.outstandingCents !== null && decided.outstandingCents <= 0) {
+    return { act: 'refuse', reason: 'refund_complete' }
+  }
+  return { act: 'retry' }
+}
+
 /** Room for an operator to say what they found out. Not a case file. */
 export const MAX_DISPUTE_NOTE = 280
 

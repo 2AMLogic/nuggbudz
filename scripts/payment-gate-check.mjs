@@ -1171,6 +1171,12 @@ if (mode === 'unconfigured') {
         rowAfterRefused[0]?.refunded_cents === 0,
         JSON.stringify(rowAfterRefused[0] ?? null),
       )
+      check(
+        'and records every cent of it as still owed by this resolution',
+        refusedResolved.outstandingCents === expected.totalCollectedCents &&
+          rowAfterRefused[0]?.outstanding_cents === expected.totalCollectedCents,
+        `${refusedResolved.outstandingCents} / ${rowAfterRefused[0]?.outstanding_cents}`,
+      )
       const afterRefusedRecorded = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
       const refusedAttempts = afterRefusedRecorded.refundAttempts.filter((r) =>
         r.idempotencyKey.includes(disputeThreeId),
@@ -1188,15 +1194,72 @@ if (mode === 'unconfigured') {
       const restored = await failRefunds(0)
       check('the refund stub is restored', restored.refunds === 0, JSON.stringify(restored))
 
+      // The retry path (#103): the resolution above is decided and its money is
+      // still in the account, and re-POSTing the *same* resolution is the only
+      // way back to it. Everything before this point was reachable without it.
+      const retryRefused = await fetch(`${BASE}/api/admin/disputes/${disputeThreeId}/resolve`, {
+        method: 'POST',
+        headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+        body: JSON.stringify({ resolution: 'voided' }),
+      })
+      const retried = await retryRefused.json()
+      check(
+        'the same resolution, re-POSTed, issues the refund its first attempt could not',
+        retryRefused.status === 200 &&
+          retried.refundedCents === expected.totalCollectedCents &&
+          retried.heldCents === 0 &&
+          retried.outstandingCents === 0,
+        `status ${retryRefused.status}, ${JSON.stringify(retried)}`,
+      )
+      const rowAfterRetry = ledgerQuery(
+        `SELECT * FROM disputes WHERE match_id = '${disputeThreeId}'`,
+      )
+      check(
+        'the row accumulates what the retry recovered rather than replacing it',
+        rowAfterRetry[0]?.refunded_cents === expected.totalCollectedCents &&
+          rowAfterRetry[0]?.outstanding_cents === 0,
+        JSON.stringify(rowAfterRetry[0] ?? null),
+      )
+      check(
+        'and the decision itself is untouched: a retry pays out, it does not re-decide',
+        rowAfterRetry[0]?.resolution === rowAfterRefused[0]?.resolution &&
+          rowAfterRetry[0]?.resolved_at === rowAfterRefused[0]?.resolved_at &&
+          rowAfterRetry[0]?.resolved_by === rowAfterRefused[0]?.resolved_by,
+        JSON.stringify(rowAfterRetry[0] ?? null),
+      )
+      const afterRetryRecorded = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
+      const retrySuccesses = afterRetryRecorded.refunds.filter((r) =>
+        r.idempotencyKey.includes(disputeThreeId),
+      )
+      check(
+        'each leg is refunded exactly once across both attempts, keyed to its own role',
+        retrySuccesses.length === 2 &&
+          new Set(retrySuccesses.map((r) => r.idempotencyKey)).size === 2 &&
+          retrySuccesses.every((r) => r.idempotencyKey.startsWith(`refund:${disputeThreeId}:`)),
+        JSON.stringify(retrySuccesses),
+      )
+      const retryFinished = await fetch(`${BASE}/api/admin/disputes/${disputeThreeId}/resolve`, {
+        method: 'POST',
+        headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
+        body: JSON.stringify({ resolution: 'voided' }),
+      })
+      const finished = await retryFinished.json()
+      check(
+        'a third POST is refused once there is nothing left to retry, and says so',
+        retryFinished.status === 409 && finished.reason === 'refund_complete',
+        `status ${retryFinished.status}, ${JSON.stringify(finished)}`,
+      )
+
       const resolveAgain = await fetch(`${BASE}/api/admin/disputes/${disputeOneId}/resolve`, {
         method: 'POST',
         headers: { ...jsonHeaders, ...cookie(BUYERS.op) },
         body: JSON.stringify({ resolution: 'settled' }),
       })
+      const overturned = await resolveAgain.json()
       check(
-        'a second resolution of an already-resolved charged dispute is refused',
-        resolveAgain.status === 409,
-        `status ${resolveAgain.status}`,
+        'overturning an already-resolved charged dispute is still refused, and says why',
+        resolveAgain.status === 409 && overturned.reason === 'decided_differently',
+        `status ${resolveAgain.status}, ${JSON.stringify(overturned)}`,
       )
     }
   }

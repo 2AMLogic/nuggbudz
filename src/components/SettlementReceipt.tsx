@@ -230,6 +230,22 @@ export function SettlementReceipt({
                 {match.pickupCode}
               </p>
               <p className="tag">Let your bud scan this, or read it out</p>
+
+              {/* The orderer is the only one with anything to buy, and there is
+                  nothing to buy until this code exists — so this rides the same
+                  gate as the code above rather than a second `role === 'orderer'`
+                  check. Never shown while queued, never to the receiver, and
+                  opening it confirms nothing: the handoff is unchanged (#148). */}
+              {role === 'orderer' && deal?.mobileOrderUrl != null && (
+                <a
+                  href={deal.mobileOrderUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn btn-outline mt-4"
+                >
+                  Order on the {deal.merchant} app
+                </a>
+              )}
             </div>
           )}
 

@@ -17,6 +17,10 @@ export const DEALS: readonly DealSpec[] = [
     solo: { item: '10pc Chicken McNuggets', pieces: 10, priceCents: 699 },
     platformFeeCents: 99,
     partySize: 2,
+    // The chain's mobile ordering landing page — deliberately not a specific
+    // store's page (that needs #147's store data wired in) and deliberately not
+    // an aggregator. See DealSpec.mobileOrderUrl and #148.
+    mobileOrderUrl: 'https://www.mcdonalds.com/us/en-us/mobile-order.html',
   },
   // Not offered in the app today — see INACTIVE_DEAL_IDS below. Kept as data
   // because the spread being present at three chains is the evidence that it is
@@ -31,6 +35,9 @@ export const DEALS: readonly DealSpec[] = [
     solo: { item: '10pc Crispy Chicken Nuggets', pieces: 10, priceCents: 729 },
     platformFeeCents: 99,
     partySize: 2,
+    // No confirmed mobile-order link yet — this chain is not offered, so there
+    // is nothing to send an orderer to. Fill in when it is re-offered.
+    mobileOrderUrl: null,
   },
   {
     id: 'bk-nuggets-20',
@@ -40,6 +47,7 @@ export const DEALS: readonly DealSpec[] = [
     solo: { item: '8pc Chicken Nuggets', pieces: 8, priceCents: 449 },
     platformFeeCents: 99,
     partySize: 2,
+    mobileOrderUrl: null,
   },
 ]
 

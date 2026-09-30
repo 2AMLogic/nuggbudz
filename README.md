@@ -654,10 +654,11 @@ Buddy reputation landed with it: standing is a band, never a count, and it acts
 as a tiebreak inside a window anchored to the longest waiter, so the queue stays
 starvation-free.
 
-Next up, tracked as issues: payouts to merchants through Stripe Connect, an
-automatic sweep over the holds queue rather than an operator-triggered retry,
-and showing the pair which restaurant to meet at (#147) — the map draws the
-market today, but a matched pair is told to go meet with no place named.
+Next up, tracked as issues: letting the orderer actually place the order at the
+counter (#148), and re-matching a requeued buyer without waiting for somebody
+new to join (#160). Further out, and not yet filed: payouts to merchants
+through Stripe Connect, and an automatic sweep over the holds queue in place of
+today's operator-triggered retry.
 
 ## Development
 

@@ -21,50 +21,46 @@ Issues requiring immediate attention (`loom:urgent`).
 Human-approved issues ready for implementation (`loom:issue`).
 
 *#126 (photoreal brand) and #37 (wrangler `dev --var` bug) carry `loom:issue`.
-Operator-filed items waiting on triage/curator: #147 (store locations on the
-map), #148 (the orderer's order link), #149 (production takes no payment
-information), #150 (late sign-in, one bypass in one place), #151 (honeypot
-buyers), plus #36 (custom domain), #48 (`sanitizeDemoName` hardening) and #14
-(pairing-flow nonce).*
+Both are also `loom:operator-only`, so neither is agent-buildable.*
+
+Curated and waiting for approval (`loom:curated`, no `loom:issue`):
+
+- **#148**: The orderer is sent to the counter with no way to place the order.
+- **#160**: A requeued buyer is never re-matched until somebody else joins, and
+  honeypots make that the common case.
+
+> The earlier "waiting on triage" list has cleared: #147 (store locations),
+> #149 (payment information), #150 (late sign-in), #151 (honeypot buyers),
+> #48 (`sanitizeDemoName`) and #14 (pairing nonce) closed as completed, and
+> #36 (custom domain) closed because the domain was already live. Codifying
+> it in the repo is #78.
 
 ## In Progress
 
 Issues actively being worked (`loom:building`; PRs in `loom:reviewing` count as
 in flight).
 
-- **#3**: Stripe checkout handoff — PR #19, `loom:changes-requested`
-  (doctor loop; lease on #11 lapsed 2026-09-27 ~21:27Z).
-- **#7**: Stale queue expiry + unconfirmed-match alarm — PR #23, reconciled
-  onto post-#22 main by the fleet, `loom:review-requested`, CI green on
-  feature/issue-7 (`36360488913`); review pending.
-- **#34**: Pair without a location permission prompt (edge geo) — PR #43,
-  `loom:review-requested`, CI green on feature/issue-34 (`36360308132`); the
-  reconciliation absorbed the #49 unpinned deck and re-priced — review pending.
-- **#28**: (merged `e22229b` this session — offered-deal gate, see WORK_LOG)
-- **#16**: (merged `5050eaf` this session — demo pairing with the ledger
-  gate, see WORK_LOG)
+*None. No feature PR is open; #3 (PR #19), #7 (PR #23) and #34 (PR #43) all
+merged.*
 
-## Newly filed (this session)
+## Operator-held
 
-- **#36**: Provision the `nuggbudz.com` custom domain on the Worker (needs
-  operator zone access; wrangler.jsonc was deliberately stripped of the routes
-  until then — #24 decision).
-- **#37**: Wrangler 4.142 `dev --var` does not reach the runtime (`undefined`) —
-  reproducible; `.dev.vars` and (presumably) `deploy --var` are unaffected;
-  upstream report to file.
-- **#48**: Harden `sanitizeDemoName` — invisible-unicode strip + code-point-
-safe cap (operator's superseded Doctor fix on #24 contains the working
-  regexes; see that PR's comments).
-- **#14**: Single-use nonce on the pairing flow (curator target once it has
-  traffic context).
+Open issues that need the operator (`loom:operator-only` or
+`loom:needs-capability`):
 
-## Proposed
+- **#78**: Codify the `nuggbudz.com` custom domain in `wrangler.jsonc` and fix
+  the stale README deploy docs (operator decision).
+- **#66**: Move the basemap off `tile.openstreetmap.org` before nuggbudz.com is
+  a product (operator decision).
+- **#125**: No brand surfaces (favicon, OG image, theme-color); blocked on a
+  capability.
 
-Issues under evaluation (`loom:architect`, `loom:hermit`, `loom:curated`).
+## Unlabelled backlog
 
-- **#8**: Buddy reputation and no-show tracking — held until #2 (stable
-  identities) and #5 (a completion signal) land, since it is meaningless
-  without both.
+Filed but not yet curated: #135 (D1 schema drift detection), #107 (demo
+hostname in the deck), #106 and #105 (the socket-upgrade limit), #96 and #95
+(smoke/test observability), #94 and #93 (naming cleanups), #67 (OAuth route
+test), #57 (gating the merge result), #56 and #54 (smoke failures).
 
 ## Epics
 
@@ -72,18 +68,13 @@ Active epics with progress tracking.
 
 *No active epics.*
 
-## Dependency notes
-
-- #8 depends on #2 and #5.
-- #4 is most useful after #5, since a confirmed pickup is what should trigger
-  the ledger write.
-- #3 should land after or alongside #2; charging a party requires knowing who
-  the party is.
-
 ## Backlog Balance
+
+Open issues by tier label, excluding the #113 champion digest:
 
 | Tier | Count |
 |------|-------|
-| Tier 1 (goal-advancing) | 4 |
-| Tier 2 (goal-supporting) | 5 |
-| Tier 3 (maintenance) | 1 |
+| Tier 1 (goal-advancing) | 2 (#126, #105) |
+| Tier 2 (goal-supporting) | 3 (#125, #78, #37) |
+| Tier 3 (maintenance) | 0 |
+| No tier label | 14 |

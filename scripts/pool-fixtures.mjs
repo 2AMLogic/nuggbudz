@@ -21,6 +21,15 @@
  * from every other one. `test/fixture-separation.test.ts` derives that from this
  * table and the repo's own `distanceMeters`, so it cannot be satisfied by
  * widening a list of exceptions.
+ *
+ * Distance is also the *only* isolation mechanism (issue #57). Never separate two
+ * scenarios by giving them different deal ids, merchants or sauces: that couples
+ * the suite to `shared/deals.ts`, and it broke `main` twice in one afternoon — a
+ * branch that gated pairing to one chain, and a branch whose fixtures used a
+ * second and third chain id to keep buyers apart, merged with no conflict,
+ * textually clean and green in `vitest`, then died at runtime in `pnpm smoke`
+ * ("timed out waiting for waiting"). The catalogue is a product decision that
+ * will keep changing; a hundred kilometres will not.
  */
 
 /** @typedef {{ lat: number, lng: number }} LatLng */

@@ -355,3 +355,53 @@ jobs:
             }
           ' "$health"
       - run: BASE=http://localhost:5251 pnpm honeypot-check
+
+  # Somebody has to be told that `main` is red (issue #57).
+  #
+  # Every job above already runs on `push: branches: [main]` as well as on pull
+  # requests, and has since the first commit — that is the *merge result* being
+  # checked, which is the only place a whole class of defect is visible: four
+  # times in one afternoon a pull request that was individually correct and
+  # CI-green produced a broken `main` when it landed, three of those four with no
+  # `git` conflict at all (identical edits merge clean; so do edits to different
+  # lines of files whose semantics interact). Two of the four were caught only
+  # because somebody happened to run `pnpm smoke` locally afterwards, and one had
+  # already been on `main` for a while by then.
+  #
+  # So this job is not another check — it is the *watching* of the checks above.
+  # It files one `loom:auditor` tracking issue and comments on that same issue on
+  # every later failure, so a red `main` is something a human or the Auditor role
+  # is handed rather than something the next person to run the suite discovers.
+  #
+  # It is deliberately not a gate: gating the merge result needs "require
+  # branches to be up to date before merging" or a merge queue, a repo-admin
+  # setting no workflow can grant itself. See CLAUDE.md, "A green pull request is
+  # not a green `main`", for that decision and who has to make it.
+  main-red-alert:
+    runs-on: ubuntu-latest
+    # Every other job in this workflow. `test/main-red-alert.test.ts` asserts
+    # that this list stays complete, because a job added later and left out of it
+    # would be watched by nobody and nothing would look wrong.
+    needs: [check, smoke, e2e, demo-check, payment-gate-closed, payment-gate-live, honeypot-check]
+    # `cancelled()` counts alongside `failure()`: on `main` there is no newer run
+    # to supersede this one, so a cancelled job is a check that did not run, and a
+    # check that did not run must never read as one that passed. A pull request is
+    # excluded entirely — its failures are already on a pull request somebody is
+    # looking at, and filing an issue per red PR run is noise.
+    if: (failure() || cancelled()) && github.ref == 'refs/heads/main'
+    permissions:
+      # The only write this job needs, and the default GITHUB_TOKEN has it — no
+      # new secret, unlike the branch-protection half of issue #57.
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # No `pnpm install`: the alert must still go out when the failure was the
+      # install itself, so this script uses nothing but Node's own `fetch`.
+      - run: node scripts/main-red-alert.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEEDS_JSON: ${{ toJSON(needs) }}

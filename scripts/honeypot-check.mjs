@@ -15,7 +15,10 @@
  *                     happened: no charge, no pickup code, no settled row, no
  *                     dispute row, no hold, no reputation counter. It answers a
  *                     line of chat, it excuses itself, and the buyer is returned
- *                     to the queue.
+ *                     to the queue — and two buyers who each met a decoy are
+ *                     paired with *each other* the moment the second one is
+ *                     requeued, rather than both waiting for a third person who
+ *                     never joins (issue #160).
  *
  * Both directions matter: the flag existing is not evidence that leaving it off
  * still leaves a market honest.
@@ -70,16 +73,23 @@ const sessionId = (label) => label.padEnd(43, '0').slice(0, 43)
 const accountId = () => crypto.randomUUID()
 
 /**
- * Two buyers who are never live at the same time.
+ * Four buyers: two in Memphis who are never live at the same time, and two in
+ * Indianapolis who deliberately are.
  *
  * The cooldown after a bow-out is half an hour per account, so one buyer cannot
  * meet two decoys in one run — which is the honesty rule working, not an
- * inconvenience. The second account exists to drive the code-guessing tripwire
- * on a fresh match, and its socket only opens once the first has closed.
+ * inconvenience. `probe` exists to drive the code-guessing tripwire on a fresh
+ * match, and its socket only opens once `solo`'s has closed.
+ *
+ * `ines` and `otto` are the exception, and the reason they need a market of
+ * their own: the requeue scenario (#160) is *about* two buyers being in one
+ * market at once, each paired with a decoy, and then with each other.
  */
 const BUYERS = {
   solo: { sid: sessionId('hp-solo'), userId: accountId(), name: 'Solo', at: 'honeypotSolo' },
   probe: { sid: sessionId('hp-probe'), userId: accountId(), name: 'Probe', at: 'honeypotProbe' },
+  ines: { sid: sessionId('hp-ines'), userId: accountId(), name: 'Ines', at: 'honeypotPairOne' },
+  otto: { sid: sessionId('hp-otto'), userId: accountId(), name: 'Otto', at: 'honeypotPairTwo' },
 }
 
 function seedSessions() {
@@ -222,6 +232,37 @@ function open(buyer) {
 }
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * The nth message of a type, rather than the first.
+ *
+ * `expect` resolves off the first match in the inbox, which is the wrong answer
+ * for a socket that is deliberately matched twice — a decoy, then the buyer the
+ * requeue found. Counting is also how absence is asserted below: "still only one
+ * `matched`" is the check that a requeue with nobody available changes nothing.
+ */
+const nthMessage = async (buyer, type, n, ms = 8000) => {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const all = buyer.inbox.filter((m) => m.type === type)
+    if (all.length >= n) return all[n - 1]
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${type} #${n}`)
+    await wait(100)
+  }
+}
+
+const countOf = (buyer, type) => buyer.inbox.filter((m) => m.type === type).length
+
+/** An error frame carrying a particular code, once one turns up. */
+const errorWithCode = async (buyer, code, ms = 8000) => {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const found = buyer.inbox.find((m) => m.type === 'error' && m.code === code)
+    if (found !== undefined) return found
+    if (Date.now() > deadline) return undefined
+    await wait(100)
+  }
+}
 
 async function main() {
   applyMigrations()
@@ -436,6 +477,127 @@ async function main() {
     signalColumns.join(', '),
   )
   probe.ws.close()
+
+  // --- two buyers each stood up by a decoy find each other (issue #160) ---
+  //
+  // The defect is not a decoy defect at all: `findMatch` ran on `join` and
+  // nowhere else, so a buyer a teardown put back in the queue was matchable only
+  // by the *next* person to join the cell. Honeypots turned that from a rare
+  // shape into the common one, in exactly the case the fallback rule exists to
+  // protect. Ines joins an empty market and meets a decoy. Otto joins a moment
+  // later and meets a *second* decoy rather than Ines — because Ines is
+  // `matched`, and a matched buyer is not in the waiting set the matcher reads.
+  // Then both decoys excuse themselves, and before #160 that left two buyers
+  // standing in one radius, on one deal, waiting for a third person who was
+  // never coming: "every honeypot match is a real match that did not happen",
+  // surviving the bow-out instead of being repaired by it.
+  //
+  // Their own market, and the only two fixtures in the table that are live at
+  // the same time. The whole outcome here is "these two paired with *each
+  // other*", so a stray buyer from a neighbouring scenario would not add noise —
+  // it would make the result unreadable.
+  const ines = open(BUYERS.ines)
+  const otto = open(BUYERS.otto)
+  await Promise.all([ines.opened, otto.opened])
+  await ines.expect('welcome')
+  await otto.expect('welcome')
+
+  ines.join()
+  const inesDecoy = await ines.expect('matched')
+  otto.join()
+  const ottoDecoy = await otto.expect('matched')
+  check(
+    'two buyers arriving moments apart meet a decoy each, not each other',
+    inesDecoy.matchId !== ottoDecoy.matchId &&
+      inesDecoy.role === 'orderer' &&
+      ottoDecoy.role === 'orderer',
+    // Two orderers and two match ids is the proof: a decoy is always the
+    // receiver, so a buyer paired with one is always the orderer, and had these
+    // two been paired with each other they would share a match and hold
+    // complementary roles.
+    `${inesDecoy.matchId}/${inesDecoy.role} and ${ottoDecoy.matchId}/${ottoDecoy.role}`,
+  )
+
+  // Ines taps confirm, which is the earliest of the three routes into a bow-out
+  // — the 45 s deadline is the guarantee, this is only sooner.
+  ines.confirm()
+  await ines.expect('buddy_left')
+  const inesRequeued = await ines.expect('waiting')
+  check(
+    'the first buyer is returned to the queue',
+    inesRequeued.waiting >= 1,
+    `${inesRequeued.waiting} waiting`,
+  )
+  await wait(1200)
+  check(
+    'and a requeue that finds nobody available changes nothing — she simply waits',
+    countOf(ines, 'matched') === 1,
+    `${countOf(ines, 'matched')} matched frame(s): Otto is still in his own match`,
+  )
+
+  // Otto's decoy bows out too. *This* is the moment the fix is about: nothing
+  // else will ever run the matcher for either of them again.
+  otto.confirm()
+  await otto.expect('buddy_left')
+  const inesPaired = await nthMessage(ines, 'matched', 2)
+  const ottoPaired = await nthMessage(otto, 'matched', 2)
+  check(
+    'the second bow-out pairs the two requeued buyers with each other',
+    inesPaired.matchId === ottoPaired.matchId,
+    `${inesPaired.matchId} / ${ottoPaired.matchId}`,
+  )
+  check(
+    'in a new match, neither of the two decoy ones',
+    inesPaired.matchId !== inesDecoy.matchId && inesPaired.matchId !== ottoDecoy.matchId,
+    inesPaired.matchId,
+  )
+  check(
+    'with complementary roles, and the longer-waiting buyer placing the order',
+    inesPaired.role === 'orderer' && ottoPaired.role === 'receiver',
+    `${inesPaired.role}/${ottoPaired.role} — a requeued buyer goes to the back of the queue, ` +
+      'so Ines, requeued first, is the one who has been waiting',
+  )
+  check(
+    'and each buddy card names the other real buyer rather than a phantom',
+    inesPaired.buddy.name === BUYERS.otto.name && ottoPaired.buddy.name === BUYERS.ines.name,
+    `${inesPaired.buddy.name} / ${ottoPaired.buddy.name}`,
+  )
+  check(
+    'through the same match-creation path a join uses: one settlement, two halves of it',
+    inesPaired.settlement.totalCollectedCents === ottoPaired.settlement.totalCollectedCents &&
+      inesPaired.share.payCents + ottoPaired.share.payCents ===
+        inesPaired.settlement.totalCollectedCents,
+    `${inesPaired.share.payCents} + ${ottoPaired.share.payCents} of ` +
+      `${inesPaired.settlement.totalCollectedCents}`,
+  )
+
+  // The money gate, on the first *real* pair this lane has ever struck. Stripe
+  // is "configured" here at an address nothing is listening on (see the header),
+  // so the one thing a real pair needs and a decoy pairing never did — a charge —
+  // cannot open. Asserted rather than glossed over: the match is torn down for
+  // want of a processor, which is the gate failing closed, and no code is
+  // released on the way out.
+  const refused = await errorWithCode(ines, 'payment_unavailable')
+  check(
+    'a real pair this server cannot charge for is torn down, never paired for free',
+    refused !== undefined,
+    'no payment_unavailable arrived — a pair that reached a pickup code without a processor',
+  )
+  for (const [who, buyer] of [
+    [BUYERS.ines.name, ines],
+    [BUYERS.otto.name, otto],
+  ]) {
+    check(
+      `no pickup code ever reached ${who}, on either match`,
+      buyer.inbox.every((m) => m.pickupCode === null || m.pickupCode === undefined),
+      JSON.stringify(buyer.inbox.filter((m) => m.pickupCode)),
+    )
+  }
+  const pairRows = d1(`SELECT match_id FROM matches WHERE match_id = '${inesPaired.matchId}'`)
+  check('and the unpaid pair books no ledger row', pairRows.length === 0, JSON.stringify(pairRows))
+
+  ines.ws.close()
+  otto.ws.close()
 }
 
 main()

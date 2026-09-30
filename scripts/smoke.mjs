@@ -1500,13 +1500,13 @@ check(
 // in the pool waiting for a buddy who can never legitimately arrive.
 check('a refused gated join never queues the buyer', (await c.settles('waiting')) === false)
 
-// --- the map roster is radius-scoped ---
-// Three claims here, and #101 changed how the third one has to be staged.
+// --- the map roster is radius-scoped, and a requeue re-runs the matcher ---
+// Four claims here. #101 changed how the third one has to be staged, and #160
+// changed the fourth from the opposite of what it now asserts.
 //
-// 1. Everyone already queued nearby has to hear about a roster change, not just
-//    the socket that caused it: a newcomer must push a fresh 'waiting' to every
-//    buyer within their radius, with the newcomer's position quantized rather
-//    than exact.
+// 1. Everyone already queued in the shard hears about a roster change, not just
+//    the socket that caused it — and each is told only about their own radius,
+//    so the push to a buyer who cannot reach the newcomer carries nothing.
 // 2. A buyer in the same *shard* but outside the radius is invisible. The shard
 //    is ~156 km across now, so a shard-wide roster would put strangers two
 //    counties away on the map and leak where they are standing. `lee` stands
@@ -1514,16 +1514,24 @@ check('a refused gated join never queues the buyer', (await c.settles('waiting')
 //    must appear to nobody here, while everybody stays queued.
 // 3. A second socket of one identity is **refused**, with a message saying which
 //    tab you are already in. Before #101 it was quietly queued beside the first
-//    and never matched, which is how this scenario used to get two mutually
-//    unmatchable buyers into one radius. Demo identity is per browser now, so a
-//    second tab is an ordinary accident rather than an edge case, and silence
-//    would read as a queue that simply never matches.
+//    and never matched. Demo identity is per browser now, so a second tab is an
+//    ordinary accident rather than an edge case, and silence would read as a
+//    queue that simply never matches.
+// 4. A buyer a teardown hands back to the queue is **re-offered to the matcher
+//    on the spot** (#160). `moss` matches `kim`, `nell` queues alone while those
+//    two are matched, and then `moss` walks away — which used to leave `kim`
+//    requeued beside `nell` with no fresh `findMatch` between them, a pair of
+//    buyers one deal and forty metres apart who were never going to be matched
+//    by anything but a third arrival. They pair immediately now, and `nell` —
+//    who waited honestly while `kim` was matched — is the one who orders,
+//    because a requeue goes to the back of the queue.
 //
-// That third change is why `moss` and `nell` exist. With one deal offered and
-// self-matching refused at the door, the *only* way two buyers are queued inside
-// one radius without being each other's candidates is a requeue: `moss` matches
-// `kim`, `nell` queues alone while those two are matched, then `moss` walks away
-// and `kim` is put back — beside `nell`, with no fresh `findMatch` between them.
+// Claim 4 is why the roster assertions below are made on `lee`'s socket rather
+// than on `kim`'s. With one deal offered, self-matching refused at the door and
+// a requeue that re-runs the matcher, two *real* buyers can no longer be queued
+// inside one radius at all — the dots on a waiting buyer's map are decoys
+// (`pnpm honeypot-check`) or a second deal's queue, and `lee` is the socket that
+// can still be shown, correctly, nobody.
 const KIM_AT = FIXTURE_COORDS.kim
 const KIM_TAB_AT = FIXTURE_COORDS.kimTab
 const LEE_AT = FIXTURE_COORDS.lee
@@ -1599,7 +1607,7 @@ check(
 )
 
 // --- a newcomer refreshes the roster for everyone already queued ---
-const kimWaitingBefore = kim.inbox.filter((m) => m.type === 'waiting').length
+const leeWaitingBefore = lee.inbox.filter((m) => m.type === 'waiting').length
 const moss = open(BUYERS.moss, MOSS_AT.lat, MOSS_AT.lng)
 await moss.opened
 await moss.expect('welcome')
@@ -1633,41 +1641,68 @@ check(
   JSON.stringify(nellAlone),
 )
 
-// Moss walks away. Kim is requeued — beside nell, with no findMatch between
-// them — and everybody queued nearby is told.
+// Moss walks away. Kim is requeued — and re-offered to the matcher on the spot
+// (#160), which finds nell forty metres away on the same deal.
 moss.ws.close()
-await kim.expect('buddy_left')
+const kimLeft = await kim.expect('buddy_left')
+check('the survivor of an abandoned match is told their bud went', kimLeft.matchId !== undefined)
 
+const [kimAgain, nellMatched] = await Promise.all([
+  // The *second* match on this socket: `expect` resolves off the first one in
+  // the inbox, which is the match moss just walked out of.
+  (async () => {
+    for (let i = 0; i < 80; i++) {
+      const all = kim.inbox.filter((m) => m.type === 'matched')
+      if (all.length > 1) return all[1]
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    throw new Error('kim was requeued and never re-matched')
+  })(),
+  nell.expect('matched'),
+])
+check(
+  'a requeued buyer is matched with the buyer who was already waiting, not left for a newcomer',
+  kimAgain.matchId === nellMatched.matchId && kimAgain.matchId !== kimMatched.matchId,
+  `${kimAgain.matchId} / ${nellMatched.matchId} (was ${kimMatched.matchId})`,
+)
+check(
+  'and goes to the back of the queue: the buyer who waited honestly places the order',
+  nellMatched.role === 'orderer' && kimAgain.role === 'receiver',
+  `nell=${nellMatched.role} kim=${kimAgain.role}`,
+)
+check(
+  'the pair is told about each other rather than about a ghost',
+  kimAgain.buddy.name === BUYERS.nell.name && nellMatched.buddy.name === BUYERS.kim.name,
+  `${kimAgain.buddy.name} / ${nellMatched.buddy.name}`,
+)
+check(
+  'and a match carries no coordinate for either buyer, only the walk',
+  kimAgain.buddy.lat === undefined &&
+    kimAgain.buddy.lng === undefined &&
+    kimAgain.buddy.distanceMeters > 0,
+  JSON.stringify(kimAgain.buddy),
+)
+
+// Claim 1, on the one socket that can still observe it: `lee` is queued in this
+// shard and three miles outside the radius, so every roster change here is
+// pushed to them and every one of them has to carry nobody.
 const broadcastSeen = await (async () => {
   for (let i = 0; i < 40; i++) {
-    if (kim.inbox.filter((m) => m.type === 'waiting').length > kimWaitingBefore) return true
+    if (lee.inbox.filter((m) => m.type === 'waiting').length > leeWaitingBefore) return true
     await new Promise((r) => setTimeout(r, 100))
   }
   return false
 })()
 check(
-  'a requeued buyer and the buyer who was waiting both get a fresh roster',
+  'a roster change is pushed to every buyer queued in the shard, not just the one who caused it',
   broadcastSeen,
-  `${kimWaitingBefore} -> ${kim.inbox.filter((m) => m.type === 'waiting').length}`,
+  `${leeWaitingBefore} -> ${lee.inbox.filter((m) => m.type === 'waiting').length}`,
 )
-
-const latestForKim = kim.inbox.filter((m) => m.type === 'waiting').at(-1)
+const latestForLee = lee.inbox.filter((m) => m.type === 'waiting').at(-1)
 check(
-  'the broadcast roster carries a position for the other queued buyer',
-  latestForKim.buddies.some(
-    (pos) => Math.abs(pos.lat - NELL_AT.lat) < 0.01 && Math.abs(pos.lng - NELL_AT.lng) < 0.01,
-  ),
-  JSON.stringify(latestForKim.buddies),
-)
-check(
-  'the broadcast never carries an exact coordinate for anyone else',
-  latestForKim.buddies.every((pos) => pos.lat !== NELL_AT.lat || pos.lng !== NELL_AT.lng),
-  JSON.stringify(latestForKim.buddies),
-)
-check(
-  'and still carries nobody from outside the radius',
-  latestForKim.buddies.length === 1,
-  JSON.stringify(latestForKim.buddies),
+  'and each is told only about their own radius, so this one carries nobody at all',
+  latestForLee.buddies.length === 0 && latestForLee.waiting === 1,
+  JSON.stringify(latestForLee),
 )
 
 // --- the walk, not the grid: a mile and a half across a geohash-6 boundary ---

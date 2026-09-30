@@ -587,14 +587,71 @@ describe('the honeypot path stays wired in worker/pool.ts', () => {
   })
 
   it('offers a decoy only as a fallback, and only outside the cooldown', () => {
-    const body = bodyOf('private async handleJoin(')
-    expect(body).toContain('this.honeypotCooldown(identity.userId')
-    expect(body).toContain('honeypotCandidate(decoy)')
+    const join = bodyOf('private async handleJoin(')
+    expect(join).toContain('this.honeypotCooldown(identity.userId')
+    // The matcher moved into `pairOff` when #160 gave a requeue a way to reach
+    // it; the decoys are still stocked on the join and passed in from there.
+    expect(join).toContain('this.stockHoneypots(identity, dealId, deal.merchant')
+    expect(join).toContain('this.pairOff(ws, identity, deal, offered)')
+    expect(bodyOf('private async pairOff(')).toContain('honeypotCandidate(decoy)')
   })
 
   it('starts that cooldown at the bow-out, for both sides', () => {
     const body = bodyOf('private async bowOutHoneypot(')
     expect(body).toContain('this.startHoneypotCooldown(record.orderer.userId, now)')
     expect(body).toContain('this.startHoneypotCooldown(record.receiver.userId, now)')
+  })
+
+  it('never stocks or offers a decoy to a buyer a teardown just handed back', () => {
+    // The #160 caveat, and the reason a requeue calls `pairOff` rather than
+    // re-running the join path: a buyer a decoy stood up must not be handed
+    // straight to another one, and a teardown is not a join — it has no
+    // stock/cooldown decision to make.
+    const body = bodyOf('private async rematchRequeued(')
+    expect(body).toContain('this.pairOff(ws, state, deal, [])')
+    expect(body).not.toContain('stockHoneypots')
+    expect(body).not.toContain('nearbyHoneypots')
+    expect(body).not.toContain('honeypotCooldown')
+    // And the join is still the only place decoys are stocked at all.
+    expect(poolSource.match(/this\.stockHoneypots\(/g) ?? []).toHaveLength(1)
+  })
+
+  it('re-runs the matcher for every buyer a teardown returns to the queue', () => {
+    // The defect #160 is about: three teardowns wrote a `waiting` state inline
+    // and stopped there, so `findMatch` ran on `join` and nowhere else. Honeypots
+    // made that the common case — two buyers seconds apart into one empty market
+    // are each paired with a decoy, and when both bow out neither is ever
+    // matched. Enumerated by teardown so a fourth cannot quietly omit it.
+    for (const teardown of [
+      'private async bowOutHoneypot(',
+      'private async unwindMatch(',
+      'private async handleDisconnect(',
+    ]) {
+      const body = bodyOf(teardown)
+      expect(body, `${teardown} writes its own waiting state`).not.toContain("status: 'waiting'")
+      expect(body, `${teardown} requeues without re-matching`).toContain(
+        'this.rematchRequeued(requeued)',
+      )
+      // The frame that explains the teardown first, and the dead match retired
+      // before that: a `matched` arriving ahead of `buddy_left` reads on screen
+      // as a match that immediately ended.
+      expect(body.indexOf('this.requeue(')).toBeLessThan(body.indexOf('this.rematchRequeued('))
+      expect(body.indexOf('this.retireMatch(')).toBeLessThan(body.indexOf('this.rematchRequeued('))
+    }
+  })
+
+  it('strikes a requeued buyer’s match through the same path a join does', () => {
+    // No second match-creation site: one place writes the record, releases (or
+    // withholds) the code, decides the disposition and opens the charges.
+    // A fresh record is the one with no confirmations yet, which tells a
+    // *creation* apart from the four places that rewrite a live record's ledger.
+    // Two of them: `pairOff` and `matchHoneypot`, the latter deliberately
+    // separate — see its own comment — and nothing else.
+    expect(poolSource.match(/confirmations: noConfirmations\(\)/g) ?? []).toHaveLength(2)
+    expect(poolSource.match(/generatePickupCode\(\)/g) ?? []).toHaveLength(2)
+    const pair = bodyOf('private async pairOff(')
+    expect(pair).toContain('generatePickupCode()')
+    expect(pair).toContain('codeAtMatchTime(disposition)')
+    expect(pair).toContain('this.startPayments(matchId, disposition, deal.label, settlement)')
   })
 })

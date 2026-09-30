@@ -95,6 +95,7 @@ export const MARKETS = {
   oklahomaCity: { lat: 35.4676, lng: -97.5164, label: 'Oklahoma City' },
   tulsa: { lat: 36.154, lng: -95.9928, label: 'Tulsa' },
   memphis: { lat: 35.1495, lng: -90.049, label: 'Memphis' },
+  indianapolis: { lat: 39.7684, lng: -86.1581, label: 'Indianapolis' },
 }
 
 /**
@@ -196,6 +197,17 @@ export const FIXTURE_COORDS = {
   // branch was open — see the merge comment on PR #157.
   honeypotSolo: { lat: 35.1495, lng: -90.049 },
   honeypotProbe: { lat: 35.149623, lng: -90.048508 },
+  // The requeue-after-a-bow-out pair (issue #160), also in the honeypot lane but
+  // in a market of its own because — uniquely in this table — the two of them
+  // are live *at the same time*. They arrive seconds apart into an empty market,
+  // are each paired with a decoy (the second one because the first is already
+  // `matched` and so invisible to the matcher), and must pair with *each other*
+  // once both decoys have excused themselves. A stray buyer from a neighbouring
+  // scenario would pair with one of them and make that outcome unreadable, and
+  // `honeypotSolo`/`honeypotProbe` cannot be reused because their whole design
+  // is that only one is ever open at a time.
+  honeypotPairOne: { lat: 39.7684, lng: -86.1581 },
+  honeypotPairTwo: { lat: 39.768123, lng: -86.157608 },
   // The browser lane (`e2e/`). Same table, because the separation rule is about
   // which Durable Object a fixture lands in, and both lanes drive the same one.
   e2eBuddyA: { lat: 33.749, lng: -84.388 },
@@ -388,6 +400,14 @@ export const SCENARIOS = {
       'a buyer alone in a market is paired with a decoy that can never be charged, never ' +
       'releases a code, answers a line of chat and then excuses itself through the refunding ' +
       'teardown — leaving no matches, disputes, holds or reputation row behind',
+  },
+  honeypotRequeuePair: {
+    lane: 'payments',
+    market: 'indianapolis',
+    fixtures: ['honeypotPairOne', 'honeypotPairTwo'],
+    what:
+      'two buyers each stood up by a decoy are paired with each other the moment the second ' +
+      'bow-out requeues them, rather than both waiting for a third person who never comes (#160)',
   },
   e2ePair: {
     lane: 'e2e',

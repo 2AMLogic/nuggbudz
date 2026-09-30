@@ -1279,18 +1279,6 @@ export class NuggPool extends DurableObject<Env> {
       joinedAt: Date.now(),
       sauces,
     }
-    // Belt and braces on the refusal above: whatever route a socket took to get
-    // here, an identity is never a candidate for itself.
-    const others = this.waitingStates().filter((o) => o.state.userId !== identity.userId)
-    // Read fresh, for the joiner and everyone they might pair with, rather than
-    // cached in the queue entry: a buyer who completed a split two minutes ago
-    // should be matched on the standing they have now, and a hibernation
-    // attachment written before that would say otherwise. One query, not one per
-    // waiting buyer — see `readStandings`.
-    const standings = await this.standingsFor([
-      identity.userId,
-      ...others.map((o) => o.state.userId),
-    ])
 
     // Stock the market with decoys *before* looking for a buddy, so a buyer
     // arriving in an empty city has something on the map either way. They are
@@ -1302,6 +1290,53 @@ export class NuggPool extends DurableObject<Env> {
       decoys.length === 0 || (await this.honeypotCooldown(identity.userId, identity.joinedAt))
     const offered = cooling ? [] : this.nearbyHoneypots(identity, decoys)
 
+    // Queue rather than pair, when the matcher finds nobody. `pairOff` writes no
+    // seat of its own precisely because its other caller — a requeue — already
+    // has one written; here the seat is this join.
+    if (!(await this.pairOff(ws, identity, deal, offered))) await this.enqueue(ws, identity)
+  }
+
+  /**
+   * Run the matcher for one buyer and, if it finds a buddy, strike the match.
+   *
+   * Extracted out of `handleJoin` so that a **requeue** can reach it (#160).
+   * `findMatch` used to be called from the join path and nowhere else, so a
+   * buyer a teardown handed back to the queue was matchable only by the next
+   * person to join the cell — see `rematchRequeued`. Sharing this path rather
+   * than copying it is the whole point: a second match-creation site is a second
+   * place a pickup code, a disposition, a standing read or a `matched` frame
+   * could drift apart from the first.
+   *
+   * Returns false when the buyer has to stay in the queue — no decision, or a
+   * buddy who vanished between the scan and here — and deliberately does not
+   * seat them itself, because its two callers have different seats to write.
+   */
+  private async pairOff(
+    ws: WebSocket,
+    state: BuyerIdentity,
+    deal: DealSpec,
+    offered: readonly HoneypotBuyer[],
+  ): Promise<boolean> {
+    // Normalised rather than trusted as passed: a requeue hands this a *waiting*
+    // state, and nothing but the identity belongs in a match record or on a
+    // matched socket's attachment.
+    const identity = identityOf(state)
+    const dealId = deal.id
+    // Belt and braces on `handleJoin`'s second-tab refusal: whatever route a
+    // socket took to get here, an identity is never a candidate for itself. On
+    // the requeue path this is also what removes the requeued buyer's own seat,
+    // which — unlike a joiner's — is already in `waitingStates()`.
+    const others = this.waitingStates().filter((o) => o.state.userId !== identity.userId)
+    // Read fresh, for the joiner and everyone they might pair with, rather than
+    // cached in the queue entry: a buyer who completed a split two minutes ago
+    // should be matched on the standing they have now, and a hibernation
+    // attachment written before that would say otherwise. One query, not one per
+    // waiting buyer — see `readStandings`.
+    const standings = await this.standingsFor([
+      identity.userId,
+      ...others.map((o) => o.state.userId),
+    ])
+
     const decision = findMatch(
       toCandidate(identity, standings),
       [
@@ -1312,10 +1347,7 @@ export class NuggPool extends DurableObject<Env> {
       this.standingTiebreakMs,
     )
 
-    if (decision === null) {
-      await this.enqueue(ws, identity)
-      return
-    }
+    if (decision === null) return false
 
     // The buddy is whichever of the pair is not this connection.
     const buddyConnId =
@@ -1327,15 +1359,12 @@ export class NuggPool extends DurableObject<Env> {
     const decoy = offered.find((entry) => entry.id === buddyConnId)
     if (decoy !== undefined) {
       await this.matchHoneypot(ws, identity, decoy, deal, decision.distanceMeters)
-      return
+      return true
     }
 
     const buddy = others.find((o) => o.state.connId === buddyConnId)
-    if (buddy === undefined) {
-      // Buddy vanished between the scan and here. Queue instead of pairing with a ghost.
-      await this.enqueue(ws, identity)
-      return
-    }
+    // Buddy vanished between the scan and here. Queue instead of pairing with a ghost.
+    if (buddy === undefined) return false
 
     const matchId = crypto.randomUUID()
     const settlement = settle(deal, 2)
@@ -1427,6 +1456,79 @@ export class NuggPool extends DurableObject<Env> {
     // Last, so a processor that will not open the charges tears down a match
     // that was otherwise fully consistent.
     await this.startPayments(matchId, disposition, deal.label, settlement)
+    return true
+  }
+
+  /**
+   * Return a buyer whose match has ended to the queue, at the back of it.
+   *
+   * The one place the waiting state a teardown writes is composed. Three
+   * teardowns requeue — `bowOutHoneypot`, `unwindMatch` (the half that paid) and
+   * `handleDisconnect` (the survivor) — and all three used to spell this shape
+   * out inline, which is how all three came to share the defect #160 is about.
+   *
+   * It is deliberately *only* the state write. The frame that explains what
+   * happened has to reach the buyer before anything can match them again, and
+   * the dead match has to be retired first, so the matcher runs from
+   * `rematchRequeued` once the caller has finished tearing the old match down.
+   */
+  private requeue(ws: WebSocket, of: BuyerIdentity, now: number): void {
+    this.setState(ws, {
+      ...identityOf(of),
+      status: 'waiting',
+      // At the back of the queue: a buyer a teardown hands back must not jump
+      // the buyers who waited honestly.
+      joinedAt: now,
+      // Alive as of now: their wait starts over, not where the match left it.
+      lastSeenAt: now,
+      warned: false,
+    })
+  }
+
+  /**
+   * Look for a buddy for the buyers a teardown just put back in the queue.
+   *
+   * Until #160 nothing did. `findMatch` ran on `join` and nowhere else, so a
+   * requeued buyer was matchable only by the *next* person to join the cell —
+   * and honeypots made that the common case, in exactly the situation the
+   * fallback rule exists to protect: two buyers arriving into an empty market a
+   * few seconds apart are each paired with a decoy, because the first is already
+   * `matched` and so invisible to the second's join. When both decoys excuse
+   * themselves the two of them are left in one radius, on one deal, waiting for
+   * a third person who may never come.
+   *
+   * Safe to run straight from the teardown: a Durable Object processes one event
+   * at a time, so there is no concurrent `alarm()` or `join` to race — the queue
+   * this reads is the queue as of the teardown that called it, and a join
+   * arriving in the same instant is simply the next event.
+   *
+   * **No decoys are stocked or offered here, deliberately.** A buyer coming out
+   * of a match has just been in one; re-stocking would let the decoy that stood
+   * them up hand them straight to another one, and would start a fresh
+   * stock/cooldown check on a path that is not a join.
+   */
+  private async rematchRequeued(sockets: readonly WebSocket[]): Promise<void> {
+    for (const ws of sockets) {
+      const state = this.getState(ws)
+      // Paired already by an earlier socket in this same teardown, or gone.
+      if (state === null || state.status !== 'waiting') continue
+      // Two tabs of one browser are one buyer (#101), and `matchSockets` can
+      // hand a teardown both of them. `handleJoin` refuses a seat beside an
+      // identity that is already matched; a requeue must not be the one path
+      // that puts one person in two matches at once.
+      if (
+        this.states().some(
+          (o) => o.ws !== ws && o.state.userId === state.userId && o.state.status === 'matched',
+        )
+      ) {
+        continue
+      }
+      // Re-resolved rather than remembered: a deal withdrawn from the menu while
+      // this buyer was in a match is a deal they may not be paired on again.
+      const deal = findDeal(state.dealId)
+      if (deal === undefined || !isDealOffered(deal.id)) continue
+      await this.pairOff(ws, state, deal, [])
+    }
   }
 
   /**
@@ -1587,24 +1689,25 @@ export class NuggPool extends DurableObject<Env> {
     await this.startHoneypotCooldown(record.orderer.userId, now)
     await this.startHoneypotCooldown(record.receiver.userId, now)
 
+    const requeued: WebSocket[] = []
     for (const peer of this.matchSockets(record.matchId)) {
-      this.setState(peer.ws, {
-        ...identityOf(peer.state),
-        status: 'waiting',
-        // At the back of the queue, like every other requeue: a buyer returned
-        // by a decoy must not jump the buyers who waited honestly.
-        joinedAt: now,
-        lastSeenAt: now,
-        warned: false,
-      })
+      this.requeue(peer.ws, peer.state, now)
       this.send(peer.ws, {
         type: 'buddy_left',
         matchId: record.matchId,
         heldCents: centsFor(held, peer.state.role),
       })
+      requeued.push(peer.ws)
     }
 
     await this.retireMatch(record.matchId, retired, 'buddy_left')
+    // Only now, and this is the ordering the whole of #160 turns on: the buyer
+    // has been told the decoy is not coming and the dead match is gone, so a
+    // `matched` frame for their *new* buddy cannot arrive ahead of the
+    // `buddy_left` explaining why they were queued again. Two buyers each stood
+    // up by a decoy are each other's match, and nothing else would ever run the
+    // matcher for them.
+    await this.rematchRequeued(requeued)
     await this.broadcastWaiting()
     await this.scheduleSweep()
   }
@@ -1897,6 +2000,7 @@ export class NuggPool extends DurableObject<Env> {
     const retired: MatchRecord =
       settled.ledger === undefined ? record : { ...record, ledger: settled.ledger }
 
+    const requeued: WebSocket[] = []
     for (const peer of this.matchSockets(record.matchId)) {
       const mine = centsFor(settled.refunded, peer.state.role)
       this.send(peer.ws, {
@@ -1911,18 +2015,15 @@ export class NuggPool extends DurableObject<Env> {
         this.setState(peer.ws, principalOf(peer.state))
         continue
       }
-      const now = Date.now()
-      this.setState(peer.ws, {
-        ...identityOf(peer.state),
-        status: 'waiting',
-        // At the back of the queue, so they do not jump buyers who waited honestly.
-        joinedAt: now,
-        lastSeenAt: now,
-        warned: false,
-      })
+      this.requeue(peer.ws, peer.state, Date.now())
+      requeued.push(peer.ws)
     }
 
     await this.retireMatch(record.matchId, retired, 'payment_failed')
+    // The buyer who did nothing wrong is re-offered to the matcher rather than
+    // left waiting for the next person to join (#160) — after the frame that
+    // says their card was not the problem, and after the dead match is gone.
+    await this.rematchRequeued(requeued)
     await this.broadcastWaiting()
     await this.scheduleSweep()
   }
@@ -2497,21 +2598,13 @@ export class NuggPool extends DurableObject<Env> {
       await this.recordStanding([{ userId: state.userId, event: 'late_cancel' }])
     }
 
+    const requeued: WebSocket[] = []
     for (const other of this.states()) {
       if (other.ws === ws) continue
       if (other.state.status !== 'matched' || other.state.matchId !== state.matchId) continue
 
-      const now = Date.now()
-      const requeued: WaitingState = {
-        ...identityOf(other.state),
-        status: 'waiting',
-        // Requeued at the back, so they do not jump buyers who waited honestly.
-        joinedAt: now,
-        // Alive as of now: their wait starts over, not where the match left it.
-        lastSeenAt: now,
-        warned: false,
-      }
-      this.setState(other.ws, requeued)
+      this.requeue(other.ws, other.state, Date.now())
+      requeued.push(other.ws)
       this.send(other.ws, {
         type: 'buddy_left',
         matchId: state.matchId,
@@ -2524,6 +2617,10 @@ export class NuggPool extends DurableObject<Env> {
     }
 
     await this.retireMatch(state.matchId, retired, 'buddy_left')
+    // The survivor is offered to the matcher again rather than left waiting for
+    // the next person to join (#160) — after their `buddy_left`, so a `matched`
+    // frame cannot arrive ahead of the explanation for it.
+    await this.rematchRequeued(requeued)
     // Without this the survivor's UI would keep showing the pool count (and
     // buddy dots) from before they were matched, which for an instant match
     // is zero — and it also tells everyone nearby about the buyer who just got

@@ -33,11 +33,19 @@
  *
  * which is `BUYERS.op` below. Set `SMOKE_REQUIRE_ADMIN=1` to turn the skip into
  * a failure, which is what CI does so the coverage cannot go missing quietly.
+ *
+ * This suite is local-only by construction: the seeding above requires a
+ * `wrangler --local` KV/D1 store, and there is no way to complete an OAuth
+ * round trip against a deployment unattended. Pointing `BASE` at a deployment
+ * therefore refuses outright below rather than running every authenticated
+ * check against a session that was never seeded there — see issue #56.
+ * `scripts/demo-pairing-check.mjs` is the live check for a deployment.
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { resolveD1Target } from './demo-pairing-check.mjs'
 import { FIXTURE_COORDS } from './pool-fixtures.mjs'
 
 const BASE = process.env.BASE ?? 'http://localhost:5199'
@@ -48,6 +56,22 @@ let failures = 0
 const check = (name, ok, extra = '') => {
   log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? ` — ${extra}` : ''}`)
   if (!ok) failures++
+}
+
+// Refuse up front rather than seven checks in: seeding straight into KV/D1
+// only reaches the LOCAL store `pnpm dev` writes to, so every authenticated
+// assertion below is guaranteed to fail against anything else, and reads as
+// seven production regressions rather than one wrong invocation (#56).
+if (!resolveD1Target(BASE).local) {
+  log(
+    `REFUSED  BASE=${BASE} is not local. pnpm smoke seeds sessions straight into the ` +
+      `LOCAL KV/D1 store 'pnpm dev' writes to, so it cannot authenticate against a ` +
+      `deployment — every check below would fail for that reason alone, not because ` +
+      `anything is broken. Check a deployment with:\n` +
+      `  BASE=${BASE} node scripts/demo-pairing-check.mjs\n` +
+      `which asserts whichever pairing mode the server actually reports.`,
+  )
+  process.exit(1)
 }
 
 /** Poll a predicate until it is truthy, or give up. Returns the value, or null. */
@@ -2407,6 +2431,19 @@ if (!shortWindows) {
 }
 
 pinger.ws.close()
+
+// A red run against a server with the demo flag on is not a regression: this
+// suite assumes the strict path throughout (the `demoPairing === false` check
+// above already fails on it), so restate that here rather than leaving a wall
+// of unrelated-looking failures to be traced back to one flag (#56).
+if (failures > 0 && health.demoPairing === true) {
+  log(
+    `\nNOTE  this server reports demoPairing=true. This suite assumes the strict, ` +
+      `signed-in-only path, so an authenticated check failing here can be that flag, ` +
+      `not a regression — run scripts/demo-pairing-check.mjs instead to check the ` +
+      `mode this server is actually in.`,
+  )
+}
 
 log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

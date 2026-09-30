@@ -26,6 +26,15 @@ export interface DealSpec {
   platformFeeCents: number
   /** How many buyers this deal is designed to split across. */
   partySize: number
+  /**
+   * Where the orderer places the actual order, once matched — this merchant's
+   * mobile ordering page, never an aggregator (DoorDash/Uber Eats markup erases
+   * the spread this deal exists to arbitrage). `null` when the chain is not
+   * offered yet (see `INACTIVE_DEAL_IDS`) and no link has been confirmed for it.
+   * Per-merchant so re-offering a chain never means finding a hardcoded URL at a
+   * call site — see #148.
+   */
+  mobileOrderUrl: string | null
 }
 
 export type BuyerRole = 'orderer' | 'receiver'

@@ -362,6 +362,19 @@ test('two nearby buds pair, split the box evenly, and see complementary roles', 
     await expect(pageB.getByText(/^[A-Z0-9]{6}$/)).toHaveCount(0)
     await expect(pageB.getByText(`The code on ${BUYERS.nova.name}'s receipt`)).toBeVisible()
 
+    // The link to place the actual order (#148): the orderer only, after the
+    // match, never the receiver — never on a call site's literal either, the
+    // href comes straight off the catalogue entry this deal resolved to.
+    if (deal.mobileOrderUrl === null) throw new Error('fixture deal has no mobileOrderUrl')
+    const orderLink = pageA.getByRole('link', { name: `Order on the ${deal.merchant} app` })
+    await expect(orderLink).toBeVisible()
+    await expect(orderLink).toHaveAttribute('href', deal.mobileOrderUrl)
+    await expect(orderLink).toHaveAttribute('target', '_blank')
+    await expect(orderLink).toHaveAttribute('rel', 'noreferrer')
+    await expect(
+      pageB.getByRole('link', { name: `Order on the ${deal.merchant} app` }),
+    ).toHaveCount(0)
+
     // Nuggchat. Two strangers who have never met need to find each other at a
     // counter, and this is the channel for it: relayed between the two matched
     // buddies and stored nowhere. `scripts/smoke.mjs` proves the "stored

@@ -1,8 +1,8 @@
 {
-  "loom_version": "0.19.546",
-  "loom_commit": "3e68a9fef",
+  "loom_version": "0.19.558",
+  "loom_commit": "a626d3cea",
   "install_date": "2026-09-27",
-  "loom_source_remote": "git@github.com:rjwalters/loom.git",
+  "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "installed_files": [
     ".claude/agents/loom-architect.md",
     ".claude/agents/loom-auditor.md",

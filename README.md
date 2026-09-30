@@ -669,6 +669,57 @@ the full Curator → Builder → Judge → Doctor → Merge lifecycle on a ready
 /loom:sweep <issue>
 ```
 
+### CI, and why a green pull request is not a green `main`
+
+Every job in `.github/workflows/ci.yml` runs on pull requests **and** on every
+push to `main`. That second trigger is not redundant. A pull request's CI tests
+the branch's own merge-base and `main`'s tree; it never tests the tree the merge
+actually produces. Four times in one afternoon (issue #57) a pull request that
+was individually correct and green broke `main` when it landed, and three of the
+four merged with **no conflict at all**:
+
+| What merged | How it broke | Conflict? |
+|---|---|---|
+| A PR that grew `scripts/smoke.mjs` | The deck asserted a stale check count; `main` went red | No — that PR never touched the deck line |
+| Two PRs bumping the same deck line | Byte-identical edits for different reasons; the merged file had a third, larger count | No — identical edits merge clean |
+| Chain-gated pairing vs. `main`'s fixtures | Fixtures separated buyers with a second and third deal id, which the new gate refused. `vitest` green, dead in `pnpm smoke` | No |
+| The same gating vs. another PR's smoke fixtures | That suite paired and settled on the gated chains at five sites | No |
+
+Two of the four were caught only because somebody happened to run the
+integration suite locally afterwards, and one had already been sitting on `main`.
+
+**What is in place.** The push-to-`main` trigger (the merge result gets the whole
+suite, including `pnpm smoke`, `pnpm test:e2e` and both money lanes), plus a
+`main-red-alert` job that turns a red or cancelled push run into **one**
+`loom:auditor` tracking issue and comments on that same issue for every later
+failure. Nobody has to be watching the Actions tab.
+
+**What needs an operator, and has not been done.** Requiring the suite to pass on
+the *combined* tree **before** it lands — the only thing that stops this class
+rather than reporting it — is a repo-admin setting, and no workflow or agent
+token can grant it to itself (`GET /repos/.../branches/main/protection` answers
+`403` for the tokens this project's automation uses). Either of two settings does
+it, and a maintainer with admin rights has to choose:
+
+- **Require branches to be up to date before merging** — Settings → Branches →
+  branch protection for `main` → *Require status checks to pass* → *Require
+  branches to be up to date before merging*. Cheapest to turn on; the cost is that
+  every PR must be updated to the newest `main` before it can merge, and with more
+  than one PR in flight that serialises merges by hand.
+- **A merge queue** — Settings → Branches → *Require merge queue*. Same guarantee
+  without the manual updating: the queue builds the combined tree and runs the
+  required checks on it. The cost is a longer time-to-merge and a queue to watch.
+
+Either way, the required checks must include the lanes that actually see this
+defect class: `smoke` and `e2e`, not only `check`. `pnpm test` was green for two
+of the four incidents above.
+
+The decision recorded today is **detect, do not gate** — the alert job ships, the
+gate is left to the operator — because the gate's cost is merge friction on a
+project where a single agent fleet lands most pull requests, and because nothing
+can be enforced from this side of the permission boundary. If the incident rate
+comes back, flip the setting rather than adding another notifier.
+
 ## License
 
 MIT

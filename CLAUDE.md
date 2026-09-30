@@ -89,7 +89,14 @@ state.
   promptless socket lands). `test/fixture-separation.test.ts` derives that from
   the table and the repo's own `distanceMeters`, because two scenarios inside each
   other's radius fail as a race rather than as a broken test. Never add a fixture
-  coordinate at a call site.
+  coordinate at a call site. **Distance is also the only isolation mechanism** —
+  never keep two scenarios apart by giving them different *deal ids* (or
+  merchants, or sauces). That couples the suite to `shared/deals.ts`, and it is
+  what broke `main` twice in one afternoon (#57, cases 3 and 4): a branch that
+  gated pairing to one chain and a branch whose fixtures used a second and third
+  chain id to separate buyers merged with no conflict, textually clean, green in
+  `vitest`, and dead at runtime in `pnpm smoke`. The catalogue is a product
+  decision that will keep changing; a hundred kilometres will not.
 - **Identity comes from the session, never from a message.** The pool socket's
   identity is fixed at upgrade time — the session, or with none the anonymous
   `demo:` identity off the browser's cookie — and the display name a buddy sees
@@ -293,6 +300,31 @@ state.
   `test/verdict-guard.test.ts` drives both through the real executables, with the
   `@mention` and `--body-file -` cases as controls, because a guard with a green
   unit test and no wiring is this repo's recurring defect.
+- **A green pull request is not a green `main`, and the merge result is watched
+  rather than gated (#57).** Per-PR CI tests the branch's own merge-base and
+  `main`'s tree, never the tree the merge produces. Four times in one afternoon a
+  pull request that was individually correct and green broke `main` when it
+  landed, and three of those four had **no conflict at all** — identical edits
+  merge clean by construction, and so do edits to different lines of two files
+  whose *semantics* interact. Two were visible only in `pnpm smoke`; `vitest` was
+  green for both, because it never reaches the Durable Object. Every job in
+  `.github/workflows/ci.yml` therefore runs on `push: branches: [main]` as well as
+  on pull requests — that half has always existed, and it is the half nobody was
+  reading. The `main-red-alert` job is the reading: on a failed *or cancelled*
+  push-triggered run it opens **one** `loom:auditor` issue and comments on that
+  same issue every time after, so a red `main` is handed to a human or the Auditor
+  role instead of being found by the next person to run the suite locally. It
+  `needs` *every other job*, and `test/main-red-alert.test.ts` compares that list
+  against the workflow's own jobs — a job added later and left out of it would be
+  watched by nobody with nothing looking wrong — and drives the filing half
+  against a stub forge, because a notifier nothing invokes is this repo's recurring
+  defect wearing a different hat. What is deliberately **not** here is the gate:
+  "require branches to be up to date before merging", or a merge queue, is the only
+  thing that catches this class *before* it lands, and it is a repo-admin setting
+  no workflow can grant itself — README "CI, and why a green pull request is not a
+  green `main`" records that decision, what to flip, and who has to flip it. Never
+  read the alert as if it were the gate; it reports a wrong `main`, it does not
+  prevent one.
 
 ## Reconciling a conflicted branch: merge `origin/main` in, do not rebase onto it
 

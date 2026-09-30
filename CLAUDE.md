@@ -90,12 +90,26 @@ state.
   the table and the repo's own `distanceMeters`, because two scenarios inside each
   other's radius fail as a race rather than as a broken test. Never add a fixture
   coordinate at a call site.
-- **Identity comes from the session, never from a message.** The pool socket is
-  authenticated at upgrade time and the display name a buddy sees is read off
-  the session in KV. A `name` on the wire is ignored, not trusted, and a caller
-  cannot supply a user id on any path. In demo mode only, the display name
-  itself is caller-supplied — on the upgrade query string, not on the session
-  or on any message — since there is no signed-in session to read one from.
+- **Identity comes from the session, never from a message.** The pool socket's
+  identity is fixed at upgrade time — the session, or with none the anonymous
+  `demo:` identity off the browser's cookie — and the display name a buddy sees
+  is read off the session in KV. A `name` on the wire is ignored, not trusted,
+  and a caller cannot supply a user id on any path. For an anonymous identity
+  only, the display name itself is caller-supplied — on the upgrade query
+  string, not on any message — since there is no session to read one from.
+- **Sign-in guards the seat, not the socket (#150).** Every socket is welcomed
+  and shown the market; `seatVerdict` in `shared/identity.ts`, called from the
+  pool's `join` path and nowhere else, is the one answer to whether an identity
+  may take a seat, and `ALLOW_DEMO_PAIRING` is the one input it reads for an
+  anonymous one. Never decide it a second time at the upgrade or in the client
+  (the client reads `/api/health`'s `demoPairing` to offer a name field, never
+  to skip the gate): an anonymous identity is `demo:`, `paymentDisposition` answers `demo`
+  for it before Stripe is consulted, so a seat that slipped past this gate on a
+  charged deployment is a free pair. A socket without a seat is sent `market`
+  counts and never the `buddies` roster. The upgrade limiter is the flood
+  backstop the old 401 used to be, so anonymous upgrades keep their own tighter
+  window (`POOL_ANON_UPGRADE_LIMIT`) and a per-address concurrent cap in the pool
+  (`POOL_ANON_SOCKETS_PER_IP`) — don't fold them into the signed-in bucket.
 - **Nuggchat is relayed and never stored.** A message between matched buddies is
   handed to the other socket or refused — nothing reaches D1, Durable Object
   storage or KV, and there is no history to fetch on reconnect. That is a
@@ -203,6 +217,27 @@ state.
   not `0`. A D1 write that fails parks the row under `holdfile:` and
   `reconcileHolds` replays it off the alarm, because a hold is filed for a record
   that is still `pending` and `reconcileTerminal` skips those by design.
+- **A honeypot is a decoy, and everything that makes it safe is structural.**
+  `shared/honeypot.ts` mints `honeypot:<uuid>` identities that populate an empty
+  market and act as an abuse tripwire; `HONEYPOT_BUYERS` answers that one
+  question and is off by default, on a charged deployment as much as anywhere
+  else. The money gate answers `honeypot` from identity *before* the Stripe
+  secrets are read, so a decoy cannot reach the processor — and
+  `codeAtMatchTime('honeypot')` is **false**, which is the single answer the
+  whole feature rests on: no code released means no confirmation recorded, which
+  makes `matches` (needs both) and `disputes` (every route needs one)
+  unreachable rather than merely avoided. A decoy then **excuses itself** through
+  the refunding `buddy_left` teardown well inside the unconfirmed-match window,
+  because a decoy that went silent would walk a real buyer into the hold a
+  dispute deliberately keeps — and it books no `late_cancel` against them, which
+  `cancelMatch` and `handleDisconnect` both name and skip. In matching it is a
+  **fallback, never a candidate**: `findMatch` drops every decoy the moment a
+  real buyer is eligible, so the starvation-free window is computed over real
+  buyers only, and a chosen decoy is always the *receiver* — nobody is ever sent
+  to a counter to meet somebody who does not exist. Its chat replies come from a
+  fixed table: pure, offline, no model, deliberately, because a model would make
+  the sentence under the chat box false. A signal records which match, which
+  caller and which kind, and **never what was said**.
 - **A finished match leaves the Durable Object only once D1 has it.** A settled
   split goes to `matches`, a dead handshake to `disputes`, and money a teardown
   could not hand back to `holds` — each a table of its own, never a status
@@ -314,6 +349,7 @@ pnpm dev          # Vite + Worker together, full stack
 pnpm test         # vitest — pure logic (settlement, geo, matchmaking, protocol)
 pnpm smoke        # end-to-end pairing against a running `pnpm dev`
 pnpm payment-gate # the money gate, in whichever mode that server reports
+pnpm honeypot-check # decoy buyers, in whichever mode that server reports
 pnpm fake-stripe  # a local stand-in for Stripe's REST API, for the charged path
 pnpm test:e2e     # Playwright — two browsers driving the real UI end to end
 pnpm typecheck    # wrangler types && tsc --noEmit
@@ -341,12 +377,16 @@ belongs in `smoke` or `test:e2e`.
 
 Pairing needs `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars` on a checkout with no
 Stripe keys — otherwise a join is refused rather than paired for free, which is
-the point. `pnpm test:e2e` also needs `POOL_UPGRADE_LIMIT="300"` there: the
+the point. `pnpm test:e2e` also needs `POOL_UPGRADE_LIMIT="300"` (and
+`POOL_ANON_UPGRADE_LIMIT="300"`) there: the
 limiter keys on `CF-Connecting-IP`, which `pnpm dev` never sets, so locally every
 client shares one bucket and the suite trips a limit sized for a venue NAT —
 visible as "Lost the connection. Try again.", not as a refusal. `pnpm payment-gate` is the fourth lane: it asserts whichever money
 mode the server it is pointed at reports, and it is the only thing that
-exercises the charged path through the real Durable Object.
+exercises the charged path through the real Durable Object. `pnpm honeypot-check`
+is the fifth, and needs `HONEYPOT_BUYERS="1"` (plus Stripe "configured" at a dead
+address, the way CI sets it) to exercise the decoy path; with the flag off it
+asserts the other direction — that a market stays empty.
 
 ## Style
 

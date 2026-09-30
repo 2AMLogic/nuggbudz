@@ -104,10 +104,13 @@ jobs:
       # is not that shape, and hitting the limit surfaces as a socket that closes
       # rather than as a refusal you can read — "Lost the connection. Try again."
       # Raised for this step's server only. Never `wrangler.jsonc`.
+      # Every landing page now opens a browse socket too (#150), and a signed-out
+      # one is counted in the anonymous bucket -- raised alongside, same reason.
       - run: |
           {
             echo 'ALLOW_UNCHARGED_PAIRING="1"'
             echo 'POOL_UPGRADE_LIMIT="300"'
+            echo 'POOL_ANON_UPGRADE_LIMIT="300"'
           } > .dev.vars
       # Drives the real UI in two browser contexts; playwright.config.ts's
       # webServer boots `pnpm dev` itself, so there is no separate wait-on step.
@@ -264,3 +267,91 @@ jobs:
           STRIPE_WEBHOOK_SECRET=whsec_fake_for_ci_only \
           PAYMENT_GATE_REQUIRE_ADMIN=1 \
           pnpm payment-gate
+
+  # Honeypot buyers, in both directions, through the real Durable Object.
+  #
+  # `pnpm test` covers the decisions — the money gate's ordering, the
+  # fallback-only matching rule, the reply table, the ledger exclusions — and
+  # none of that is evidence any of it is wired. This job drives a real socket
+  # into a real decoy pairing and checks every one of the things a decoy must
+  # never do actually did not happen: no charge, no pickup code, no `matches`
+  # row, no `disputes` row, no hold, no reputation counter, and nothing said to
+  # it anywhere under `.wrangler/state`.
+  #
+  # Stripe is deliberately "configured" here with a secret that is not a secret
+  # and an API base nothing is listening on — the same enforcement trick
+  # `demo-check` uses (issue #3), for the same reason. If `paymentDisposition`
+  # ever stopped answering `honeypot` before the secrets are consulted,
+  # `createPaymentIntent` would try 127.0.0.1:9 (discard), fail, and take the
+  # match down, turning this job red rather than leaving the exclusion true by
+  # accident. `ALLOW_DEMO_PAIRING` is deliberately NOT set: a `demo:` identity
+  # would be excluded by the demo branch and would make the whole lane vacuous.
+  honeypot-check:
+    runs-on: ubuntu-latest
+    # Its own job, its own runner, its own checkout — `smoke` and `e2e` both
+    # assert on empty markets, and a decoy roster is a property of the whole
+    # server. The two configurations must never share one.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # First: the default. A server with no `HONEYPOT_BUYERS` at all must leave
+      # a market honest — nothing seeded, nobody matched, no phantom dots. The
+      # flag existing is not evidence that leaving it off still does nothing.
+      - run: |
+          {
+            echo 'ALLOW_UNCHARGED_PAIRING="1"'
+            echo 'POOL_UPGRADE_LIMIT="300"'
+          } > .dev.vars
+      - run: pnpm dev --port 5250 &
+      - run: npx wait-on http://localhost:5250/api/health --timeout 90000
+      - name: Assert the server came up with decoys off
+        run: |
+          health="$(curl -sf http://localhost:5250/api/health)"
+          echo "$health"
+          node -e '
+            const health = JSON.parse(process.argv[1])
+            if (health.honeypots !== false) {
+              console.error("expected honeypots: false, got", health.honeypots)
+              process.exit(1)
+            }
+          ' "$health"
+      - run: BASE=http://localhost:5250 pnpm honeypot-check
+      # Then the feature, on a second server with its own port and its own
+      # `.dev.vars`. Stripe "configured" at a dead address is the enforcement.
+      - run: |
+          {
+            echo 'HONEYPOT_BUYERS="1"'
+            echo 'POOL_UPGRADE_LIMIT="300"'
+            echo 'STRIPE_SECRET_KEY="sk_test_not_a_real_key"'
+            echo 'STRIPE_WEBHOOK_SECRET="whsec_not_a_real_secret"'
+            echo 'STRIPE_API_BASE="http://127.0.0.1:9/v1"'
+          } > .dev.vars
+      - run: pnpm dev --port 5251 &
+      - run: npx wait-on http://localhost:5251/api/health --timeout 90000
+      # A server that answered honeypots:false here would make every assertion
+      # below vacuous rather than failing — honeypot-check.mjs takes whichever
+      # branch /api/health reports. Assert the mode, and assert that Stripe is
+      # live, before trusting anything the check reports.
+      - name: Assert the server came up with decoys on and Stripe configured
+        run: |
+          health="$(curl -sf http://localhost:5251/api/health)"
+          echo "$health"
+          node -e '
+            const health = JSON.parse(process.argv[1])
+            if (health.honeypots !== true) {
+              console.error("expected honeypots: true, got", health.honeypots)
+              process.exit(1)
+            }
+            if (health.payments !== "live") {
+              console.error("expected payments: live, got", health.payments)
+              process.exit(1)
+            }
+          ' "$health"
+      - run: BASE=http://localhost:5251 pnpm honeypot-check

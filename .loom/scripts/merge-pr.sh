@@ -466,11 +466,14 @@ source "$SCRIPT_DIR/lib/branch-landed.sh"
 # fails to resolve (e.g. no network + no origin/HEAD symref) still falls back
 # to the literal "main"/"master" check in _maybe_delete_local_branch below.
 DEFAULT_BRANCH_NAME=""
-if [[ -f "$SCRIPT_DIR/lib/default-branch.sh" ]]; then
-  # shellcheck source=lib/default-branch.sh
-  source "$SCRIPT_DIR/lib/default-branch.sh"
-  DEFAULT_BRANCH_NAME="$(cd "$REPO_ROOT" && loom_default_branch 2>/dev/null || true)"
-fi
+# Sourced UNCONDITIONALLY (#9106). This lib carries check_branch_name, the
+# ref-operand validator every forge-derived branch name below must pass before
+# it reaches a git argv, and a fail-closed security guard must not be optional:
+# the old `if [[ -f ... ]]` guard let a partially-resynced .loom/ drop the
+# validator silently. A missing lib now aborts here instead.
+# shellcheck source=lib/default-branch.sh
+source "$SCRIPT_DIR/lib/default-branch.sh"
+DEFAULT_BRANCH_NAME="$(cd "$REPO_ROOT" && loom_default_branch 2>/dev/null || true)"
 forge_detect
 
 # Use gh-cached for read-only queries to reduce API calls (see issue #1609)
@@ -621,6 +624,13 @@ PR_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha // empty')
 # forge_get_pr responses already carry a `labels` array in this shape, so no
 # extra API call is needed beyond the fetch above.
 PR_LABELS=$(echo "$PR_JSON" | jq -r '.labels[]?.name // empty' 2>/dev/null || true)
+# #9106: $PR_BRANCH is `.head.ref` — chosen by whoever opened the PR. Everything
+# downstream (the _recheck_mergeable_before_refusal fetch, branch_landed,
+# update-ref refs/loom/parent/<branch>, the local `git branch -D`) puts it in a
+# git argv, so it is validated ONCE here and the merge is denied outright if it
+# is not a safe ref operand. The reason names the offending ref, so the refusal
+# is greppable in the run log.
+check_branch_name "$PR_BRANCH" "head branch of PR #$PR_NUMBER" || error "Merge blocked: PR #$PR_NUMBER's head branch is not a safe git ref operand (see the check_branch_name refusal above, #9106). Refusing before any git command runs on '$PR_BRANCH'. Rename the branch on the PR and re-run."
 
 # Check if already merged
 if [[ "$PR_MERGED" == "true" ]]; then
@@ -808,7 +818,7 @@ _check_champion_hold_state_staleness() {
 _check_loom_pr_label() {
   local msg rc=0 flags=()
   [[ "$ALLOW_UNAPPROVED" == "true" ]] && flags+=(--allow-unapproved)
-  msg="$(printf '%s\n' "$PR_LABELS" | "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr loom-pr-guard --pr "$PR_NUMBER" --head-sha "$PR_HEAD_SHA" "${flags[@]}" 2>/dev/null)" || rc=$?
+  msg="$(printf '%s\n' "$PR_LABELS" | "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr loom-pr-guard --pr "$PR_NUMBER" --head-sha "$PR_HEAD_SHA" ${flags[@]+"${flags[@]}"} 2>/dev/null)" || rc=$?
   if [[ $rc -eq 0 && "$msg" == "LOOM-PR-GUARD-CLEAN" ]]; then
     _check_champion_hold_state_staleness
     return 0
@@ -912,7 +922,7 @@ _check_loom_pr_label
 # build-stampede guard (#8252). The refusal named neither the version nor the
 # roll command. That is what these markers and the hint below fix.
 #
-# requires-daemon: merge-pr >= 0.19.172   verdict-contradiction guard (#8112, landed in #8124)
+# requires-daemon: merge-pr >= 0.19.465   the NEWEST fail-closed verb in this family, not the oldest (#8967): checks-failure (#8191 slice, merged in #9272 at 0.19.464, so first released in 0.19.465); the other fail-closed verbs are partial-conflict >= 0.19.464 (#9246), classify-response >= 0.19.456 (#9228), loom-pr-guard >= 0.19.375 (#7419/#8926), stale-checks >= 0.19.221 (#8248/#8416) and verdict-contradiction >= 0.19.172 (#8112/#8124). One marker covers the whole `merge-pr` family, so it MUST name the highest of them — a host that satisfied an older floor but not the newest fail-closed verb had every merge refused while the hint quoted a floor it already met. Fail-open verbs (head-sync-retry, hold-state, redate-checks, delete-branch, zero-checks-settle, stacked-children, version-policy, partial-reset, closed-building, issue-close-gate, dirty-guard — the last refuses only the post-merge worktree removal, never the merge) deliberately do NOT raise it; the fail-direction table in tests/test-merge-pr-daemon-version-floor.sh enforces both halves.
 # requires-daemon: merge-pr-refs >= 0.19.170   closing-reference analysis (#8191, landed in #8199)
 # requires-daemon: forge optional   --merge-method validation (#8845); command -v probes first, and any non-0/1 exit (older daemon lacking the subcommand, or a Gitea decline) falls back to the unvalidated request with a warning
 # The `merge-pr >=` floor above covers the whole subcommand group, including
@@ -928,6 +938,7 @@ _check_loom_pr_label
 # _mp_daemon_roll_hint's `${sub} >= ` lookup resolving to the merge-gate version,
 # which is the one a refused MERGE should name.
 # requires-daemon: cargo-target-dir optional   #9153 — the post-merge #7239 target-dir reclaim; without the resolve|reclaim verbs a daemon prints nothing, `$target_dir_resolved` stays empty and no reclaim is attempted, which is the pre-#7239 behaviour. A missed disk reclaim, never a failed merge: post-merge cleanup is best-effort by design and `loom-clean`, the daemon's reaper and `worktree.sh remove` all reclaim the same directory on their own schedule.
+# requires-daemon: notify-cleared-blockers optional   #9102 — the post-merge close-triggered loom:blocked re-check; a daemon lacking the verb exits non-zero, `_notify_cleared_blockers` prints one warning and the merge proceeds. A delayed notice, never a failed merge: the next sweep's `check-stale-blocked` pre-wave pass reports the same stale block.
 #
 # _mp_daemon_roll_hint <subcommand> [resolved-bin] -- the concrete, host-local
 # remediation for "your loom-daemon is too old for <subcommand>": the declared
@@ -1291,72 +1302,42 @@ _check_partial_increment_close_conflict() {
   # shellcheck disable=SC2046
   bt_warn="$(printf '%s\n' "$pr_body" | _mp_refs backticks-partial-increment-warnings --pr "$PR_NUMBER" $([[ "${DRY_RUN:-false}" == "true" ]] && echo --dry-run) 2>/dev/null)" || bt_rc=$?; if [[ $bt_rc -eq 0 ]]; then [[ -z "$bt_warn" ]] || warning "$bt_warn"; else warning "Skipped backticked-trailer advisory warning check: loom-daemon rejected 'merge-pr-refs backticks-partial-increment-warnings' (exit $bt_rc) -- most likely a daemon predating this mode. Not refusing; this check is advisory-only."; fi; [[ -n "$partial_refs" ]] || return 0
 
-  # Closing references GitHub will honor on merge, from three unioned signals:
-  #   1. the body's own closing keywords (quota-free regex);
-  #   2. this PR's COMMIT MESSAGES (#4595) — quota-free REST, and the source of
-  #      the squash commit message this script does not override;
-  #   3. GitHub's authoritative closingIssuesReferences (best-effort — empty
-  #      under GraphQL quota exhaustion, but when it does answer it also
-  #      surfaces a Development-sidebar link that no text reveals).
-  # The commit fetch happens only past the partial_refs early-return above, so
-  # the common (non-partial-increment) path costs zero extra API calls.
-  local body_close_refs commit_messages commit_close_refs graphql_close_refs close_refs
-  body_close_refs="$(_body_closing_refs "$pr_body")"
-  commit_messages="$(_pr_commit_messages)"
-  commit_close_refs="$(printf '%s\n' "$commit_messages" | _closing_refs_stdin)"
-  graphql_close_refs="$(forge_pr_close_targets "$PR_NUMBER" "$GH" 2>/dev/null || true)"
-  close_refs="$(printf '%s\n%s\n%s\n' "$body_close_refs" "$commit_close_refs" "$graphql_close_refs" \
-    | grep -E '^[0-9]+$' | sort -un || true)"
-
-  local issue_num issue_json
-  while IFS= read -r issue_num; do
-    [[ -n "$issue_num" ]] || continue
-
-    # Fresh (uncached) read — plain `gh api`, not $GH, mirroring
-    # _reset_one_partial_issue's freshness discipline. Skip PRs that slipped
-    # through the regex (the issues endpoint also returns PRs).
-    issue_json="$(gh api "repos/$REPO_NWO/issues/$issue_num" 2>/dev/null || echo '{}')"
-    if [[ "$(echo "$issue_json" | jq -r 'has("pull_request")')" == "true" ]]; then
-      continue
-    fi
-    # Only an issue that is OPEN right now can be closed BY this merge; one that
-    # is already closed was closed by something else and is not ours to revert.
-    if [[ "$(echo "$issue_json" | jq -r '.state // ""')" != "open" ]]; then
-      continue
-    fi
-    PARTIAL_OPEN_BEFORE_MERGE="${PARTIAL_OPEN_BEFORE_MERGE:+$PARTIAL_OPEN_BEFORE_MERGE }$issue_num"
-
-    if ! grep -qx "$issue_num" <<<"$close_refs"; then
-      continue
-    fi
-    PARTIAL_CONFLICT_ISSUES="${PARTIAL_CONFLICT_ISSUES:+$PARTIAL_CONFLICT_ISSUES }$issue_num"
-
-    local body_offending commit_offending partial_offending dr=""
-    # Match _check_no_open_stacked_children's dry-run contract: report the
-    # would-be outcome without claiming a merge is happening.
-    [[ "${DRY_RUN:-false}" == "true" ]] && dr="[dry-run] "
-    body_offending="$(_closing_ref_snippets "$pr_body" "$issue_num")"
-    commit_offending="$(_closing_ref_snippets "$commit_messages" "$issue_num")"
-    # The declaration text itself (AC #4, #5234) — quoted alongside the closing
-    # keyword below so an operator can see both sides and judge for themselves
-    # whether the declaration was a real trailer or, e.g., prose that happened
-    # to survive the structural anchor.
-    partial_offending="$(_partial_increment_ref_snippets "$pr_body" "$issue_num")"
-
-    # Name the source, because the operator remedy differs per source: edit the
-    # PR body, reword/amend a commit, or unlink a Development-sidebar reference.
-    if [[ -n "$body_offending" ]]; then
-      warning "${dr}Partial-increment conflict (#4569): PR #$PR_NUMBER declares a NON-closing \`Part of\`/\`Contributes to\` reference to #$issue_num (\"$partial_offending\"), but its body ALSO carries a closing reference to #$issue_num (\"$body_offending\") — GitHub honors a closing keyword ANYWHERE in the body, so merging this PR WILL close #$issue_num against the declared intent."
-      warning "  ${dr}merge-pr.sh would reopen #$issue_num immediately after the merge. To avoid the close/reopen flicker entirely, edit the PR body so no closing keyword is immediately followed by \`#$issue_num\` (e.g. write \`close the issue\` or \`close issue #$issue_num\` instead of \`close #$issue_num\`), then re-run this merge."
-    elif [[ -n "$commit_offending" ]]; then
-      warning "${dr}Partial-increment conflict (#4595): PR #$PR_NUMBER declares a NON-closing \`Part of\`/\`Contributes to\` reference to #$issue_num (\"$partial_offending\"), but a closing keyword in a commit message of this PR references #$issue_num (\"$commit_offending\") — this merge squashes without overriding the commit message, so GitHub composes the squash message from these commits and merging WILL close #$issue_num against the declared intent."
-      warning "  ${dr}merge-pr.sh would reopen #$issue_num immediately after the merge. To avoid the close/reopen flicker entirely, reword the offending commit message (\`git commit --amend\` / \`git rebase -i\` + force-push) so no closing keyword is immediately followed by \`#$issue_num\`, then re-run this merge."
-    else
-      warning "${dr}Partial-increment conflict (#4569): PR #$PR_NUMBER declares a NON-closing \`Part of\`/\`Contributes to\` reference to #$issue_num (\"$partial_offending\"), but GitHub reports #$issue_num as a closing target of this PR (no closing keyword found in the body or commit messages — most likely a Development-sidebar link), so merging this PR WILL close #$issue_num against the declared intent."
-      warning "  ${dr}merge-pr.sh would reopen #$issue_num immediately after the merge. To avoid the close/reopen flicker entirely, unlink #$issue_num from this PR's Development sidebar, then re-run this merge."
-    fi
-  done <<< "$partial_refs"
-
+  # Which declared issues are open now, and which a closing reference will
+  # close anyway (#4569), from three unioned signals: the body's own closing
+  # keywords (quota-free regex); this PR's COMMIT MESSAGES (#4595) — quota-free
+  # REST, and the source of the squash message this script does not override;
+  # and GitHub's closingIssuesReferences (best-effort — empty under GraphQL
+  # exhaustion, but it alone surfaces a Development-sidebar link). The commit
+  # fetch happens only past the partial_refs early-return above, so the common
+  # path costs zero extra API calls.
+  #
+  # The decision — the union, each issue's PR/open read, the membership test
+  # and the source-attributed warning — is `loom-daemon merge-pr
+  # partial-conflict` (Rust, loom-daemon/src/merge_pr/partial_conflict.rs —
+  # #8191 slice). Only the forge reads stay here: fresh (uncached) plain
+  # `gh api`, not $GH, per issue, mirroring _reset_one_partial_issue. They go
+  # over stdin NUL-framed (a bash string cannot hold NUL, so the framing is
+  # lossless and has no argv size limit). The plan's OPEN/CONFLICT<TAB>n lines
+  # fill the two sets the post-merge pass reads; WARNING<TAB>text is replayed.
+  # Fail CLOSED without the DONE terminator: an unread plan is not an empty
+  # one, and read as empty it would leave a partial increment this merge
+  # closes with nothing recorded to revert it.
+  local frame=() issue_num plan rc=0 kind val dr=()
+  frame=("$pr_body" "$(_pr_commit_messages)" "$(forge_pr_close_targets "$PR_NUMBER" "$GH" 2>/dev/null || true)")
+  while IFS= read -r issue_num; do [[ -n "$issue_num" ]] || continue; frame+=("$issue_num" "$(gh api "repos/$REPO_NWO/issues/$issue_num" 2>/dev/null || echo '{}')"); done <<< "$partial_refs"
+  [[ "${DRY_RUN:-false}" != "true" ]] || dr=(--dry-run)
+  plan="$(printf '%s\0' "${frame[@]}" | "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr partial-conflict --pr "$PR_NUMBER" ${dr[@]+"${dr[@]}"} 2>/dev/null)" || rc=$?
+  if [[ $rc -ne 0 || "$plan" != *"LOOM-PARTIAL-CONFLICT-DONE" ]]; then
+    plan="Merge blocked: PR #$PR_NUMBER's partial-increment close-conflict guard (#4569) could not run — '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr partial-conflict' exited $rc without the LOOM-PARTIAL-CONFLICT-DONE terminator (a loom-daemon predating #8191's slice has no such verb). Refusing rather than reading silence as 'no conflict': this plan records which declared partial increments a stray closing reference will close, which is what the post-merge pass reverts. $(! declare -F _mp_daemon_roll_hint >/dev/null || _mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_BIN:-loom-daemon}" 2>/dev/null || true)")"
+    [[ "${DRY_RUN:-false}" == "true" ]] || error "$plan"; warning "[dry-run] Would BLOCK merge of PR #$PR_NUMBER: $plan"; return 0
+  fi
+  while IFS=$'\t' read -r kind val; do
+    case "$kind" in
+      OPEN) PARTIAL_OPEN_BEFORE_MERGE="${PARTIAL_OPEN_BEFORE_MERGE:+$PARTIAL_OPEN_BEFORE_MERGE }$val" ;;
+      CONFLICT) PARTIAL_CONFLICT_ISSUES="${PARTIAL_CONFLICT_ISSUES:+$PARTIAL_CONFLICT_ISSUES }$val" ;;
+      WARNING) warning "$val" ;;
+    esac
+  done <<< "$plan"
   return 0
 }
 
@@ -1606,18 +1587,28 @@ _strip_one_closed_issue_building_label() {
 _strip_closed_issue_building_labels() {
   [[ "$FORGE_TYPE" == "github" ]] || return 0
 
-  local close_targets
+  local close_targets issue_num
   close_targets="$(forge_pr_close_targets "$PR_NUMBER" "$GH" 2>/dev/null || true)"
   [[ -n "$close_targets" ]] || return 0
 
-  local issue_num
+  # Loop status is 0: each body command (continue / the helper) returns 0.
   while IFS= read -r issue_num; do
     [[ -n "$issue_num" ]] || continue
     _strip_one_closed_issue_building_label "$issue_num"
   done <<< "$close_targets"
-
-  return 0
 }
+
+# ---------------------------------------------------------------------------
+# Close-triggered `loom:blocked` re-check (#9102; item 2 of #8927's deferred
+# fix list). `loom-daemon check-stale-blocked` (#8927) finds a stale block at
+# the next sweep pre-wave; this finds it the moment the blocker closes: every
+# open `loom:blocked` issue/PR citing this merged PR, or an issue it closed, as
+# a blocker gets a comment now (never a label edit). Resolving the closed set,
+# the decision and the comment all live in `loom-daemon notify-cleared-blockers`
+# (reusing the advisory's enumeration and the `dep_recheck` parsers — no second
+# parser, .loom/docs/shell-language-policy.md); it always exits 0. Best-effort
+# and GitHub-only, like every step in this section.
+_notify_cleared_blockers() { [[ "$FORGE_TYPE" == "github" ]] || return 0; "${LOOM_DAEMON_BIN:-loom-daemon}" notify-cleared-blockers --pr "$PR_NUMBER" --repo "$REPO_NWO" --repo-root "${REPO_ROOT:-.}" --quiet || warning "Close-triggered loom:blocked re-check (#9102) did not run; the next sweep's check-stale-blocked pass still covers it."; }
 
 # ---------------------------------------------------------------------------
 # Automated stacked-PR reconciliation on parent merge (#3747, stacked-PR v2,
@@ -1867,8 +1858,17 @@ _recheck_mergeable_before_refusal() {
   # git merge-tree check before conceding this is a genuine conflict.
   [[ -n "$resolved_attempt" ]] && _MPR_FLAGS+=(--resolved-attempt "$resolved_attempt")
   if [[ -z "$resolved_attempt" ]]; then
+    # #9106: both refs are forge-controlled ($base_ref from `.base.ref`,
+    # $head_ref from `.head.ref`) and the fetch below puts them in a git argv.
+    # A name git would parse as a switch is refused HERE, before the fetch —
+    # refuse-stale is the fail-closed verdict (it denies the merge without
+    # claiming a content conflict). An EMPTY ref keeps its pre-existing
+    # --refs-missing classification, which this must not swallow. The `--`
+    # after `origin` is defence in depth, not the gate.
     if [[ -z "$base_ref" || -z "$head_ref" ]]; then _MPR_FLAGS+=(--refs-missing)
-    elif git -C "$repo_root" fetch -q origin "$base_ref" "$head_ref" 2>/dev/null; then
+    elif ! check_branch_name "$base_ref" "base ref of PR #$pr_number" || ! check_branch_name "$head_ref" "head ref of PR #$pr_number"; then
+      echo "refuse-stale:PR #$pr_number carries a ref name that is not a safe git operand (base='$base_ref' head='$head_ref') — refused before 'git fetch' could parse it as a switch (#9106). Rename the branch on the PR and re-run."; return 0
+    elif git -C "$repo_root" fetch -q origin -- "$base_ref" "$head_ref" 2>/dev/null; then
       if git -C "$repo_root" merge-tree --write-tree "origin/$base_ref" "origin/$head_ref" >/dev/null 2>&1; then _MPR_FLAGS+=(--tree clean); else _MPR_FLAGS+=(--tree conflict); fi
     else _MPR_FLAGS+=(--fetch-failed); fi
   fi
@@ -2057,21 +2057,30 @@ _wait_for_checks_then_sync_merge() {
       if [[ "$lookup_rc" -ne 0 ]]; then
         error "Failed to resolve required status checks for $base_ref (rc=$lookup_rc); refusing to merge PR #$PR_NUMBER with failing check(s) that cannot be classified as required or informational (fails closed)"
       fi
-      local overlap
-      overlap="$(comm -12 \
-        <(printf '%s\n' "$failing" | sort -u) \
-        <(printf '%s\n' "$required" | sort -u))"
-      if [[ -n "$overlap" ]]; then
-        error "Cannot merge PR #$PR_NUMBER: a required status check has failed ($(printf '%s' "$overlap" | tr '\n' ' ')). Fix the check and re-run the merge."
-      fi
-      if [[ -z "$pending" ]]; then
-        # Only informational (non-required) checks failing and nothing pending →
-        # a synchronous merge is safe (matches the UNSTABLE #3486 fallback).
-        info "PR #$PR_NUMBER: only informational (non-required) check(s) failing; proceeding to synchronous merge"
-        return 0
-      fi
-      # Informational failures but other checks still running — fall through to
-      # the pending wait below.
+      # The overlap/proceed-or-continue decision itself is `loom-daemon
+      # merge-pr checks-failure` (Rust, loom-daemon/src/merge_pr/
+      # checks_failure.rs — #8191 slice): given the failing/required/pending
+      # check-name sets already fetched above (the forge reads stay here —
+      # $required's lookup covers Gitea too, unlike stale-checks' GitHub-only
+      # one), whether a required check is among the failing ones (refuse), only
+      # informational ones are and nothing is pending (proceed), or
+      # informational failures coexist with a still-pending check (fall
+      # through to the pending wait below, unchanged). A guard fault (missing
+      # binary, older install, malformed output) refuses the merge, same as
+      # every other guard in this file: a caller cannot tell "only
+      # informational checks failing" from "never classified".
+      local _cf_out _cf_rc=0
+      _cf_out="$(printf '%s\0%s\0%s\0' "$failing" "$required" "$pending" | "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr checks-failure --pr "$PR_NUMBER" 2>/dev/null)" || _cf_rc=$?
+      # Only informational (non-required) checks failing and nothing pending →
+      # a synchronous merge is safe (matches the UNSTABLE #3486 fallback).
+      # Informational failures with other checks still running (PENDING) fall
+      # through to the pending wait below, exactly as before.
+      case "$_cf_rc:$_cf_out" in
+        1:LOOM-CHECK-FAILURE-REQUIRED$'\t'*) error "Cannot merge PR #$PR_NUMBER: a required status check has failed (${_cf_out#*$'\t'}). Fix the check and re-run the merge." ;;
+        0:LOOM-CHECK-FAILURE-PROCEED) info "PR #$PR_NUMBER: only informational (non-required) check(s) failing; proceeding to synchronous merge"; return 0 ;;
+        0:LOOM-CHECK-FAILURE-PENDING) ;;
+        *) error "Merge blocked: PR #$PR_NUMBER's failing-check classification (#8191 slice) could not run — '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr checks-failure' exited $_cf_rc without a recognized LOOM-CHECK-FAILURE-* sentinel. A guard that cannot run refuses the merge rather than passing it. $(_mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_BIN:-loom-daemon}" 2>/dev/null || true)")" ;;
+      esac
     fi
 
     if [[ -n "$pending" ]]; then
@@ -2448,6 +2457,11 @@ _reset_partial_increment_labels || true
 # header comment above) and at the same confirmed-merge choke point.
 # Best-effort — never fails the merge.
 _strip_closed_issue_building_labels || true
+
+# Close-triggered loom:blocked re-check (#9102). Runs right after the
+# loom:building cleanup above, at the same confirmed-merge choke point.
+# Best-effort — never fails the merge. See the function's own header above.
+_notify_cleared_blockers || true
 
 # Automated stacked-PR reconciliation (#3747, stacked-PR v2 item 1). Runs at the
 # same confirmed-merge choke point, and BEFORE branch deletion below so the
@@ -2930,19 +2944,30 @@ _remove_loom_worktree() {
 # recoverable later (loom-clean, or a future merge that actually closes the
 # issue).
 #
+# The decision — close-target membership, then (only if needed) the live
+# state comparison — is `loom-daemon merge-pr issue-close-gate` (Rust,
+# loom-daemon/src/merge_pr/issue_close_gate.rs — #8191 slice), fed
+# $close_targets on stdin. The fast-path call (no --state) answers from
+# membership alone for the overwhelming common case (`Closes #N`); only when
+# it answers NEED-STATE (exit 3) does this wrapper pay for the extra
+# forge_get_issue_state round trip and call again with --state. Both forge
+# reads stay here.
+#
+# A daemon that cannot decide (missing, older than this slice, or answering
+# off-protocol) is warned about and resolves to PRESERVE — the same fail
+# direction the original in-shell comparison already had for any lookup
+# failure, now also covering "the decision could not be delegated at all".
+#
 # Returns 0 (true — safe to clean up) or 1 (false — preserve the worktree).
 _issue_is_closed_for_cleanup() {
-  local issue_number="$1"
-
-  local close_targets
+  local issue_number="$1" close_targets out rc=0 state
   close_targets="$(forge_pr_close_targets "$PR_NUMBER" "$GH" 2>/dev/null || true)"
-  if echo "$close_targets" | grep -qx "$issue_number"; then
-    return 0
-  fi
-
-  local state
-  state="$(forge_get_issue_state "$REPO_NWO" "$issue_number" "$GH" 2>/dev/null || true)"
-  [[ "$state" == "CLOSED" ]]
+  out="$(printf '%s\n' "$close_targets" | "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr issue-close-gate --issue "$issue_number" 2>/dev/null)" || rc=$?
+  [[ $rc -eq 3 && "$out" == "LOOM-ISSUE-CLEANUP NEED-STATE" ]] && { state="$(forge_get_issue_state "$REPO_NWO" "$issue_number" "$GH" 2>/dev/null || true)"; rc=0; out="$(printf '%s\n' "$close_targets" | "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr issue-close-gate --issue "$issue_number" --state "$state" 2>/dev/null)" || rc=$?; }
+  [[ $rc -eq 0 ]] && return 0
+  [[ $rc -eq 1 ]] && return 1
+  warning "The async-close-race cleanup gate for issue #$issue_number (#4186) did not run — '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr issue-close-gate' exited $rc rather than 0/1 (a loom-daemon predating #8191's slice has no such verb). Preserving the worktree rather than guessing (fail-unsafe-to-preserve) — if #$issue_number is actually closed, a future check will clean it up, or remove it by hand once confirmed. $(! declare -F _mp_daemon_roll_hint >/dev/null || _mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_BIN:-loom-daemon}" 2>/dev/null || true)")"
+  return 1
 }
 
 if [[ "$CLEANUP_WORKTREE" == "true" ]]; then

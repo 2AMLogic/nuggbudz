@@ -15,6 +15,7 @@
  * does not begin with `demo:`.
  */
 import { DEMO_USER_ID_PREFIX, isDemoUserId } from './demo'
+import { HONEYPOT_USER_ID_PREFIX, isHoneypotUserId } from './honeypot'
 
 /**
  * Canonical UUID — the shape of every account id this system mints, because
@@ -27,8 +28,17 @@ import { DEMO_USER_ID_PREFIX, isDemoUserId } from './demo'
  */
 const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
-/** Which path could have minted an id — or neither. */
-export type UserIdKind = 'account' | 'demo' | 'unauthentic'
+/**
+ * Which path could have minted an id — or none of them.
+ *
+ * `honeypot` is the third minting path and the only one the *server* invents for
+ * itself: no socket, no session, nobody on the other end. It is its own answer
+ * rather than folded into `demo` because the two are excluded for different
+ * reasons — a demo pair is a real handshake that is not revenue, and a honeypot
+ * is not a person — and because collapsing them would mean a honeypot inherited
+ * `demo`'s answers everywhere by accident rather than by decision.
+ */
+export type UserIdKind = 'account' | 'demo' | 'honeypot' | 'unauthentic'
 
 /** True when this id is shaped like the account id a real sign-in mints. */
 export function isAccountIdShaped(raw: unknown): raw is string {
@@ -53,5 +63,52 @@ export function classifyUserId(raw: unknown): UserIdKind {
   if (isDemoUserId(raw)) {
     return raw.length > DEMO_USER_ID_PREFIX.length ? 'demo' : 'unauthentic'
   }
+  // Held to the same loose standard as a demo id, for the same reason: this
+  // answer books nothing and can never be charged, so demanding more than the
+  // prefix and something after it would protect nothing.
+  if (isHoneypotUserId(raw)) {
+    return raw.length > HONEYPOT_USER_ID_PREFIX.length ? 'honeypot' : 'unauthentic'
+  }
   return isAccountIdShaped(raw) ? 'account' : 'unauthentic'
+}
+
+/**
+ * May this identity take a seat in the pool — the one place that is answered.
+ *
+ * Since #150 the socket is open to everyone: a signed-out visitor is welcomed,
+ * placed, and shown the market like any other socket, because the count of
+ * people waiting nearby is the product's whole argument and asking for an
+ * account before showing it asked people to sign up to find out whether signing
+ * up was worth it. What an account buys is the *seat*, and this is the gate.
+ *
+ * Two identity kinds and one permission:
+ *
+ * - An **account** (a real sign-in) may always take a seat.
+ * - An **anonymous** browser — the `demo:` identity off the per-browser cookie,
+ *   or a throwaway minted at upgrade — may take one only when
+ *   `ALLOW_DEMO_PAIRING` says so. That is the *only* question the flag answers
+ *   now. It used to be answered at the socket as well, where it meant something
+ *   else ("you may connect"), and the two readings came apart the moment the
+ *   socket opened to everyone.
+ * - Anything else names nobody and is refused, the fail-closed direction.
+ *
+ * Everything downstream follows from *who took the seat*, never from a second
+ * reading of the flag: `paymentDisposition` answers `demo` off the two user ids
+ * before Stripe is consulted, so a pair with an anonymous buyer in it is never
+ * charged — which is exactly why this gate has to be on the server, in the
+ * `join` path, and nowhere a client could skip it. An anonymous seat on a
+ * charged deployment would be a free pair, not a UX wrinkle.
+ */
+export function seatVerdict(
+  userId: unknown,
+  anonymousSeatsAllowed: boolean,
+): 'seat' | 'sign_in_required' {
+  switch (classifyUserId(userId)) {
+    case 'account':
+      return 'seat'
+    case 'demo':
+      return anonymousSeatsAllowed ? 'seat' : 'sign_in_required'
+    default:
+      return 'sign_in_required'
+  }
 }

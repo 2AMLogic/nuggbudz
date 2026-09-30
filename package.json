@@ -7,8 +7,8 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
-    "deploy": "vite build && wrangler deploy && node scripts/post-deploy-mode.mjs",
-    "deploy:demo": "vite build && wrangler deploy --var ALLOW_DEMO_PAIRING:1 && node scripts/post-deploy-mode.mjs",
+    "deploy": "vite build && node scripts/stamp-build-info.mjs && wrangler deploy && node scripts/post-deploy-mode.mjs",
+    "deploy:demo": "vite build && node scripts/stamp-build-info.mjs && wrangler deploy --var ALLOW_DEMO_PAIRING:1 && node scripts/post-deploy-mode.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome check --write .",
@@ -17,6 +17,7 @@
     "cf-typegen": "wrangler types",
     "smoke": "node scripts/smoke.mjs",
     "demo-check": "node scripts/demo-pairing-check.mjs",
+    "honeypot-check": "node scripts/honeypot-check.mjs",
     "payment-gate": "node scripts/payment-gate-check.mjs",
     "fake-stripe": "node scripts/fake-stripe.mjs",
     "test:e2e": "playwright test"

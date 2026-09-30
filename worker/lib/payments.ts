@@ -13,6 +13,7 @@
 
 import { isDemoUserId } from '../../shared/demo'
 import type { BuyerRole, Settlement } from '../../shared/economics'
+import { isHoneypotUserId } from '../../shared/honeypot'
 
 /** Stripe wants a currency; the whole catalogue is US retail. */
 export const PAYMENT_CURRENCY = 'usd'
@@ -21,6 +22,10 @@ export const PAYMENT_CURRENCY = 'usd'
  * What this pool is allowed to do about money for one particular match.
  *
  * - `charge` — open two PaymentIntents and hold the pickup code until both clear.
+ * - `honeypot` — one side is a decoy (`shared/honeypot.ts`). No money, ever, and
+ *   **no pickup code ever either** — see `codeAtMatchTime` below. A honeypot
+ *   reaching `charge` on a live deployment would take a real buyer's money for a
+ *   handoff that cannot happen.
  * - `demo` — a demo pairing. No money, ever: these pairs are already excluded
  *   from the D1 ledger (`worker/ledger.ts`), and charging a real card for a
  *   throwaway `demo:` identity would be worse than booking one.
@@ -28,9 +33,19 @@ export const PAYMENT_CURRENCY = 'usd'
  * - `refuse` — payments are not configured and nobody said that was intentional.
  *   Fail closed: no match, no code, no charge.
  */
-export type PaymentDisposition = 'charge' | 'demo' | 'uncharged' | 'refuse'
+export type PaymentDisposition = 'charge' | 'honeypot' | 'demo' | 'uncharged' | 'refuse'
 
-/** Whether a disposition means a pickup code may be released at match time. */
+/**
+ * Whether a disposition means a pickup code may be released at match time.
+ *
+ * `honeypot` is false, and that single `false` is the structural safety argument
+ * for the whole feature rather than a detail of it. No code released means
+ * `pickupUnlocked` is false forever (a honeypot match has no ledger to unlock
+ * it either), so `handleConfirmPickup` refuses; no confirmation is ever recorded,
+ * so `bothConfirmed` can never fire — no `matches` row — and every route into
+ * `disputeMatch` requires one side to have confirmed, so no `disputes` row
+ * either. None of that depends on a timer firing in the right order.
+ */
 export function codeAtMatchTime(disposition: PaymentDisposition): boolean {
   return disposition === 'demo' || disposition === 'uncharged'
 }
@@ -41,22 +56,31 @@ export function codeAtMatchTime(disposition: PaymentDisposition): boolean {
  *
  * The order of these branches is the security property:
  *
- * 1. **Demo first**, so a demo pair is excluded on a *fully configured*
+ * 1. **Honeypot first**, ahead of everything including demo. A decoy is not a
+ *    person, so there is no card to charge and nobody to hand a box to — a
+ *    honeypot that reached `charge` on a configured deployment would collect a
+ *    real buyer's money for a handoff that cannot happen. Decided from identity
+ *    rather than from a flag, and before the secrets are read, so it is true on a
+ *    fully configured production deploy and not merely on a laptop.
+ * 2. **Demo next**, so a demo pair is excluded on a *fully configured*
  *    production deploy too, not merely on a laptop with no secrets. This is the
  *    one ordering that makes "demo pairs never reach Stripe" true rather than
  *    accidentally true.
- * 2. **Charge whenever Stripe is configured**, so the escape hatch below cannot
+ * 3. **Charge whenever Stripe is configured**, so the escape hatch below cannot
  *    silently disable a working payment path.
- * 3. **Uncharged only when the secrets are absent *and* an operator opted in** —
+ * 4. **Uncharged only when the secrets are absent *and* an operator opted in** —
  *    a conjunction, so an empty production secret is never indistinguishable
  *    from intentional test mode.
- * 4. **Refuse otherwise.** An unset secret must cost a match, not a box.
+ * 5. **Refuse otherwise.** An unset secret must cost a match, not a box.
  */
 export function paymentDisposition(input: {
   stripeConfigured: boolean
   unchargedAllowed: boolean
   userIds: Record<BuyerRole, string>
 }): PaymentDisposition {
+  if (isHoneypotUserId(input.userIds.orderer) || isHoneypotUserId(input.userIds.receiver)) {
+    return 'honeypot'
+  }
   if (isDemoUserId(input.userIds.orderer) || isDemoUserId(input.userIds.receiver)) return 'demo'
   switch (serverPaymentMode(input)) {
     case 'live':

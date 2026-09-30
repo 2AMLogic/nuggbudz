@@ -141,6 +141,12 @@ const BUYERS = {
   chatDisputeTwo: { sid: sessionId('smoke-chat-d2'), userId: accountId(28), name: 'Dis Two' },
   chatLeaveOne: { sid: sessionId('smoke-chat-l1'), userId: accountId(29), name: 'Left One' },
   chatLeaveTwo: { sid: sessionId('smoke-chat-l2'), userId: accountId(30), name: 'Left Two' },
+  // The pair for issue #120: a sustained flood against a match that just left
+  // `pending`, raced against the orderer's own disconnect teardown.
+  chatFloodOne: { sid: sessionId('smoke-chat-f1'), userId: accountId(37), name: 'Flood One' },
+  chatFloodTwo: { sid: sessionId('smoke-chat-f2'), userId: accountId(38), name: 'Flood Two' },
+  // The signed-in buyer a signed-out browser watches take a seat (#150).
+  browseSeated: { sid: sessionId('smoke-browse-seat'), userId: accountId(39), name: 'Seated' },
   // The operator. Never opens a pool socket and owns no coordinate — this one
   // exists to hold a session that `OPERATOR_USER_IDS` can name, which is the
   // only way into the dispute-resolution routes. Put
@@ -338,7 +344,10 @@ seedSessions()
 applyMigrations()
 seedUsers()
 resetReputation()
-const cookie = (buyer) => ({ Cookie: `nb_session=${buyer.sid}` })
+// A buyer with no `sid` is a browser nobody signed in to: it sends no session.
+const cookie = (buyer) => (buyer.sid === undefined ? {} : { Cookie: `nb_session=${buyer.sid}` })
+/** Not in `BUYERS`, so no session is ever seeded for it. */
+const ANONYMOUS = { name: 'Browser' }
 
 // --- REST surface ---
 const health = await fetch(`${BASE}/api/health`).then((r) => r.json())
@@ -478,21 +487,85 @@ const forgedMe = await fetch(`${BASE}/api/auth/me`, {
 })
 check('a forged session id is not a session', forgedMe.status === 401, `status ${forgedMe.status}`)
 
-// An unauthenticated upgrade must be refused before any socket exists.
-const at = FIXTURE_COORDS.robb
-const anonUpgrade = await fetch(`${BASE}/api/pool/ws?lat=${at.lat}&lng=${at.lng}`)
-check('unauthenticated pool upgrade is 401', anonUpgrade.status === 401, `${anonUpgrade.status}`)
+// --- browsing without a seat (#150) ---
+// The socket used to refuse a signed-out caller with a 401 before anything
+// existed. It is open to everyone now, and the account is what a *seat* costs:
+// this is the strict path, so the whole block assumes demo pairing is off.
+check(
+  'this server seats accounts only — smoke covers the strict path',
+  health.demoPairing === false,
+  `demoPairing=${health.demoPairing}`,
+)
+const plainGet = await fetch(`${BASE}/api/pool/ws`)
+check(
+  'a signed-out request is no longer refused for want of a session',
+  plainGet.status === 426,
+  `status ${plainGet.status} — 426 is "that was not an upgrade", not a sign-in wall`,
+)
 
-const anonSocketOpened = await new Promise((resolve) => {
-  const ws = new WebSocket(`${WS}/api/pool/ws?lat=${at.lat}&lng=${at.lng}`)
-  ws.addEventListener('open', () => {
-    ws.close()
-    resolve(true)
-  })
-  ws.addEventListener('error', () => resolve(false))
-  setTimeout(() => resolve(false), 4000)
-})
-check('unauthenticated websocket never opens', anonSocketOpened === false)
+const browser = open(ANONYMOUS, FIXTURE_COORDS.browseAnon.lat, FIXTURE_COORDS.browseAnon.lng)
+await browser.opened
+const browserWelcome = await browser.expect('welcome')
+check(
+  'a signed-out socket is welcomed, under an anonymous identity',
+  typeof browserWelcome.user?.id === 'string' && browserWelcome.user.id.startsWith('demo:'),
+  JSON.stringify(browserWelcome.user),
+)
+check(
+  'and placed like any other socket',
+  browserWelcome.locationSource === 'client' && browserWelcome.radiusMeters > 0,
+  `${browserWelcome.locationSource} ${browserWelcome.radiusMeters}m`,
+)
+const firstMarket = await browser.expect('market')
+check(
+  'and shown the market straight away — nobody waiting yet',
+  firstMarket.waiting === 0,
+  JSON.stringify(firstMarket),
+)
+
+const seatedBuyer = open(
+  BUYERS.browseSeated,
+  FIXTURE_COORDS.browseSeated.lat,
+  FIXTURE_COORDS.browseSeated.lng,
+)
+await seatedBuyer.opened
+seatedBuyer.join()
+await seatedBuyer.expect('waiting')
+const counted = await until(() =>
+  browser.inbox.findLast((m) => m.type === 'market' && m.waiting === 1),
+)
+check(
+  'a signed-out socket sees the count move when a buyer nearby takes a seat',
+  counted !== null && counted.byDeal?.['mcd-nuggets-20'] === 1,
+  JSON.stringify(counted),
+)
+check(
+  'and is never sent the roster — no `waiting`, no dots, no names',
+  browser.inbox.every(
+    (m) =>
+      m.type !== 'waiting' &&
+      !JSON.stringify(m).includes('buddies') &&
+      !JSON.stringify(m).includes(BUYERS.browseSeated.name),
+  ),
+  JSON.stringify(browser.inbox.map((m) => m.type)),
+)
+
+browser.join()
+const seatRefused = await browser.expectError()
+check(
+  'a signed-out join is refused on the wire, naming the sign-in',
+  seatRefused.code === 'sign_in_required',
+  `${seatRefused.code}: ${seatRefused.message}`,
+)
+check(
+  'and takes no seat, so nobody is paired with it',
+  (await browser.settles('waiting')) === false &&
+    browser.inbox.every((m) => m.type !== 'matched') &&
+    seatedBuyer.inbox.every((m) => m.type !== 'matched'),
+  JSON.stringify([browser.inbox.map((m) => m.type), seatedBuyer.inbox.map((m) => m.type)]),
+)
+browser.ws.close()
+seatedBuyer.ws.close()
 
 // Sign-in start and callback answer honestly whether or not Google is configured
 // in this environment, and in particular never 500.
@@ -2020,7 +2093,78 @@ check(
   `${chatLeft2.chats().length} lines`,
 )
 
-for (const s of [chatA, chatB, chatC, chatD, chatE, chatDis2, chatLeft2]) s.ws.close()
+// --- issue #120: a sustained flood against a match that just left `pending`
+// earns `chat_rate_limited`, not `not_matched` ---
+// PR #119 (#79) moved the sliding-window rate limiter ahead of the
+// `ctx.storage.get('match:...')` read, because the limiter is a free
+// in-memory check and the storage read is a real round trip. The trade,
+// disclosed but left untested by that PR: in the narrow window between a
+// dispute's `persistTerminal` (a D1 write, not gated the way `ctx.storage` is)
+// marking the record disputed and this survivor's *own* connection state
+// being reset back to idle, a sustained flood trips the rate limiter before
+// it ever reaches the now-dead record. Own market (`elPaso`), so nothing else
+// can race into this pair's dispute.
+const chatFlood1 = open(
+  BUYERS.chatFloodOne,
+  FIXTURE_COORDS.chatFloodOne.lat,
+  FIXTURE_COORDS.chatFloodOne.lng,
+)
+const chatFlood2 = open(
+  BUYERS.chatFloodTwo,
+  FIXTURE_COORDS.chatFloodTwo.lat,
+  FIXTURE_COORDS.chatFloodTwo.lng,
+)
+await Promise.all([chatFlood1.opened, chatFlood2.opened])
+await Promise.all([chatFlood1.expect('welcome'), chatFlood2.expect('welcome')])
+chatFlood1.join()
+await chatFlood1.expect('waiting')
+chatFlood2.join()
+// chatFlood1 waited, so the fairness rule makes them the orderer
+// deterministically, same as the dispute pair above.
+const [floodOrdererMatch] = await Promise.all([
+  chatFlood1.expect('matched'),
+  chatFlood2.expect('matched'),
+])
+check(
+  'the flood pair is matched with the expected roles',
+  floodOrdererMatch.role === 'orderer',
+  floodOrdererMatch.role,
+)
+chatFlood2.confirm(floodOrdererMatch.pickupCode)
+await chatFlood2.expect('pickup_confirmed')
+// The orderer vanishes and the receiver floods immediately, *not* awaiting
+// `pickup_disputed` first — waiting for it would mean this connection's own
+// state has already dropped out of `matched` by the time the flood starts,
+// which would only exercise the ordinary "never matched at all" refusal
+// (already covered by `afterChatDispute` above). Sending unawaited is what
+// gives the flood a chance to land inside the race window this checks.
+chatFlood1.ws.close()
+const FLOOD_AFTER_TERMINAL = 40
+for (let i = 0; i < FLOOD_AFTER_TERMINAL; i++) chatFlood2.chat(`still there? ${i}`)
+const deadMatchLimited = await until(
+  () => chatFlood2.inbox.find((m) => m.type === 'error' && m.code === 'chat_rate_limited') ?? null,
+)
+check(
+  'a sustained flood against a match that just finished earns a rate limit, not "not matched" (#120)',
+  deadMatchLimited !== null,
+  deadMatchLimited === null
+    ? `no chat_rate_limited after ${FLOOD_AFTER_TERMINAL} messages`
+    : deadMatchLimited.message,
+)
+check(
+  'and none of the flood was relayed — the buddy who would have heard it is gone',
+  chatFlood2.chats().length === 0,
+  `${chatFlood2.chats().length} lines`,
+)
+// The dispute itself still lands once the race resolves, same as the
+// ordinary dispute pair above — the flood only changes which refusal code the
+// survivor sees along the way, never whether the dispute is raised at all. A
+// longer timeout than the other `expect` calls: forty queued chat events ahead
+// of it in this cell's Durable Object give the D1 write behind the dispute
+// more to get through before its continuation runs.
+await chatFlood2.expect('pickup_disputed', 15_000)
+
+for (const s of [chatA, chatB, chatC, chatD, chatE, chatDis2, chatLeft2, chatFlood2]) s.ws.close()
 
 for (const s of [b, far, c, g, h, j, k, l, kim, kimTab, lee, nell]) s.ws.close()
 

@@ -148,17 +148,25 @@ pairing, put `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars`; without it (and
 without Stripe secrets) a join is refused with `payment_unavailable` rather than
 quietly pairing for free.
 
-Add `POOL_UPGRADE_LIMIT="300"` there too before running `pnpm test:e2e`. The
-socket limiter keys on `CF-Connecting-IP`, which `pnpm dev` never sets, so every
-local client shares the `unknown` bucket and a suite that opens several dozen
-sockets a minute trips a limit sized for a venue NAT. It surfaces as "Lost the
-connection. Try again." rather than as a refusal you can read.
+`HONEYPOT_BUYERS="1"` in `.dev.vars` seats decoy buyers so a lone browser sees a
+market rather than an empty circle — see
+[Honeypot buyers](#honeypot-buyers) for what they can and, more importantly,
+cannot do. It is off by default everywhere, including in every test lane, so a
+suite that expects an empty market stays correct.
+
+Add `POOL_UPGRADE_LIMIT="300"` there too before running `pnpm test:e2e`, and
+`POOL_ANON_UPGRADE_LIMIT="300"` beside it. The socket limiter keys on
+`CF-Connecting-IP`, which `pnpm dev` never sets, so every local client shares the
+`unknown` bucket and a suite that opens several dozen sockets a minute trips a
+limit sized for a venue NAT. It surfaces as "Lost the connection. Try again."
+rather than as a refusal you can read.
 
 ```bash
 pnpm test             # pure logic: settlement, geo, matchmaking, auth, protocol
 pnpm dev --port 5199  # in one shell…
 pnpm smoke            # …then end-to-end pairing in another
 pnpm payment-gate     # …and the money gate, in whichever mode that server is in
+pnpm honeypot-check   # …and decoy buyers, in whichever mode that server is in
 pnpm typecheck
 pnpm lint
 ```
@@ -181,6 +189,30 @@ wrangler d1 migrations apply nuggbudz --remote
 ```
 
 ### Payments, and what happens without them
+
+**Turning payments on is three steps, not two:** `wrangler secret put
+STRIPE_SECRET_KEY`, `wrangler secret put STRIPE_WEBHOOK_SECRET`, **and a rebuild**
+with `VITE_STRIPE_PUBLISHABLE_KEY` set, because that key is compiled into the
+bundle and a secret cannot reach it. Secrets alone leave a deployment that
+refuses to pair anyone who is not a demo buyer, and whose card form cannot mount
+("This build has no Stripe publishable key"). The two `secret put` calls are
+human steps; an agent cannot perform them.
+
+`pnpm run deploy` stamps `dist/client/build-info.json` after the build (the key's
+mode, `live`/`test`/`none`, found by scanning the emitted bundle, never the key
+itself), and `scripts/post-deploy-mode.mjs` compares it to `/api/health`'s
+`payments`. A deployment that is `payments: live` while the bundle carries no
+publishable key exits non-zero.
+
+**Open product decision (not resolved here): demo vs. charged pairing.** A strict
+deploy is sign-in only, and demo pairs are never charged, so today going live with
+charged pairing means unauthenticated pairing stops working the same day and the
+demo everyone has been shown stops with it. Keeping production on `deploy:demo`
+keeps the demo but means demo buyers are never charged. Which to run is the
+operator's call. #150 (gate sign-in at `join` rather than at the socket) would
+loosen this, since a signed-out visitor could still see the market on a charged
+deployment; as of this writing #150 is **open**, so the current regime is the one
+above.
 
 Three keys, two of them secret:
 
@@ -354,31 +386,87 @@ drops out of the queue; retrying a released one is refused (`409`).
 are different questions. A dispute is a decision somebody owes an answer to; a
 hold is a failure somebody owes a retry to.
 
+### Browsing before signing in
+
+Taking a seat requires a signed-in account; **looking does not** (#150). The
+pool socket is open to everybody: a signed-out visitor is welcomed under an
+anonymous identity (the per-browser `nb_demo` cookie `/api/health` hands out),
+placed like any other socket, and sent `market` frames — how many are waiting
+within their radius, overall and per deal. That count is the product's whole
+argument, and asking for a Google account before showing it asked people to sign
+up to find out whether signing up was worth it.
+
+The account is asked for at the one moment it is needed: when the visitor taps
+"Find a bud". Whether an identity may take a seat is answered in exactly one
+place, `seatVerdict` in `shared/identity.ts`, called from the Durable Object's
+`join` path — never at the upgrade and never only in the client. An anonymous
+`join` on a server that seats accounts only is refused on the wire with
+`sign_in_required`, and the client turns that refusal into a sign-in
+interstitial. The seat being taken — deal and sauces, not the precise
+coordinates — is kept in `sessionStorage` across the Google round trip, and the
+buyer is seated on return without choosing again.
+
+Why the gate is the seat and not the socket, or anything later: money clears
+before the handshake starts, so a buyer met by a sign-in wall *after* pairing
+would abandon a match with their buddy's charge already in flight — and an
+anonymous tail has no account for `standingBand` to hold a no-show against.
+Why it has to be on the server: an anonymous identity is `demo:`, and
+`paymentDisposition` answers `demo` for any pair containing one before Stripe is
+consulted. An anonymous seat on a charged deployment would be a free pair.
+
+What a socket without a seat is **not** sent: the `buddies` roster. The snapped,
+nameless dots of who is waiting go only to a socket that took a seat, on
+`waiting`; an idle socket, signed in or not, gets counts. Otherwise the positions
+of the people waiting near you would be free to scrape by anybody who connects,
+and signing in would stop being what earns the sight of them.
+
+**The flood backstop, answered rather than inherited.** Until #150 the 401 at
+the upgrade was doing double duty: an unauthenticated flood never reached the
+rate limiter, because the session check refused it first. With the socket open,
+the limiter has to stand on its own, so anonymous upgrades are:
+
+- counted in a **separate, tighter** KV window (`POOL_ANON_UPGRADE_LIMIT`, 20 a
+  minute per address against the signed-in 30) — separate so a crowd browsing
+  signed-out on one venue NAT can never spend the budget of the signed-in buyers
+  standing next to them, and keyed on the address rather than the identity, so
+  minting a fresh anonymous id buys nothing; and
+- **capped concurrently** per address per shard (`POOL_ANON_SOCKETS_PER_IP`,
+  20), counted by hibernation tag inside the Durable Object. A window only
+  bounds how fast sockets arrive; this bounds how many one address can hold open,
+  which is what every queue change fans a `market` count out to.
+
 ### Demo pairing
 
-Pairing requires a signed-in account. That is right for production and fatal on
-a stage: without the two secrets above, sign-in answers 503 and the pool socket
-answers 401, so **nobody can pair at all**. There are two deploy scripts, and
-they leave production in two different modes — pick the one you mean:
+`ALLOW_DEMO_PAIRING` answers exactly one question: **may an anonymous identity
+take a seat?** Off, and a signed-out visitor browses and is asked to sign in when
+they tap. On, and they pair under a name they type, as below. Everything else —
+that a demo pair is never charged and never booked — follows from *who took the
+seat*, read off the two user ids, not from a second reading of the flag.
+
+Seating only accounts is right for production and fatal on a stage: without the
+two secrets above, sign-in answers 503, so **nobody can take a seat at all**.
+There are two deploy scripts, and they leave production in two different modes
+— pick the one you mean:
 
 ```bash
 pnpm run deploy         # strict: sign-in required, matches production
 pnpm run deploy:demo    # stage: vite build && wrangler deploy --var ALLOW_DEMO_PAIRING:1
 ```
 
-`pnpm run deploy` (plain) leaves the site **sign-in-only** — the same 401 for
-every unauthenticated pool socket described above. It is not a "safe default
+`pnpm run deploy` (plain) leaves the site **sign-in-only** — every signed-out
+visitor can browse, and every one of them is asked to sign in for a seat. It is
+not a "safe default
 that also happens to allow demo pairing"; use `deploy:demo` when a stage needs
 the escape hatch. Both scripts run the same `vite build && wrangler deploy`
 underneath and then print the mode the deployment actually ended up in, read
 back from the deployed Worker's own `/api/health` — never from which script you
 ran — so a config drift or a stale cached build cannot pass silently.
 
-With demo pairing on, an unauthenticated caller is given a throwaway `demo:`
-identity and pairs under a name they type; the UI says on screen that it is
-pairing without accounts. The caller may propose a *display name* but never a
-user id — the id is minted server-side, on a cookie `/api/health` sets, and is
-therefore **sticky per browser**.
+With demo pairing on, an unauthenticated caller's `demo:` identity may take a
+seat, and pairs under a name they type; the UI says on screen that it is pairing
+without accounts. The caller may propose a *display name* but never a user id —
+the id is minted server-side, on a cookie `/api/health` sets, and is therefore
+**sticky per browser**.
 
 **That stickiness costs the single-device demo, deliberately.** It has to exist:
 a phone's camera app opens the handoff link in a new tab, a new tab is a new
@@ -397,8 +485,9 @@ BASE=http://localhost:5199 node scripts/demo-pairing-check.mjs
 ```
 
 It reads `/api/health` and asserts the matching half: flag off ⇒ an
-unauthenticated upgrade is refused 401; flag on ⇒ two unauthenticated clients
-pair with each other, with `demo:` identities and the same $4.49 split.
+unauthenticated socket is welcomed but its `join` is refused with
+`sign_in_required`; flag on ⇒ two unauthenticated clients pair with each other,
+with `demo:` identities and the same $4.49 split.
 
 **`wrangler dev --var ALLOW_DEMO_PAIRING=on` is a different lever from the one
 above, and it does not reliably work — don't reach for it.** On the currently
@@ -424,6 +513,126 @@ pool socket now requires one and an OAuth round trip cannot be driven
 unattended. It therefore runs against `pnpm dev`, not against a deployment; the
 REST surface of a deployment can still be checked with
 `curl https://nuggbudz.personal-account-251.workers.dev/api/health`.
+
+### Honeypot buyers
+
+A market with one buyer in it is indistinguishable from a broken app. The first
+person to open NuggBudz in a new city sees a circle, their own dot and nothing —
+and the thing they are being asked to believe is precisely that somebody else is
+nearby. Separately, nothing in the pool could tell a buyer from something
+enumerating the roster or messaging every buddy it was shown.
+
+A **honeypot** is a decoy buyer that answers both. It appears in `waiting` counts
+and as a dot, indistinguishable on the map from a real waiting buyer — that is
+the point — it can be matched, and it can hold a short conversation. It can
+**never** complete a pair.
+
+```bash
+HONEYPOT_BUYERS="1"     # in .dev.vars, or `wrangler deploy --var HONEYPOT_BUYERS:1`
+```
+
+**That one var answers exactly one question — "do decoys run on this
+deployment?" — and it is off unless somebody set it.** It is deliberately
+independent of `ALLOW_DEMO_PAIRING`, of `ALLOW_UNCHARGED_PAIRING` and of whether
+Stripe is configured. Running decoys on a charged production deployment is
+therefore an explicit decision rather than a side effect of which environment
+variable happens to be set — and what makes that decision *safe* is the money
+gate, never the flag.
+
+#### It cannot take money, and it cannot settle
+
+`paymentDisposition` answers `honeypot` from the two user ids **before the Stripe
+secrets are consulted**, exactly as it answers `demo` — so a decoy on a fully
+configured deployment cannot reach the processor. From there the rest follows
+structurally rather than by timing:
+
+- `codeAtMatchTime('honeypot')` is **false**, so no pickup code is ever released.
+- No code released ⇒ `handleConfirmPickup` refuses ⇒ no confirmation is ever
+  recorded.
+- No confirmation ⇒ `bothConfirmed` never fires ⇒ **no `matches` row**, and every
+  route into `disputeMatch` requires one side to have confirmed ⇒ **no `disputes`
+  row**.
+- No charge ⇒ no ledger ⇒ **no `holds` row** either.
+- And no reputation counter: the teardown below books none, and the two other
+  teardowns that could reach a decoy match (`cancelMatch`, `handleDisconnect`)
+  both name it and skip the `late_cancel` they would otherwise charge the real
+  buyer.
+
+#### It excuses itself; it never goes silent
+
+This is the honesty line, and it is the part that would be easiest to get wrong.
+A dispute **holds the money** on purpose (see above), and a decoy that simply
+stopped answering would walk a real buyer straight into that hold. So a decoy
+says the true thing — that it cannot make it — and the match ends through the
+**refunding** teardown a buddy who walks away produces (`buddy_left`). The buyer
+is returned to the queue, at the back, with no money moved and nothing on their
+record.
+
+It happens within `HONEYPOT_BOW_OUT_MS` (45 s), which is armed as a real alarm
+deadline and is far inside the ten-minute unconfirmed-match window that would
+otherwise cancel the match and charge the buyer for it. Tapping "Handed it over",
+or talking past the decoy's last line, only ever gets there sooner.
+
+And a buyer meets **at most one decoy per half hour** in a market
+(`HONEYPOT_COOLDOWN_MS`). One phantom buddy is ordinary market seeding; a buyer
+paired with a second and a third in a row is being kept in a queue by something
+that knows nobody is coming.
+
+#### It is a fallback in matching, never a competitor
+
+`findMatch` drops every decoy from contention the moment any real buyer is
+eligible, before the starvation-free fairness window is applied — so the window
+is computed over real buyers only and every pairing that could have been real
+still is. A chosen decoy is always the **receiver**, whatever it claims to have
+waited: the orderer walks to a counter and stands there, and a buyer told to go
+and meet somebody who does not exist is the thing this must never do.
+`test/matchmaker.test.ts` drives that as a two-hundred-round simulation with
+decoys restocked throughout.
+
+#### Chat: canned, offline, and still never stored
+
+A decoy answers from a **fixed table** in `shared/honeypot.ts` — pure,
+synchronous, deterministic, no model, no network. That is a deliberate decision
+and not a shortcut. The sentence under the chat box says a message goes to your
+bud "and nowhere else — not to the ledger, not to us"; handing a buyer's line to
+a language model would make that sentence false and would have needed the
+sentence changed first. As built, the line is read in memory to pick one of a
+handful of replies and is kept nowhere, so `pnpm smoke`'s never-stored scan is
+as true for a decoy conversation as for a real one. The only thing persisted is
+a *count* of replies, which is what bounds the conversation.
+
+#### The tripwire, and what a human does with it
+
+```
+GET /api/admin/honeypot?actor=<users.id>&sinceMs=<epoch>&limit=<n>
+```
+
+Behind the same `OPERATOR_USER_IDS` allowlist as disputes and holds, and
+**read-only**: a signal is an *observation*, not a case. There is nothing to
+resolve and no action endpoint, because nobody decided anything.
+
+Two kinds are recorded, and both are behaviours no legitimate client produces:
+
+| kind | what it means |
+|---|---|
+| `chat_flood` | the per-connection chat limiter tripped against a decoy. Six messages in ten seconds is not two strangers arranging to meet. |
+| `code_guess` | a `confirm_pickup` carrying a pickup code for a match that never released one. The app's own client sends `null` there. |
+
+"Was matched with a decoy" is deliberately **not** a signal: that is the ordinary
+cold-start case and would drown the queue on day one.
+
+**Read it like this.** An empty list is the normal answer and is itself
+informative. A handful of rows from many different `actorUserId`s is noise —
+clients retrying, somebody mashing a button. A *run* of rows from **one**
+`actorUserId`, or one `cell`, inside a short window is the thing this exists to
+surface, and the action it calls for lives outside this app: revoke that
+account's sessions, or ask whoever owns the deployment to rate-limit that caller
+at the edge.
+
+A row records which match, which decoy, which caller, which kind and when.
+**No chat content, ever** — `migrations/0008_honeypot_signals.sql` has no column
+for it, so no future caller can add one by passing a field. The tripwire watching
+the relay is not an exception to the promise the relay makes.
 
 ## Pitch deck
 

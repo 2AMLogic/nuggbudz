@@ -226,6 +226,8 @@ const SURFACE: Record<ProtocolErrorCode, 'chat' | 'elsewhere'> = {
   // this pool cannot charge anybody, the other that a half has not cleared yet.
   payment_unavailable: 'elsewhere',
   payment_pending: 'elsewhere',
+  // A refused seat: the landing screen's sign-in interstitial, never the chat.
+  sign_in_required: 'elsewhere',
   chat_empty: 'chat',
   chat_too_long: 'chat',
   chat_rate_limited: 'chat',

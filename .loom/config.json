@@ -60,6 +60,11 @@
       "documentation"
     ]
   },
+  "autonomous": {
+    "workFinder": {
+      "extraSkipLabels": ["loom:needs-capability"]
+    }
+  },
   "terminals": [
     {
       "id": "terminal-1",

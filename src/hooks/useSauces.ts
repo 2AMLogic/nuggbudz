@@ -53,6 +53,17 @@ export interface SauceChoice {
    * the account and this browser agree on the pair a bud was actually promised.
    */
   remember: () => void
+  /**
+   * Take a pair chosen elsewhere as this buyer's pick, over whatever the account
+   * has stored.
+   *
+   * For the sign-in round trip (#150): a buyer who picked a pair signed out and
+   * was asked to sign in to take a seat comes back to an account that may hold a
+   * *different* pair from some earlier visit. The pick they made a minute ago is
+   * the order they were queueing with, so it wins — and is written to the
+   * account, exactly as a tap would have been.
+   */
+  adopt: (selection: SauceSelection) => void
 }
 
 /**
@@ -133,5 +144,14 @@ export function useSauces(signedIn: boolean): SauceChoice {
     if (selection !== null) persist(selection)
   }, [selection, persist])
 
-  return { picks, selection, tap, remember }
+  const adopt = useCallback(
+    (chosen: SauceSelection) => {
+      touched.current = true
+      setPicks(chosen)
+      persist(chosen)
+    },
+    [persist],
+  )
+
+  return { picks, selection, tap, remember, adopt }
 }

@@ -24,6 +24,15 @@ export interface Candidate {
    * leaves the rule below at pure first-come-first-served.
    */
   standing?: StandingBand
+  /**
+   * True when this entry is a decoy rather than a person (`shared/honeypot.ts`).
+   *
+   * A honeypot is a **fallback, not a candidate**: see `findMatch` below. It is
+   * carried on the candidate rather than derived from the id here so the rule
+   * stays a rule about the queue rather than about an identity format, and so a
+   * test can drive it without minting ids.
+   */
+  honeypot?: boolean
 }
 
 export interface MatchDecision {
@@ -62,6 +71,15 @@ interface Eligible {
  *
  * The orderer role is decided by wait time alone, never by standing: whoever
  * waited longest places the order, because they are the one who has been there.
+ *
+ * **A honeypot is a fallback, never a competitor.** Decoys are removed from
+ * contention entirely whenever any real buyer is eligible, before the fairness
+ * rule above is applied at all — so every pairing that could have been real
+ * still is, and the starvation-free window is computed over real buyers only. A
+ * decoy that competed on equal terms would degrade exactly that property, and
+ * invisibly: every honeypot match is a real match that did not happen. When one
+ * *is* chosen it is always the receiver, whatever it claims to have waited,
+ * because the orderer is the buddy who walks to a counter and stands there.
  */
 export function findMatch(
   joiner: Candidate,
@@ -69,7 +87,7 @@ export function findMatch(
   radiusMeters: number,
   tiebreakWindowMs: number = STANDING_TIEBREAK_WINDOW_MS,
 ): MatchDecision | null {
-  const eligible: Eligible[] = []
+  const all: Eligible[] = []
   for (const candidate of waiting) {
     if (candidate.id === joiner.id) continue
     if (candidate.dealId !== joiner.dealId) continue
@@ -77,8 +95,16 @@ export function findMatch(
     const meters = distanceMeters(candidate, joiner)
     if (meters > radiusMeters) continue
 
-    eligible.push({ candidate, meters })
+    all.push({ candidate, meters })
   }
+
+  // The fallback rule, applied before anything else looks at the queue: a decoy
+  // is considered only when there is nobody real to pair with. A joiner who is
+  // themselves a decoy has nothing to fall back to and pairs with real buyers
+  // only — two decoys matching each other would be a pairing neither of them
+  // could ever complete, occupying a market that has a real buyer in it.
+  const real = all.filter((entry) => entry.candidate.honeypot !== true)
+  const eligible = real.length > 0 || joiner.honeypot === true ? real : all
 
   if (eligible.length === 0) return null
 
@@ -99,10 +125,26 @@ export function findMatch(
     if (servedFirst(entry.candidate, best.candidate)) best = entry
   }
 
-  // The longest-waiting of the pair places the order.
-  const [orderer, receiver] =
-    best.candidate.joinedAt <= joiner.joinedAt ? [best.candidate, joiner] : [joiner, best.candidate]
+  // The longest-waiting of the pair places the order — unless one of them is a
+  // decoy, which is never the orderer however long it claims to have waited. The
+  // orderer is the buddy who walks to a counter, orders a box and waits there
+  // holding a code, and a buyer told to go and meet somebody who does not exist
+  // is precisely the thing this feature must not do.
+  const [orderer, receiver] = decideRoles(best.candidate, joiner)
   return { orderer, receiver, distanceMeters: best.meters }
+}
+
+/**
+ * Who orders and who collects, for a pair that has already been chosen.
+ *
+ * Wait time decides it between two real buyers. A decoy is always the receiver,
+ * and when both somehow are (which `findMatch` does not produce) the rule falls
+ * back to wait time rather than to nothing.
+ */
+function decideRoles(chosen: Candidate, joiner: Candidate): [Candidate, Candidate] {
+  if (chosen.honeypot === true && joiner.honeypot !== true) return [joiner, chosen]
+  if (joiner.honeypot === true && chosen.honeypot !== true) return [chosen, joiner]
+  return chosen.joinedAt <= joiner.joinedAt ? [chosen, joiner] : [joiner, chosen]
 }
 
 /**

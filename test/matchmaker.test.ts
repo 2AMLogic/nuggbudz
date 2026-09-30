@@ -224,3 +224,126 @@ describe('findMatch and standing', () => {
     expect(decision?.orderer.id).toBe('low-standing')
   })
 })
+
+/**
+ * Honeypots in the queue.
+ *
+ * The property under test is the one the fairness rule cannot state for itself:
+ * a decoy must never take a pairing a real buyer could have had. Every honeypot
+ * match is a real match that did not happen, and the degradation is invisible —
+ * nothing about it is a type error, a lint finding, or a broken handshake.
+ */
+describe('findMatch and honeypots', () => {
+  const decoy = (id: string, overrides: Partial<Candidate> = {}): Candidate =>
+    buyer(id, { honeypot: true, ...overrides })
+
+  it('pairs with a decoy when there is genuinely nobody else', () => {
+    // The cold-start case, which is the whole reason decoys exist.
+    const decision = findMatch(buyer('real', { joinedAt: 9_000 }), [decoy('fake')], RADIUS)
+    expect(decision?.receiver.id).toBe('fake')
+  })
+
+  it('prefers any real buyer over a decoy, however long the decoy has waited', () => {
+    // The decoy is the longest waiter by an hour, so the fairness rule on its
+    // own would serve it first. It is not a candidate at all.
+    const waiting = [decoy('fake', { joinedAt: 0 }), buyer('real-buddy', { joinedAt: 3_600_000 })]
+    const decision = findMatch(buyer('joiner', { joinedAt: 3_600_001 }), waiting, RADIUS)
+    expect([decision?.orderer.id, decision?.receiver.id]).toEqual(['real-buddy', 'joiner'])
+  })
+
+  it('never makes a decoy the orderer, even when it waited longest', () => {
+    // The orderer walks to a counter, orders a box and stands there holding a
+    // code. Sending a buyer to meet somebody who does not exist is the honesty
+    // line; holding a code you never use is only a disappointment.
+    const decision = findMatch(
+      buyer('real', { joinedAt: 5_000 }),
+      [decoy('fake', { joinedAt: 0 })],
+      RADIUS,
+    )
+    expect(decision?.orderer.id).toBe('real')
+    expect(decision?.receiver.id).toBe('fake')
+  })
+
+  it('does not let a decoy pair with another decoy', () => {
+    // Two decoys matching each other would occupy a market that has a real
+    // buyer standing in it, and could never complete.
+    expect(findMatch(decoy('a'), [decoy('b')], RADIUS)).toBeNull()
+  })
+
+  it('still pairs a decoy joiner with a real buyer', () => {
+    // The fallback is about which side is *offered* one, not about refusing to
+    // seat one: `worker/pool.ts` never opens a socket for a decoy, but the rule
+    // has to be total.
+    expect(findMatch(decoy('a'), [buyer('real')], RADIUS)?.receiver.id).toBe('a')
+  })
+
+  it('keeps the standing tiebreak over real buyers only', () => {
+    // A decoy carries no standing, so an implementation that ranked it with the
+    // rest would let an unrated phantom outrank a `spotty` buyer at the front.
+    const waiting = [
+      buyer('low-standing', { joinedAt: 0, standing: 'spotty' }),
+      decoy('fake', { joinedAt: 1 }),
+    ]
+    const decision = findMatch(buyer('joiner', { joinedAt: 2 }), waiting, RADIUS, WINDOW)
+    expect(decision?.orderer.id).toBe('low-standing')
+  })
+
+  /**
+   * The simulation the issue's own acceptance criterion names.
+   *
+   * Decoys are present throughout and are restocked every round, so an
+   * implementation that merely *sometimes* prefers a real buyer fails here
+   * rather than looking fine. The assertion is that not one of the real buyers
+   * ever pairs with one while another real buyer is available — and, as the
+   * control, that the decoys were genuinely reachable all along.
+   */
+  it('lets real buyers pair with each other throughout, with decoys present', () => {
+    const ROUNDS = 200
+    const INTERVAL = 5_000
+
+    let queue: Candidate[] = []
+    let now = 0
+    let decoysTaken = 0
+    let realPairs = 0
+
+    for (let round = 1; round <= ROUNDS; round++) {
+      now += INTERVAL
+      // Three phantoms standing there the whole time, restocked as they are
+      // consumed, all on the same deal and at the same spot as everybody else.
+      while (queue.filter((c) => c.honeypot === true).length < 3) {
+        queue.push(decoy(`fake-${round}-${queue.length}`, { joinedAt: now - 60_000 }))
+      }
+      // Two real buyers arrive per round, one of whom joins and one of whom
+      // waits — so from round two onward there is always a real counterpart.
+      queue.push(buyer(`real-${round}`, { joinedAt: now }))
+
+      const joiner = buyer(`joiner-${round}`, { joinedAt: now + 1 })
+      const decision = findMatch(joiner, queue, RADIUS, WINDOW)
+      expect(decision).not.toBeNull()
+
+      const taken = decision?.orderer.id === joiner.id ? decision.receiver : decision?.orderer
+      if (taken?.honeypot === true) decoysTaken++
+      else realPairs++
+      // A decoy is never the one sent to the counter.
+      expect(decision?.orderer.honeypot).not.toBe(true)
+      queue = queue.filter((candidate) => candidate.id !== taken?.id)
+    }
+
+    // Not one round in two hundred, with three phantoms standing in the market
+    // the whole time and each of them a minute older than every real arrival.
+    expect(decoysTaken).toBe(0)
+    expect(realPairs).toBe(ROUNDS)
+
+    // The control: without the fallback rule the decoys would have won almost
+    // every round, because they are a minute older than every real arrival.
+    const naive = findMatch(
+      buyer('control-joiner', { joinedAt: now + 2 }),
+      queue.map(({ honeypot: _ignored, ...rest }) => rest),
+      RADIUS,
+      WINDOW,
+    )
+    expect(naive).not.toBeNull()
+    const naiveTaken = naive?.orderer.id === 'control-joiner' ? naive.receiver : naive?.orderer
+    expect(naiveTaken?.id.startsWith('fake-')).toBe(true)
+  })
+})

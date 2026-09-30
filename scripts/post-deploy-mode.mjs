@@ -6,7 +6,8 @@
  * ALLOW_DEMO_PAIRING:1`) both end in `wrangler deploy`, and until #74 neither
  * said anything afterwards about which mode the result left production in — a
  * plain `pnpm run deploy` silently disabled demo pairing with no error and no
- * warning, and the only symptom was every pool socket answering 401.
+ * warning, and the only symptom was every pool socket answering 401 (since
+ * #150, every signed-out `join` answering `sign_in_required` instead).
  *
  * This deliberately never trusts the command line that invoked `wrangler
  * deploy` — a claim derived from local flags would have been just as
@@ -17,7 +18,22 @@
  * Usage: node scripts/post-deploy-mode.mjs
  *   DEPLOY_HEALTH_URL=https://nuggbudz.com/api/health  (default)
  */
+import { assessClientKey, BUILD_INFO_FILE, parseBuildInfo } from './build-info.mjs'
+
 const HEALTH_URL = process.env.DEPLOY_HEALTH_URL ?? 'https://nuggbudz.com/api/health'
+
+/** The client half of payments: what the deployed bundle was built with. */
+async function readBuildInfo() {
+  try {
+    const url = new URL(`/${BUILD_INFO_FILE}`, HEALTH_URL).href
+    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) })
+    if (!res.ok) return null
+    // A missing asset falls through to the SPA's index.html, which is not JSON.
+    return parseBuildInfo(await res.json())
+  } catch {
+    return null
+  }
+}
 
 async function main() {
   let health
@@ -39,8 +55,8 @@ async function main() {
 
   const demo = health.demoPairing === true
   const banner = demo
-    ? 'DEMO PAIRING IS ON  — unauthenticated sockets pair under a throwaway demo: identity.'
-    : 'DEMO PAIRING IS OFF — sign-in required; this is the strict production path.'
+    ? 'DEMO PAIRING IS ON  — signed-out browsers take seats under a throwaway demo: identity.'
+    : 'DEMO PAIRING IS OFF — anyone can browse, a seat needs sign-in; the strict production path.'
 
   console.log(`\nPost-deploy mode (${HEALTH_URL}): demoPairing=${health.demoPairing}`)
   console.log(banner)
@@ -81,6 +97,12 @@ async function main() {
       process.exitCode = 1
       break
   }
+
+  // The Worker's secrets and the bundle's publishable key are set by different
+  // steps and only one is visible to /api/health (#149).
+  const client = assessClientKey(String(health.payments), await readBuildInfo())
+  console.log(client.message)
+  if (!client.ok) process.exitCode = 1
 }
 
 await main()

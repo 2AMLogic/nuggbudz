@@ -1,11 +1,14 @@
 /**
  * Demo pairing — the escape hatch that keeps a live demo alive.
  *
- * Pairing requires a signed-in account, which is right for production and fatal
+ * A seat requires a signed-in account, which is right for production and fatal
  * on a conference stage: Google sign-in needs configured credentials, a
- * round-trip to Google, and a consent screen on a borrowed phone. When
- * `ALLOW_DEMO_PAIRING` is set, the Worker instead mints a throwaway identity for
- * an unauthenticated caller, so two phones can still pair.
+ * round-trip to Google, and a consent screen on a borrowed phone. Every
+ * unauthenticated caller is given a throwaway identity — since #150 a signed-out
+ * browser may always *look* at the market — and when `ALLOW_DEMO_PAIRING` is
+ * set, that identity may also take a seat, so two phones can still pair. The
+ * flag answers that one question, in one place: `seatVerdict` in
+ * `shared/identity.ts`, on the pool's `join` path.
  *
  * That identity is **per browser, not per socket** (#101). It has to be: the
  * pickup QR now carries a link, a phone's own camera app opens that link in a new

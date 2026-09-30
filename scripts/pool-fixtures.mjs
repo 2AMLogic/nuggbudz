@@ -91,6 +91,10 @@ export const MARKETS = {
   albuquerque: { lat: 35.0844, lng: -106.6504, label: 'Albuquerque' },
   kansasCity: { lat: 39.0997, lng: -94.5786, label: 'Kansas City' },
   stLouis: { lat: 38.627, lng: -90.1994, label: 'St. Louis' },
+  elPaso: { lat: 31.7619, lng: -106.485, label: 'El Paso' },
+  oklahomaCity: { lat: 35.4676, lng: -97.5164, label: 'Oklahoma City' },
+  tulsa: { lat: 36.154, lng: -95.9928, label: 'Tulsa' },
+  memphis: { lat: 35.1495, lng: -90.049, label: 'Memphis' },
 }
 
 /**
@@ -140,6 +144,13 @@ export const FIXTURE_COORDS = {
   chatDisputeTwo: { lat: 39.739395, lng: -104.990154 },
   chatLeaveOne: { lat: 32.7767, lng: -96.797 },
   chatLeaveTwo: { lat: 32.776895, lng: -96.796866 },
+  // The sustained-flood-against-a-just-disputed-match pair (issue #120): the
+  // orderer vanishes right after the receiver confirms, and the receiver
+  // floods immediately rather than waiting for `pickup_disputed` — waiting
+  // would mean this connection's own status has already dropped out of
+  // `matched` by the time the flood starts.
+  chatFloodOne: { lat: 31.7619, lng: -106.485 },
+  chatFloodTwo: { lat: 31.762095, lng: -106.484876 },
   // The bystander who holds a real pickup code and is not in that match. Stands
   // 15 m from `gus`, in the handshake pair's own market and therefore in their
   // own Durable Object — the point of the probe is that the server refuses them
@@ -174,6 +185,17 @@ export const FIXTURE_COORDS = {
   // already owns `pittsburgh` for the unrelated charged-path scenarios above.
   disputeHere: { lat: 38.627, lng: -90.1994 },
   disputeNearby: { lat: 38.627323, lng: -90.199018 },
+  // The honeypot lane (`scripts/honeypot-check.mjs`). Two buyers 40 m apart who
+  // are never live at the same time: each opens, is paired with a *decoy*, tears
+  // that match down and closes before the next one opens. They need a market of
+  // its own for a sharper reason than most — the whole assertion is "this buyer
+  // had nobody real to pair with", so a stray buyer from a neighbouring scenario
+  // would not add noise, it would make the check pass for the wrong reason by
+  // pairing them with a person. Memphis rather than Oklahoma City because #150
+  // landed `browseAnon`/`browseSeated` on that exact coordinate while this
+  // branch was open — see the merge comment on PR #157.
+  honeypotSolo: { lat: 35.1495, lng: -90.049 },
+  honeypotProbe: { lat: 35.149623, lng: -90.048508 },
   // The browser lane (`e2e/`). Same table, because the separation rule is about
   // which Durable Object a fixture lands in, and both lanes drive the same one.
   e2eBuddyA: { lat: 33.749, lng: -84.388 },
@@ -205,6 +227,17 @@ export const FIXTURE_COORDS = {
   // live pickup code while it measures.
   e2eNarrowA: { lat: 39.0997, lng: -94.5786 },
   e2eNarrowB: { lat: 39.099823, lng: -94.578193 },
+  // Browsing without a seat (#150): a socket with no session, welcomed and shown
+  // the market, beside a signed-in buyer 40 m away whose seat is what it counts.
+  // The anonymous one never holds a seat on a strict server, so nothing here can
+  // pair with it — but it is still in a market of its own, because its whole
+  // assertion is an exact count of who is queued within its radius.
+  browseAnon: { lat: 35.4676, lng: -97.5164 },
+  browseSeated: { lat: 35.467723, lng: -97.515993 },
+  // The same, through the browser (`e2e/late-sign-in.spec.ts`): the signed-out
+  // page reads the count off the screen and is asked to sign in when it taps.
+  e2eBrowseAnon: { lat: 36.154, lng: -95.9928 },
+  e2eBrowseSeated: { lat: 36.154123, lng: -95.992393 },
 }
 
 // The "Protocol hygiene" socket (BUYERS.bad) deliberately reuses `robb`'s
@@ -289,6 +322,14 @@ export const SCENARIOS = {
     fixtures: ['chatLeaveOne', 'chatLeaveTwo'],
     what: 'the chat channel closes, and clears, when a buddy walks away',
   },
+  chatFloodAfterTerminal: {
+    lane: 'smoke',
+    market: 'elPaso',
+    fixtures: ['chatFloodOne', 'chatFloodTwo'],
+    what:
+      'a sustained flood against a match that just left `pending` is refused as a rate limit, ' +
+      'not as "not matched" (#120)',
+  },
   saucePair: {
     lane: 'smoke',
     market: 'seattle',
@@ -338,6 +379,15 @@ export const SCENARIOS = {
     what:
       'a charged dispute holds the full total, and an operator resolution refunds exactly the ' +
       'right leg — the receiver alone, both, or none when Stripe refuses',
+  },
+  honeypotFallback: {
+    lane: 'payments',
+    market: 'memphis',
+    fixtures: ['honeypotSolo', 'honeypotProbe'],
+    what:
+      'a buyer alone in a market is paired with a decoy that can never be charged, never ' +
+      'releases a code, answers a line of chat and then excuses itself through the refunding ' +
+      'teardown — leaving no matches, disputes, holds or reputation row behind',
   },
   e2ePair: {
     lane: 'e2e',
@@ -409,6 +459,30 @@ export const SCENARIOS = {
     market: 'serverResolved',
     fixtures: [],
     what: 'a refused location prompt still pairs, placed by the server',
+  },
+  browseOnly: {
+    lane: 'smoke',
+    market: 'oklahomaCity',
+    fixtures: ['browseAnon', 'browseSeated'],
+    what:
+      'a socket with no session is welcomed, counted the market within its radius and never ' +
+      'sent the roster, and is refused a seat on the wire rather than paired (#150)',
+  },
+  e2eLateSignIn: {
+    lane: 'e2e',
+    market: 'tulsa',
+    fixtures: ['e2eBrowseAnon', 'e2eBrowseSeated'],
+    what:
+      'a signed-out page sees the count waiting within its radius, and tapping for a seat ' +
+      'brings up the sign-in interstitial instead of a queue (#150)',
+  },
+  e2eLateSignInResume: {
+    lane: 'e2e',
+    market: 'serverResolved',
+    fixtures: [],
+    what:
+      'back from the sign-in round trip, the buyer takes the seat they were taking with the ' +
+      'deal and sauces they chose — placed by the server, since a precise fix is not carried',
   },
   demoCheckPair: {
     lane: 'payments',

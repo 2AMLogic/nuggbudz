@@ -224,6 +224,47 @@ function edgeCoords(request: Request): RawCoords | null {
 app.get('/api/pool/ws', async (c) => {
   const active = await sessionFromRequest(c.env, c.req.raw)
 
+  // Cloudflare sets CF-Connecting-IP at the edge and a caller cannot override
+  // it, unlike X-Forwarded-For. Local dev may omit it; those share one bucket.
+  const clientKey = deriveClientKey(c.req.header('CF-Connecting-IP')) ?? 'unknown'
+
+  // Checked here, before the pool is addressed *and before the Upgrade header
+  // is even looked at*, so a flood costs a KV read and no Durable Object time.
+  //
+  // Until #150 an unauthenticated flood never reached this line outside demo
+  // mode: the session check refused it first, and that 401 was quietly the
+  // flood backstop. It is gone, so the answer is stated rather than inherited
+  // (see `UpgradeBucket`): an upgrade with no session is counted in a bucket of
+  // its own, tighter than the signed-in one and separate from it, keyed on
+  // `clientKey` rather than on identity — minting a fresh anonymous id does not
+  // buy a new bucket. Behind it, the pool caps how many anonymous sockets one
+  // address may hold open in a shard (`anonSocketTag`), because a window only
+  // bounds how fast sockets arrive, not how many pile up.
+  //
+  // Ahead of the Upgrade check on purpose (#105): a browser handed a non-101
+  // response to a WebSocket constructor never surfaces the body, it just fires
+  // `error` and closes — so a tripped limiter and a dead network are the same
+  // event to a client, and the one thing that tells them apart is a plain HTTP
+  // request to this exact URL. `usePool` makes that request when a socket
+  // closes before it ever opens, and it carries no `Upgrade` header — so the
+  // rate check has to answer before the 426 would, or every probe would read
+  // as "not even trying to upgrade" and never find the 429 underneath it. A
+  // rejected attempt is not recorded (see `slidingWindow`), so the probe costs
+  // nothing extra against the same budget a real retry would also be refused
+  // against.
+  const anonymous = active === null
+  const rate = await checkUpgradeRate(c.env, clientKey, anonymous ? 'anonymous' : 'session')
+  if (!rate.allowed) {
+    c.header('Retry-After', String(rate.retryAfterSeconds))
+    return c.json(
+      {
+        error: 'too many connection attempts, slow down',
+        retryAfterSeconds: rate.retryAfterSeconds,
+      },
+      429,
+    )
+  }
+
   if (c.req.header('Upgrade') !== 'websocket') {
     return c.text('expected a websocket upgrade', 426)
   }
@@ -235,29 +276,6 @@ app.get('/api/pool/ws', async (c) => {
   const clientCoords: RawCoords = { lat: c.req.query('lat'), lng: c.req.query('lng') }
   if (coordsSupplied(clientCoords) && parseCoords(clientCoords) === null) {
     return c.json({ error: 'lat must be in -90..90 and lng in -180..180' }, 400)
-  }
-
-  // Cloudflare sets CF-Connecting-IP at the edge and a caller cannot override
-  // it, unlike X-Forwarded-For. Local dev may omit it; those share one bucket.
-  const clientKey = deriveClientKey(c.req.header('CF-Connecting-IP')) ?? 'unknown'
-
-  // Checked here, before the pool is addressed, so a flood costs a KV read and
-  // no Durable Object time.
-  //
-  // Until #150 an unauthenticated flood never reached this line outside demo
-  // mode: the session check refused it first, and that 401 was quietly the
-  // flood backstop. It is gone, so the answer is stated rather than inherited
-  // (see `UpgradeBucket`): an upgrade with no session is counted in a bucket of
-  // its own, tighter than the signed-in one and separate from it, keyed on
-  // `clientKey` rather than on identity — minting a fresh anonymous id does not
-  // buy a new bucket. Behind it, the pool caps how many anonymous sockets one
-  // address may hold open in a shard (`anonSocketTag`), because a window only
-  // bounds how fast sockets arrive, not how many pile up.
-  const anonymous = active === null
-  const rate = await checkUpgradeRate(c.env, clientKey, anonymous ? 'anonymous' : 'session')
-  if (!rate.allowed) {
-    c.header('Retry-After', String(rate.retryAfterSeconds))
-    return c.json({ error: 'too many connection attempts, slow down' }, 429)
   }
 
   // Every rung is range-checked, so `geohash` cannot be reached with an argument

@@ -356,6 +356,31 @@ jobs:
           ' "$health"
       - run: BASE=http://localhost:5251 pnpm honeypot-check
 
+  # The upgrade limiter's refusal, reachable off the wire (issue #105). A
+  # browser handed a non-101 response from a `WebSocket` constructor never
+  # sees the 429 body — it only fires `close` — so this is invisible to every
+  # other job here: `smoke`, `e2e` and the rest all raise `POOL_UPGRADE_LIMIT`
+  # specifically so a shared-bucket dev server never trips it. This job does
+  # the opposite on purpose, with its own port and its own tiny window, so the
+  # refusal is forced and the probe that is supposed to surface it is proved
+  # to actually surface it.
+  upgrade-rate-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: echo 'POOL_ANON_UPGRADE_LIMIT="2"' > .dev.vars
+      - run: pnpm dev --port 5252 &
+      - run: npx wait-on http://localhost:5252/api/health --timeout 90000
+      - run: BASE=http://localhost:5252 EXPECTED_ANON_UPGRADE_LIMIT=2 pnpm upgrade-rate-check
+
   # Somebody has to be told that `main` is red (issue #57).
   #
   # Every job above already runs on `push: branches: [main]` as well as on pull
@@ -382,7 +407,7 @@ jobs:
     # Every other job in this workflow. `test/main-red-alert.test.ts` asserts
     # that this list stays complete, because a job added later and left out of it
     # would be watched by nobody and nothing would look wrong.
-    needs: [check, smoke, e2e, demo-check, payment-gate-closed, payment-gate-live, honeypot-check]
+    needs: [check, smoke, e2e, demo-check, payment-gate-closed, payment-gate-live, honeypot-check, upgrade-rate-check]
     # `cancelled()` counts alongside `failure()`: on `main` there is no newer run
     # to supersede this one, so a cancelled job is a check that did not run, and a
     # check that did not run must never read as one that passed. A pull request is

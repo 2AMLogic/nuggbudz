@@ -186,9 +186,39 @@ wrangler secret put GOOGLE_CLIENT_ID              # once per environment
 wrangler secret put GOOGLE_CLIENT_SECRET
 wrangler secret put STRIPE_SECRET_KEY              # payments; see below
 wrangler secret put STRIPE_WEBHOOK_SECRET
+wrangler d1 migrations apply nuggbudz --remote      # before the deploy, not after
 VITE_STRIPE_PUBLISHABLE_KEY=pk_live_… pnpm run deploy   # sign-in only — see "Demo pairing"
-wrangler d1 migrations apply nuggbudz --remote
 ```
+
+### The schema the deployment is actually on
+
+Applying migrations is still a human step — a deploy does not mutate the
+production schema — but **forgetting it is no longer silent.** `pnpm run deploy`
+and `pnpm run deploy:demo` both end by comparing this checkout's `migrations/`
+against what the live database holds (`wrangler d1 migrations list nuggbudz
+--remote`, wrapped by `scripts/migration-check.mjs`), and exit non-zero naming
+every file the database is missing. `pnpm migration-check` asks the same question
+on its own, `--local` against the local D1.
+
+It exists because production sat **three migrations behind** this repo for an
+unknown period with every check green (#135): `0002_users`, `0003_sauce_prefs`
+and `0004_disputes` were unapplied, so sign-in, sauce preferences and dispute
+persistence had no tables to write to, and nothing could have told you.
+`/api/health` describes the Worker, not the database behind it; `pnpm demo-check`
+passes against a missing table because a demo pair deliberately writes no rows;
+and `pnpm test` / `pnpm smoke` run against a local D1 that was fully migrated.
+The same blind spot `scripts/post-deploy-mode.mjs` closed one layer up for a
+stale client bundle (#74) — a check that cannot fail for the thing it is named
+after.
+
+Two things about `wrangler d1 migrations list` decide the shape of that check:
+it **exits 0 either way**, so the exit code carries no signal and a banner line
+is the whole answer (there is no `--json`), and that clean banner is also what an
+empty `migrations/` prints. So the verdict has three values, not two —
+`COULD NOT DETERMINE` is reported distinctly from up-to-date and also exits
+non-zero, because a check that could not run must not read like one that passed.
+It is deliberately **not** in CI: a pull request has no production credentials,
+so every run there would be undetermined, which is noise rather than a signal.
 
 ### Payments, and what happens without them
 

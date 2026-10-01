@@ -8,43 +8,11 @@ import {
   type RsaPublicJwk,
   verifyRs256Signature,
 } from '../shared/jwt'
+// The keypair harness is shared with `test/auth-oauth-flow.test.ts`, which drives
+// the same signer through the Worker's routes. One copy of the RSA logic.
+import { makeSigner, type Signer, segment } from './fixtures/oauth'
 
 const encoder = new TextEncoder()
-const RS256 = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' } as const
-
-function segment(value: unknown): string {
-  return bytesToBase64Url(encoder.encode(JSON.stringify(value)))
-}
-
-interface Signer {
-  jwk: RsaPublicJwk
-  sign: (header: Record<string, unknown>, claims: Record<string, unknown>) => Promise<string>
-}
-
-/** A throwaway RSA keypair, so the signature path is exercised for real. */
-async function makeSigner(kid: string): Promise<Signer> {
-  const pair = await crypto.subtle.generateKey(
-    { ...RS256, modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) },
-    true,
-    ['sign', 'verify'],
-  )
-  const exported = (await crypto.subtle.exportKey('jwk', pair.publicKey)) as {
-    n: string
-    e: string
-  }
-  return {
-    jwk: { kty: 'RSA', n: exported.n, e: exported.e, kid, alg: 'RS256' },
-    async sign(header, claims) {
-      const signingInput = `${segment({ ...header })}.${segment(claims)}`
-      const signature = await crypto.subtle.sign(
-        RS256.name,
-        pair.privateKey,
-        encoder.encode(signingInput),
-      )
-      return `${signingInput}.${bytesToBase64Url(new Uint8Array(signature))}`
-    },
-  }
-}
 
 let google: Signer
 let attacker: Signer

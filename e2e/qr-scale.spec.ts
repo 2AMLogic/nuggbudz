@@ -229,6 +229,36 @@ async function measure(page: Page): Promise<{
 }
 
 /**
+ * Wait until the symbol has actually been redrawn for the viewport it is now at.
+ *
+ * The two numbers `measure` reports do not arrive together, and that asymmetry is
+ * what made this file red on `main` (#167). `columnPixels` is a synchronous layout
+ * read, so it is the new width the instant `setViewportSize` returns.
+ * `backingPixels` is not: `PickupQr` re-derives the pitch in a `ResizeObserver`
+ * callback, which the browser only delivers during a rendering update, and the
+ * canvas is resized a React commit after that. So a wait that polls the *column* —
+ * which is what this spec used to do — passes on its first read every time and
+ * waits for nothing: the next line then read a canvas still carrying the previous
+ * viewport's symbol and reported a 6px pitch in a column with room for 8. It
+ * failed on CI and reproduces anywhere a rendering update is withheld between the
+ * resize and the read (`Emulation.setVirtualTimePolicy` paused is enough).
+ *
+ * What is waited for is that the backing store **changed**, deliberately never
+ * that it changed to any particular size: which pitch it settles on is the whole
+ * subject of `assertNotResampled`, and a wait that already knew the answer would
+ * leave that assertion unable to fail. A component that redraws at the wrong
+ * pitch still satisfies this wait and still fails the assertion; one that never
+ * redraws at all exhausts it, which is the other defect worth hearing about.
+ */
+async function redrawnSince(page: Page, backingPixels: number): Promise<void> {
+  await expect
+    .poll(async () => (await measure(page)).backingPixels, {
+      message: 'the symbol was never redrawn at a new size for this viewport',
+    })
+    .not.toBe(backingPixels)
+}
+
+/**
  * The element's pixels as the compositor produced them, decoded back to greyscale.
  *
  * `locator.screenshot()` is the whole point of this file: it captures the element
@@ -402,7 +432,7 @@ test('the pickup QR is never resampled, on a 320px phone or a desktop', async ({
     // and the symbol it was compared against omitted the quiet zone. What has to
     // hold is that the *longest* origin's symbol also clears the floor in this
     // column, since no browser test can visit that deployment.
-    const { columnPixels } = await measure(first.page)
+    const { columnPixels, backingPixels: narrowBacking } = await measure(first.page)
     const longestSpan = qrSpanModules(pickupQrMatrix(code, LONGEST_ORIGIN))
     expect(
       columnPixels - FRAME_PIXELS * 2,
@@ -417,14 +447,19 @@ test('the pickup QR is never resampled, on a 320px phone or a desktop', async ({
     await expect
       .poll(async () => (await measure(first.page)).columnPixels)
       .toBeGreaterThan(columnPixels)
+    // The column is wider the instant the viewport is; the symbol in it is not, and
+    // that gap is a measurement of nothing. Wait for the redraw itself (#167).
+    await redrawnSince(first.page, narrowBacking)
     const widePitch = await assertNotResampled(first.page, code)
     expect(widePitch).toBe(QR_MODULE_PIXELS_MAX)
     expect(narrowPitch).toBeLessThan(widePitch)
 
     // Back to the phone, because a rotation is the ordinary way this happens and a
     // symbol that only adapts in one direction overflows the moment it is turned.
+    const { backingPixels: wideBacking } = await measure(first.page)
     await first.page.setViewportSize(NARROW_VIEWPORT)
     await expect.poll(async () => (await measure(first.page)).columnPixels).toBe(columnPixels)
+    await redrawnSince(first.page, wideBacking)
     expect(await assertNotResampled(first.page, code)).toBe(narrowPitch)
   } finally {
     await Promise.all(contexts.map((context) => context.close().catch(() => {})))

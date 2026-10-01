@@ -142,6 +142,13 @@ export const PROTOCOL_HISTORY: readonly [ProtocolVersionNote, ...ProtocolVersion
     added: ['market'],
     changed: ['welcome', 'error'],
   },
+  {
+    version: 11,
+    summary:
+      '`welcome.waiting` became `welcome.marketWaiting` (#94). It always counted every deal within the radius and never the recipient — the `market` figure — while `waiting.waiting` counts one deal including the recipient, and one name for both let the client write the first into the slot the second owns. An older client reading `welcome.waiting` now reads nothing.',
+    added: [],
+    changed: ['welcome'],
+  },
 ]
 
 /**
@@ -265,7 +272,17 @@ export interface WelcomeMessage {
    * screen converts once, in `formatMiles`.
    */
   radiusMeters: number
-  waiting: number
+  /**
+   * How many buyers are queued within your radius right now, **on any deal**,
+   * and **never counting you** — at upgrade this socket holds no seat, so there
+   * is nothing of yours to count. The same figure as the `market` sent straight
+   * after, computed from the same snapshot.
+   *
+   * Not `WaitingMessage.waiting`, which is one deal's queue *including* you.
+   * The two shared a name until #94, and the client wrote this one into the slot
+   * that one owns: "3 waiting" meant two different things a frame apart.
+   */
+  marketWaiting: number
   /**
    * Who the server thinks you are: straight off your session, or — since #150 —
    * the anonymous `demo:` identity a signed-out browser is welcomed under. An
@@ -308,6 +325,8 @@ export interface WaitingMessage {
   type: 'waiting'
   /**
    * How many buyers on your deal are queued within your radius, including you.
+   * Not `WelcomeMessage.marketWaiting` or `MarketMessage.waiting`, which count
+   * every deal and never the recipient.
    *
    * Radius-scoped, not shard-scoped. The shard is a region — a count of
    * everybody in it would be a number about infrastructure, and the buyer is
@@ -341,7 +360,7 @@ export interface WaitingMessage {
  */
 export interface MarketMessage {
   type: 'market'
-  /** Buyers queued within your radius, on any deal. */
+  /** Buyers queued within your radius, on any deal — never you, who hold no seat. */
   waiting: number
   /**
    * The same count split by deal id. Nobody here holds a seat, so this is also

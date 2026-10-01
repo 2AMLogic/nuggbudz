@@ -283,7 +283,11 @@ async function main() {
     const solo = open(BUYERS.solo)
     await solo.opened
     const welcome = await solo.expect('welcome')
-    check('an empty market reports nobody waiting', welcome.waiting === 0, `${welcome.waiting}`)
+    check(
+      'an empty market reports nobody waiting',
+      welcome.marketWaiting === 0,
+      `${welcome.marketWaiting}`,
+    )
     solo.join()
     const waiting = await solo.expect('waiting')
     check('a lone buyer is the only one in the queue', waiting.waiting === 1, `${waiting.waiting}`)
@@ -311,7 +315,7 @@ async function main() {
   // screen shows this figure anyway. The count that matters is the one on the
   // searching screen, asserted after the requeue below.
   console.log(
-    `      (market held ${welcome.waiting} at upgrade, within ${welcome.radiusMeters}m — ` +
+    `      (market held ${welcome.marketWaiting} at upgrade, within ${welcome.radiusMeters}m — ` +
       'decoys are stocked at join, around the buyer)',
   )
 

@@ -303,7 +303,9 @@ export function usePool() {
                 locationSource: message.locationSource,
                 own: message.position,
                 radiusMeters: message.radiusMeters,
-                waiting: message.waiting,
+                // `marketWaiting` is deliberately not written to `waiting`: that
+                // slot is one deal's queue including you, and the market figure
+                // arrives on its own in the `market` frame right behind this.
               }
             case 'market':
               return { ...prev, market: { waiting: message.waiting, byDeal: message.byDeal } }

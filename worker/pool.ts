@@ -637,9 +637,10 @@ export class NuggPool extends DurableObject<Env> {
       locationSource,
     })
 
-    // One read of the decoy keyspace for both messages below, so the count in
-    // `welcome` and the count in `market` can never disagree with each other.
+    // One read of the decoy keyspace and one market for both messages below, so
+    // the count in `welcome` and the count in `market` can never disagree.
     const decoys = await this.liveHoneypots(Date.now())
+    const market = this.marketAround(origin, decoys)
 
     this.send(server, {
       type: 'welcome',
@@ -652,15 +653,9 @@ export class NuggPool extends DurableObject<Env> {
       position: origin,
       locationSource,
       radiusMeters: this.radiusMeters,
-      // Scoped to the radius, not the shard, for the same reason `sendWaiting`
-      // is: at this precision the shard is a region, and "42 waiting" two
-      // counties away is not a fact about anybody's night.
-      //
-      // Decoys are counted here exactly as they are on the map, which is the
-      // whole point of them: a market with one buyer in it is indistinguishable
-      // from a broken app, and a count that excluded them would contradict the
-      // dots drawn from the same set.
-      waiting: this.withinRadius(origin).length + this.nearbyHoneypots(origin, decoys).length,
+      // The market count, not a queue count — see `WelcomeMessage.marketWaiting`.
+      // Radius-scoped and decoy-inclusive for the reasons `marketAround` gives.
+      marketWaiting: market.waiting,
       user: { id: userId, name },
       expiry: this.windows,
       pickupTimeoutMs: this.pickupTimeoutMs,
@@ -668,7 +663,7 @@ export class NuggPool extends DurableObject<Env> {
     // Every socket starts without a seat, so it is shown the market the way
     // every idle socket is — counts, never the roster. A socket about to be
     // adopted into a live handoff below gets this too and simply moves past it.
-    this.send(server, this.marketAround(origin, decoys))
+    this.send(server, market)
 
     await this.adoptLiveHandoff(server, userId, connId)
 
@@ -2677,10 +2672,12 @@ export class NuggPool extends DurableObject<Env> {
    * would make the positions of the people waiting near you free to scrape.
    * The dots are for buyers who took a seat.
    *
-   * Decoys are counted here for the same reason `welcome` counts them: the two
-   * messages go to the same socket back to back, so a count that included them
-   * in one and not the other would contradict itself on screen. They are still
-   * only a *count* — a seatless socket never gets the roster either way.
+   * Decoys are counted here exactly as they are on the map, which is the whole
+   * point of them: a market with one buyer in it is indistinguishable from a
+   * broken app, and a count that excluded them would contradict the dots drawn
+   * from the same set. They are still only a *count* — a seatless socket never
+   * gets the roster either way. `welcome` reads its `marketWaiting` off this,
+   * so the two frames a new socket receives back to back cannot disagree.
    */
   private marketAround(at: LatLng, decoys: readonly HoneypotBuyer[]): MarketMessage {
     const nearby = this.withinRadius(at)

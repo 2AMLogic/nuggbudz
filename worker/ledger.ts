@@ -31,7 +31,7 @@ import { classifyUserId } from '../shared/identity'
 export interface SettledMatch {
   matchId: string
   dealId: string
-  /** The geohash cell that matched the pair — the market this split happened in. */
+  /** The geohash shard (Durable Object) that matched the pair. */
   cell: string
   distanceMeters: number
   createdAt: number

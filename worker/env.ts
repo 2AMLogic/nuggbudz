@@ -17,7 +17,7 @@ export interface Env {
    */
   POOL_ANON_UPGRADE_LIMIT: string
   /**
-   * Anonymous sockets one address may hold open at once in one cell. The hard
+   * Anonymous sockets one address may hold open at once in one shard. The hard
    * backstop behind the window above: a window bounds how fast sockets arrive,
    * this bounds how many can pile up. See `anonSocketTag`.
    */

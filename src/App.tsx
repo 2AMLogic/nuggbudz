@@ -2,7 +2,7 @@ import type { DealSpec, Settlement, SpreadAnalysis } from '@shared/economics'
 import { formatCents } from '@shared/economics'
 import { formatMiles } from '@shared/geo'
 import { describeLocationSource, type LocationSource } from '@shared/location'
-import type { CellBuddy } from '@shared/protocol'
+import type { RadiusBuddy } from '@shared/protocol'
 import { saucesForMerchant } from '@shared/sauces'
 import { storesForMap } from '@shared/stores'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -32,7 +32,7 @@ const DEMO_NAME_KEY = 'nuggbudz.demoName'
  * sent counts and never dots (#150). One constant rather than a fresh `[]` per
  * render, because the map redraws whenever its roster changes identity.
  */
-const NO_BUDDIES: CellBuddy[] = []
+const NO_BUDDIES: RadiusBuddy[] = []
 
 /**
  * How long a handoff link waits before deciding nobody claimed it.

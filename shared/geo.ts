@@ -32,10 +32,10 @@ export const DEFAULT_MATCH_RADIUS_METERS = Math.round(2 * METERS_PER_MILE)
 /**
  * Geohash precision for the shard key, by default.
  *
- * Coarse on purpose, and the number matters. The cell is no longer the market —
- * `DEFAULT_MATCH_RADIUS_METERS` is — so the cell's only remaining job is to
+ * Coarse on purpose, and the number matters. The shard is no longer the market —
+ * `DEFAULT_MATCH_RADIUS_METERS` is — so the shard's only remaining job is to
  * contain every candidate a buyer at its centre could pair with. At precision 6
- * the cell (~1.2 km) is *smaller* than the 6.4 km diameter of that radius, so
+ * the shard (~1.2 km) is *smaller* than the 6.4 km diameter of that radius, so
  * the grid would still be the real constraint; precision 5 (~4.9 km) is smaller
  * too; precision 4 (~39 x 19.5 km) contains it, but over half of that box lies
  * within 3.2 km of an edge, so a majority of buyers would have part of their
@@ -44,7 +44,7 @@ export const DEFAULT_MATCH_RADIUS_METERS = Math.round(2 * METERS_PER_MILE)
  * That trades contention for correctness, and it is the safe direction to trade:
  * coarsening keeps one Durable Object authoritative over every candidate it
  * might pair, which is what makes double-pairing impossible without locking.
- * The alternative — fine cells plus a fan-out to the eight neighbours — needs
+ * The alternative — fine shards plus a fan-out to the eight neighbours — needs
  * cross-object coordination and gives that invariant up.
  */
 export const DEFAULT_POOL_CELL_PRECISION = 3
@@ -53,7 +53,7 @@ export const DEFAULT_POOL_CELL_PRECISION = 3
  * Encode a coordinate as a geohash of the given precision.
  *
  * NuggBudz uses the geohash purely as a shard key: every buyer whose location
- * encodes to the same cell lands in the same Durable Object, and matching inside
+ * encodes to the same shard lands in the same Durable Object, and matching inside
  * it is decided by distance. See `DEFAULT_POOL_CELL_PRECISION` for why the shard
  * is deliberately much larger than the market it has to contain.
  */
@@ -104,55 +104,6 @@ export function geohash(lat: number, lng: number, precision = DEFAULT_POOL_CELL_
   }
 
   return hash
-}
-
-/** A cell's boundary, in plain degrees, corner to corner. */
-export interface BoundingBox {
-  latMin: number
-  latMax: number
-  lngMin: number
-  lngMax: number
-}
-
-/**
- * Decode a geohash back to the bounding box it represents.
- *
- * The exact inverse of `geohash`'s bit-interleaving loop: same even/odd bit
- * order, same binary-search halving, just reading bits out of each base32
- * character instead of deciding them. Nothing on screen draws this any more —
- * the shard is not a shape a buyer has a model for, and the map draws the match
- * radius instead — but the inverse is what lets a test assert which shard a
- * coordinate landed in without reimplementing the encoder.
- */
-export function decodeCell(hash: string): BoundingBox {
-  if (hash.length === 0) throw new RangeError('geohash must not be empty')
-
-  let latMin = -90
-  let latMax = 90
-  let lngMin = -180
-  let lngMax = 180
-  let evenBit = true
-
-  for (const char of hash) {
-    const index = BASE32.indexOf(char)
-    if (index === -1) throw new RangeError(`bad geohash character: ${char}`)
-
-    for (let bit = 4; bit >= 0; bit -= 1) {
-      const value = (index >> bit) & 1
-      if (evenBit) {
-        const mid = (lngMin + lngMax) / 2
-        if (value === 1) lngMin = mid
-        else lngMax = mid
-      } else {
-        const mid = (latMin + latMax) / 2
-        if (value === 1) latMin = mid
-        else latMax = mid
-      }
-      evenBit = !evenBit
-    }
-  }
-
-  return { latMin, latMax, lngMin, lngMax }
 }
 
 const METERS_PER_DEGREE_LAT = 111_320

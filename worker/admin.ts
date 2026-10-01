@@ -220,9 +220,9 @@ function refusal(
  *
  * The question this route exists to answer could not be asked before it: a
  * refused refund left cents in one Durable Object's storage, there is no
- * registry of live cells to fan out to, and nothing in D1 recorded that the
+ * registry of live shards to fan out to, and nothing in D1 recorded that the
  * money was stuck. This reads a table instead, so it is one query across every
- * cell the app has ever used.
+ * shard the app has ever used.
  */
 adminRoutes.get('/holds', async (c) => {
   const operator = await operatorOf(c.env, c.req.raw)
@@ -258,7 +258,7 @@ adminRoutes.get('/holds', async (c) => {
  * one: check it when a market looks wrong, and read three things off it. An
  * empty list is the normal answer and is itself informative. A handful of rows
  * from many `actorUserId`s is noise — clients retrying, somebody mashing a
- * button. A run of rows from **one** `actorUserId`, or one `cell`, inside a
+ * button. A run of rows from **one** `actorUserId`, or one `cell` (shard), inside a
  * short window is the thing this exists to surface, and the action it calls for
  * lives outside this app: revoke that account's sessions, or ask the operator
  * who owns the deployment to rate-limit that caller at the edge. Narrow to one
@@ -292,7 +292,7 @@ adminRoutes.get('/honeypot', async (c) => {
 })
 
 /**
- * Ask the cell that owns the charges to try the refund again.
+ * Ask the shard that owns the charges to try the refund again.
  *
  * No claim step, unlike a resolution: there is nothing to decide and nothing
  * one operator can take from another. Two people retrying the same hold at once
@@ -331,9 +331,9 @@ adminRoutes.post('/holds/:matchId/retry', async (c) => {
 })
 
 /**
- * Re-attempt a hold's refund, in the cell that owns the charges.
+ * Re-attempt a hold's refund, in the shard that owns the charges.
  *
- * Returns null when the cell could not be asked at all, which the caller turns
+ * Returns null when the shard could not be asked at all, which the caller turns
  * into a 502 and an untouched row rather than a stamp claiming a refund that
  * was never answered for.
  */
@@ -357,7 +357,7 @@ async function retryHold(
 }
 
 /**
- * Carry out the money half of a resolution, in the cell that owns the charges.
+ * Carry out the money half of a resolution, in the shard that owns the charges.
  *
  * Returns null when the refund could not be attempted at all, which the caller
  * turns into a resolved dispute with an unanswered refund rather than a lie

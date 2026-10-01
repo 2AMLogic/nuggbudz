@@ -2,11 +2,11 @@ import { isChatErrorCode, MAX_CHAT_HISTORY } from '@shared/chat'
 import { type BuyerRole, formatCents } from '@shared/economics'
 import type { LocationSource } from '@shared/location'
 import type {
-  CellBuddy,
   ChatRelayMessage,
   MarketMessage,
   MatchedMessage,
   PaymentRequiredMessage,
+  RadiusBuddy,
   ServerMessage,
 } from '@shared/protocol'
 import type { SauceSelection } from '@shared/sauces'
@@ -76,7 +76,7 @@ export interface PoolState {
    */
   radiusMeters: number | null
   /** Everyone else waiting within your radius, snapped to a coarse grid server-side. */
-  buddies: CellBuddy[]
+  buddies: RadiusBuddy[]
   /**
    * The market around a socket that holds no seat: how many are queued within
    * your radius, overall and per deal. Counts only — the server sends no roster

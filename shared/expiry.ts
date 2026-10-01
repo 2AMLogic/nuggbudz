@@ -17,7 +17,7 @@ export interface ExpiryWindows {
   matchTimeoutMs: number
 }
 
-/** Fallbacks for a cell whose Worker vars are unset or malformed. */
+/** Fallbacks for a shard whose Worker vars are unset or malformed. */
 export const DEFAULT_EXPIRY_WINDOWS: ExpiryWindows = {
   queueIdleMs: 15 * 60_000,
   queueWarnLeadMs: 2 * 60_000,
@@ -52,7 +52,7 @@ export interface SweepPlan {
   cancel: string[]
   /**
    * Epoch millis the next decision falls due, or null when nothing is pending.
-   * Null is what makes an idle cell free: there is no alarm to re-arm.
+   * Null is what makes an idle shard free: there is no alarm to re-arm.
    */
   nextDueAt: number | null
 }
@@ -96,7 +96,7 @@ export function matchDeadline(match: OpenMatch, windows: ExpiryWindows): number 
 }
 
 /**
- * Decide everything one sweep of a cell should do, and when to wake up next.
+ * Decide everything one sweep of a shard should do, and when to wake up next.
  *
  * `nextDueAt` deliberately ignores the work the plan already covers: the caller
  * applies the plan first, so the entries being dropped here no longer exist by
@@ -141,7 +141,7 @@ export function planSweep(
 }
 
 /**
- * When a cell's alarm should next fire, or null to leave the cell alarmless.
+ * When a shard's alarm should next fire, or null to leave the shard alarmless.
  *
  * Anything already due is scheduled for `now` rather than skipped, so work a
  * missed alarm left behind is not stranded until the next buyer happens to join.

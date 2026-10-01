@@ -4,7 +4,7 @@
  * `shared/reputation.ts` owns what the counters *mean*; this owns where they live.
  * The split matters because the Durable Object is the only thing that knows a
  * handoff finished, and D1 is the only thing that remembers it afterwards — a
- * cell can be evicted from memory between the lunch and dinner rushes, so live
+ * shard can be evicted from memory between the lunch and dinner rushes, so live
  * state cannot hold a buyer's history.
  */
 import { classifyUserId } from '../shared/identity'
@@ -110,7 +110,7 @@ interface StoredCounts {
  * The bands for a set of buyers, in one round trip.
  *
  * One query rather than one per buyer because the caller is the pairing path: a
- * join scans everyone waiting in the cell, and that must not become N reads. Ids
+ * join scans everyone waiting in the shard, and that must not become N reads. Ids
  * that are not accounts are not asked about at all — they have no row by
  * construction — and an account with no row yet is simply absent from the result,
  * which callers read as `new`.

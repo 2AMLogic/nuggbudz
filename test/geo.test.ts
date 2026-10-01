@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_MATCH_RADIUS_METERS,
   DEFAULT_POOL_CELL_PRECISION,
-  decodeCell,
   distanceMeters,
   formatDistance,
   formatMiles,
@@ -36,48 +35,6 @@ describe('geohash', () => {
     expect(() => geohash(0, 181)).toThrow(RangeError)
     expect(() => geohash(0, 0, 0)).toThrow(RangeError)
     expect(() => geohash(0, 0, 13)).toThrow(RangeError)
-  })
-})
-
-describe('decodeCell', () => {
-  it('matches the canonical reference vector', () => {
-    const box = decodeCell('u4pruydqqvj')
-    expect(box.latMin).toBeLessThanOrEqual(57.64911)
-    expect(box.latMax).toBeGreaterThanOrEqual(57.64911)
-    expect(box.lngMin).toBeLessThanOrEqual(10.40744)
-    expect(box.lngMax).toBeGreaterThanOrEqual(10.40744)
-  })
-
-  it('is the exact inverse of the encoder: the box always contains the original point', () => {
-    const points = [
-      { lat: 37.7749, lng: -122.4194 },
-      { lat: 0, lng: 0 },
-      { lat: -33.8688, lng: 151.2093 },
-      { lat: 89.9, lng: 179.9 },
-      { lat: -89.9, lng: -179.9 },
-    ]
-    for (const point of points) {
-      for (let precision = 1; precision <= 12; precision += 1) {
-        const hash = geohash(point.lat, point.lng, precision)
-        const box = decodeCell(hash)
-        expect(box.latMin).toBeLessThanOrEqual(point.lat)
-        expect(box.latMax).toBeGreaterThanOrEqual(point.lat)
-        expect(box.lngMin).toBeLessThanOrEqual(point.lng)
-        expect(box.lngMax).toBeGreaterThanOrEqual(point.lng)
-      }
-    }
-  })
-
-  it('shrinks monotonically as precision increases', () => {
-    const fine = decodeCell(geohash(37.7749, -122.4194, 9))
-    const coarse = decodeCell(geohash(37.7749, -122.4194, 3))
-    expect(fine.latMax - fine.latMin).toBeLessThan(coarse.latMax - coarse.latMin)
-    expect(fine.lngMax - fine.lngMin).toBeLessThan(coarse.lngMax - coarse.lngMin)
-  })
-
-  it('rejects an empty hash or an invalid character', () => {
-    expect(() => decodeCell('')).toThrow(RangeError)
-    expect(() => decodeCell('u4a!')).toThrow(RangeError)
   })
 })
 
@@ -176,14 +133,14 @@ describe('the defaults the shard and the market fall back to', () => {
   })
 
   it('shards coarsely enough to contain the whole circle', () => {
-    // The point of the precision: a buyer anywhere in a cell must be able to see
-    // every candidate inside their radius, so the cell has to be much wider than
+    // The point of the precision: a buyer anywhere in a shard must be able to see
+    // every candidate inside their radius, so the shard has to be much wider than
     // the circle's diameter. Precision 3 is ~156 km; the diameter is ~6.4 km.
-    const cell = decodeCell(geohash(37.7749, -122.4194, DEFAULT_POOL_CELL_PRECISION))
-    const widthMeters = distanceMeters(
-      { lat: cell.latMin, lng: cell.lngMin },
-      { lat: cell.latMin, lng: cell.lngMax },
-    )
+    // A geohash alternates longitude and latitude bits, longitude first, so
+    // latitude gets the smaller share and is the narrower side of the shard.
+    const latBits = Math.floor((5 * DEFAULT_POOL_CELL_PRECISION) / 2)
+    const heightDegrees = 180 / 2 ** latBits
+    const widthMeters = distanceMeters({ lat: 0, lng: 0 }, { lat: heightDegrees, lng: 0 })
     expect(widthMeters).toBeGreaterThan(10 * 2 * DEFAULT_MATCH_RADIUS_METERS)
   })
 })

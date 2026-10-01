@@ -117,7 +117,7 @@ export const PROTOCOL_HISTORY: readonly [ProtocolVersionNote, ...ProtocolVersion
   {
     version: 7,
     summary:
-      'The market became a distance rather than a shard: `welcome` carries `position` and `radiusMeters`, without which a client has no centre for its map and no idea how far "nearby" is, and `waiting` counts and the `buddies` roster are scoped to that radius rather than to the cell — the same fields meaning something else.',
+      'The market became a distance rather than a shard: `welcome` carries `position` and `radiusMeters`, without which a client has no centre for its map and no idea how far "nearby" is, and `waiting` counts and the `buddies` roster are scoped to that radius rather than to the shard — the same fields meaning something else.',
     added: [],
     changed: ['welcome', 'waiting'],
   },
@@ -234,9 +234,9 @@ export interface WelcomeMessage {
   type: 'welcome'
   protocol: number
   /**
-   * Geohash cell this connection was routed to — the shard, not the market.
+   * Geohash cell (shard) this connection was routed to — the shard, not the market.
    * Nothing on screen shows it: matching is decided by `radiusMeters` below, and
-   * the cell is only here so a test (and a ledger row) can say which Durable
+   * the shard id is only here so a test (and a ledger row) can say which Durable
    * Object handled a socket.
    */
   cell: string
@@ -248,7 +248,7 @@ export interface WelcomeMessage {
    * needs a centre on *every* rung: the server always knows where it put a
    * socket, and hiding the map whenever the buyer declined a permission prompt
    * withheld a picture we could always have drawn. Everyone *else* stays snapped
-   * through `snapToGrid` — see `CellBuddy`.
+   * through `snapToGrid` — see `RadiusBuddy`.
    */
   position: LatLng
   /**
@@ -277,7 +277,7 @@ export interface WelcomeMessage {
     name: string
   }
   /**
-   * The liveness windows this cell enforces. Sent so a client knows how often it
+   * The liveness windows this shard enforces. Sent so a client knows how often it
    * has to ping to keep its seat, rather than hardcoding a guess at the server's
    * policy.
    */
@@ -299,7 +299,7 @@ export interface WelcomeMessage {
  * `shared/geo.ts` — so an unmatched buyer is anonymous and only approximately
  * located, never identifiable and never exact.
  */
-export interface CellBuddy {
+export interface RadiusBuddy {
   lat: number
   lng: number
 }
@@ -322,7 +322,7 @@ export interface WaitingMessage {
    * than the queue; within the radius, because a dot you could never be matched
    * with is noise on the screen and a privacy surface off it.
    */
-  buddies: CellBuddy[]
+  buddies: RadiusBuddy[]
 }
 
 /**

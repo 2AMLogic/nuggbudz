@@ -573,7 +573,7 @@
   font-family: var(--font-body);
 }
 
-.cell-map-tiles {
+.radius-map-tiles {
   filter: grayscale(1) invert(1) sepia(1) hue-rotate(190deg) saturate(2) contrast(0.85)
     brightness(1.2);
 }
@@ -584,7 +584,7 @@
   cursor: default;
 }
 
-.cell-map-dot {
+.radius-map-dot {
   background: transparent;
   border: none;
 }

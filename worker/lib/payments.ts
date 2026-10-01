@@ -126,7 +126,7 @@ export interface PaymentMetadata {
   role: BuyerRole
   deal_id: string
   /**
-   * The geohash cell, which is also the name of the NuggPool Durable Object
+   * The geohash shard, which is also the name of the NuggPool Durable Object
    * holding this match. Without it a webhook arriving at the stateless Worker
    * has no way to find the instance that owns the two sockets.
    */

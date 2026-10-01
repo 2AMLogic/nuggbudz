@@ -93,7 +93,7 @@ import { type ReputationUpdate, readStandings, recordReputation } from './reputa
 export const INTERNAL_PAYMENT_PATH = '/__internal/payment'
 
 /**
- * Where the Worker asks this cell to act on an operator's dispute resolution.
+ * Where the Worker asks this shard to act on an operator's dispute resolution.
  *
  * Same shape as the payment path above, and for the same reason: a resolution
  * that refunds has to reach the money, and the money lives in whichever instance
@@ -103,7 +103,7 @@ export const INTERNAL_PAYMENT_PATH = '/__internal/payment'
 export const INTERNAL_DISPUTE_PATH = '/__internal/dispute'
 
 /**
- * Where the Worker asks this cell to try a refused refund again.
+ * Where the Worker asks this shard to try a refused refund again.
  *
  * The non-dispute counterpart of the path above. A hold is not a decision, so
  * this carries no resolution and takes no argument but the match: every refund
@@ -135,21 +135,21 @@ const TOMBSTONE_PREFIX = 'paytomb:'
 const PENDING_HOLD_PREFIX = 'holdfile:'
 
 /**
- * Where this cell's decoy buyers live.
+ * Where this shard's decoy buyers live.
  *
  * Its own keyspace, like the tombstones and the parked holds, and for the
  * sharpest version of the same reason: `matchRecords()` lists `match:` and feeds
  * every sweep, and a decoy must never be visible to any of them. A honeypot is a
  * queue entry with no socket behind it, so it cannot live in a hibernation
  * attachment the way every real waiting buyer does — storage is the only place
- * it can survive a cell being evicted.
+ * it can survive a shard being evicted.
  */
 const HONEYPOT_PREFIX = 'honeypot:'
 
 /**
  * How long a buyer who has just met a decoy is ineligible to meet another.
  *
- * The honesty line, kept per buyer rather than per cell: one phantom buddy is
+ * The honesty line, kept per buyer rather than per shard: one phantom buddy is
  * market seeding, and a buyer paired with a second and a third in a row is being
  * kept in a queue by something that knows nobody is coming. Keyed on the user id
  * so it survives the socket, the reconnect and the eviction.
@@ -167,13 +167,13 @@ const HONEYPOT_COOLDOWN_PREFIX = 'hpcool:'
  */
 const TOMBSTONE_RETENTION_MS = 4 * 24 * 60 * 60 * 1_000
 
-/** Anonymous sockets one address may hold open in a cell, when the var is unset. */
+/** Anonymous sockets one address may hold open in a shard, when the var is unset. */
 const DEFAULT_ANON_SOCKETS_PER_IP = 20
 
 /**
  * Who is on the other end of a socket.
  *
- * Identity and cell are both set by the Worker at upgrade time and never from a
+ * Identity and shard are both set by the Worker at upgrade time and never from a
  * client message, so a connection cannot rename itself or move shard.
  */
 interface Principal {
@@ -184,7 +184,7 @@ interface Principal {
   /**
    * The location the Worker resolved for this socket, and the rung it came from.
    * A join with no coordinates of its own — the promptless default — is placed
-   * here, which is also the coordinate the cell was derived from.
+   * here, which is also the coordinate the shard was derived from.
    */
   origin: LatLng
   locationSource: LocationSource
@@ -221,7 +221,7 @@ type ConnState =
        * window in `shared/ratelimit.ts`.
        *
        * In the hibernation attachment rather than an instance field, like every
-       * other piece of per-connection state, so an evicted cell does not forget
+       * other piece of per-connection state, so an evicted shard does not forget
        * that somebody was mid-flood. Optional because a socket attached before
        * this field existed has to deserialize rather than break. It is *not*
        * conversation: only the times messages were attempted, and it dies with
@@ -366,7 +366,7 @@ function pickupUnlocked(record: MatchRecord): boolean {
 }
 
 /**
- * The matching market for one geohash cell.
+ * The live queue for one geohash shard (the market is a radius inside it).
  *
  * Every buyer in a neighbourhood is routed to the same instance of this object,
  * and Durable Objects process one event at a time. That single-threadedness is
@@ -375,7 +375,7 @@ function pickupUnlocked(record: MatchRecord): boolean {
  * needed to guarantee it.
  *
  * Per-connection state lives in the socket's hibernation attachment rather than
- * in an instance field, so an idle cell can be evicted from memory between the
+ * in an instance field, so an idle shard can be evicted from memory between the
  * lunch and dinner rushes without losing the queue.
  */
 export class NuggPool extends DurableObject<Env> {
@@ -400,7 +400,7 @@ export class NuggPool extends DurableObject<Env> {
     return intVar(this.env.STANDING_TIEBREAK_SECONDS, fallbackSeconds) * 1_000
   }
 
-  /** Liveness policy for this cell, read fresh so a var change takes effect. */
+  /** Liveness policy for this shard, read fresh so a var change takes effect. */
   private get windows(): ExpiryWindows {
     const ms = (raw: string | undefined, fallbackMs: number) =>
       intVar(raw, Math.round(fallbackMs / 1_000)) * 1_000
@@ -412,10 +412,10 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
-   * The Stripe client for this cell, or null when payments are not configured.
+   * The Stripe client for this shard, or null when payments are not configured.
    *
    * Read fresh each time rather than cached in a field: a Durable Object can live
-   * across a secret rotation, and a stale null here would be a cell that quietly
+   * across a secret rotation, and a stale null here would be a shard that quietly
    * stopped taking money.
    */
   private get stripe(): StripeClientConfig | null {
@@ -452,7 +452,7 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
-   * The decoys still standing in this cell, pruning any whose time is up.
+   * The decoys still standing in this shard, pruning any whose time is up.
    *
    * Answers an empty list *without touching storage* when the feature is off,
    * which is the default and by far the common case: this is called from every
@@ -479,10 +479,10 @@ export class NuggPool extends DurableObject<Env> {
 
   /**
    * Top this buyer's market up to `HONEYPOT_POOL_SIZE` decoys, and hand back
-   * every decoy in the cell afterwards.
+   * every decoy in the shard afterwards.
    *
-   * Stocked around the **buyer**, never around the cell: the shard is ~156 km
-   * across and the market is two miles, so a decoy seeded from the cell would be
+   * Stocked around the **buyer**, never around the shard: the shard is ~156 km
+   * across and the market is two miles, so a decoy seeded from the shard would be
    * a dot nobody could reach and a count that lied. Topping up rather than
    * minting per join is what stops a busy market from filling with phantoms —
    * the target is a number of decoys near this buyer, not a number per arrival.
@@ -702,7 +702,7 @@ export class NuggPool extends DurableObject<Env> {
    * - **It is found from live sockets, not from storage.** The only match worth
    *   adopting is one whose other side is still connected; a match whose sockets
    *   have all gone has already been torn down by `handleDisconnect`. So this
-   *   costs one pass over this cell's sockets and never a storage scan.
+   *   costs one pass over this shard's sockets and never a storage scan.
    */
   private async adoptLiveHandoff(ws: WebSocket, userId: string, connId: string): Promise<void> {
     const held = this.states().find(
@@ -869,8 +869,8 @@ export class NuggPool extends DurableObject<Env> {
     }
 
     // Exactly the two sockets in this match, which is what keeps a third buyer in
-    // the same cell from hearing any of it. `matchSockets` filters on the
-    // connection's own matchId, so a cell hosting several matches at once relays
+    // the same shard from hearing any of it. `matchSockets` filters on the
+    // connection's own matchId, so a shard hosting several matches at once relays
     // each conversation only within itself.
     const [buddy] = this.matchSockets(state.matchId, ws)
     if (buddy === undefined) {
@@ -895,7 +895,7 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
-   * The one alarm this cell gets, shared by the two deadlines a match can be
+   * The one alarm this shard gets, shared by the two deadlines a match can be
    * under and by the queue's idle timer.
    *
    * The dispute sweep runs first, and that ordering is load-bearing: a match one
@@ -948,12 +948,12 @@ export class NuggPool extends DurableObject<Env> {
    * one here means a write failed — a D1 outage during `completeMatch`, or a
    * dispute raised while the database was unreachable. Nothing else would ever
    * look at it again: the expiry sweep only considers `pending` matches, and
-   * that is exactly how terminal records used to accumulate in a cell forever.
+   * that is exactly how terminal records used to accumulate in a shard forever.
    *
-   * Opportunistic rather than scheduled, deliberately. A cell with nothing but a
+   * Opportunistic rather than scheduled, deliberately. A shard with nothing but a
    * stuck record arms no alarm and needs none — nobody is waiting on it — and
    * the next buyer through that shard arms one within the queue's idle window.
-   * An alarm armed for the retry itself would keep waking a cell on a permanent
+   * An alarm armed for the retry itself would keep waking a shard on a permanent
    * failure (an identity D1 will refuse forever) with nothing new to try.
    *
    * `records` is this tick's one `match:` read (see `alarm`), not a fresh list —
@@ -1039,10 +1039,10 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
-   * Age out whatever has gone stale in this cell: buyers who stopped answering,
+   * Age out whatever has gone stale in this shard: buyers who stopped answering,
    * and matches neither side ever confirmed.
    *
-   * One sweep per cell rather than a timer per connection — a Durable Object
+   * One sweep per shard rather than a timer per connection — a Durable Object
    * processes one event at a time, so a single sweep sees the whole market and
    * two timers can never disagree about who is still queued.
    *
@@ -1245,7 +1245,7 @@ export class NuggPool extends DurableObject<Env> {
 
     // Coordinates in the join message are the opt-in precise path; without them
     // the socket's server-resolved origin stands. Either only ever moves a buyer
-    // within the market they were already routed to — the cell was decided at
+    // within the market they were already routed to — the shard was decided at
     // upgrade time and is not re-derived here. `parseCoords` re-validates both,
     // and covers a socket whose attachment predates this field.
     const fix = parseCoords(msg) ?? parseCoords(state.origin)
@@ -1302,7 +1302,7 @@ export class NuggPool extends DurableObject<Env> {
    * Extracted out of `handleJoin` so that a **requeue** can reach it (#160).
    * `findMatch` used to be called from the join path and nowhere else, so a
    * buyer a teardown handed back to the queue was matchable only by the next
-   * person to join the cell — see `rematchRequeued`. Sharing this path rather
+   * person to join the shard — see `rematchRequeued`. Sharing this path rather
    * than copying it is the whole point: a second match-creation site is a second
    * place a pickup code, a disposition, a standing read or a `matched` frame
    * could drift apart from the first.
@@ -1447,7 +1447,7 @@ export class NuggPool extends DurableObject<Env> {
     })
 
     // Two buyers just left the waiting pool: everyone still queued in this
-    // cell needs the roster refreshed, or their map would keep showing dots
+    // shard needs the roster refreshed, or their map would keep showing dots
     // for buddies who are no longer waiting.
     await this.broadcastWaiting()
     // The match now has a confirmation deadline of its own.
@@ -1489,7 +1489,7 @@ export class NuggPool extends DurableObject<Env> {
    * Look for a buddy for the buyers a teardown just put back in the queue.
    *
    * Until #160 nothing did. `findMatch` ran on `join` and nowhere else, so a
-   * requeued buyer was matchable only by the *next* person to join the cell —
+   * requeued buyer was matchable only by the *next* person to join the shard —
    * and honeypots made that the common case, in exactly the situation the
    * fallback rule exists to protect: two buyers arriving into an empty market a
    * few seconds apart are each paired with a decoy, because the first is already
@@ -2056,8 +2056,8 @@ export class NuggPool extends DurableObject<Env> {
    * the chokepoint, where `holdsCollectedMoney` is also checked.
    *
    * The D1 write happens before the record is deleted, for the same reason
-   * `persistTerminal` runs before its delete — a tombstone lives in one cell's
-   * storage, and no query can reach across cells to find it.
+   * `persistTerminal` runs before its delete — a tombstone lives in one shard's
+   * storage, and no query can reach across shards to find it.
    */
   private async retireMatch(
     matchId: string,
@@ -2089,7 +2089,7 @@ export class NuggPool extends DurableObject<Env> {
    * the processor refused must not also cost two buyers the teardown that tells
    * them what happened. What is emphatically *not* swallowed is the record of
    * it — the row is parked under `PENDING_HOLD_PREFIX` and replayed off the
-   * next alarm, because until D1 has it the only trace that this cell is
+   * next alarm, because until D1 has it the only trace that this shard is
    * sitting on somebody's money is this one object's storage, which no operator
    * can enumerate.
    */
@@ -2111,7 +2111,7 @@ export class NuggPool extends DurableObject<Env> {
    * one reason: a hold is filed for a match whose status is still `pending`,
    * and that reconciliation deliberately skips those. Opportunistic rather than
    * scheduled, for the same reason — nobody is waiting on it, and an alarm
-   * armed for the retry itself would keep waking a cell on a permanent failure
+   * armed for the retry itself would keep waking a shard on a permanent failure
    * with nothing new to try.
    */
   private async reconcileHolds(): Promise<void> {
@@ -2120,14 +2120,14 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
-   * Clear decoys and their cooldowns off this cell.
+   * Clear decoys and their cooldowns off this shard.
    *
    * `liveHoneypots` prunes what has expired on every read, which covers the
    * feature while it is *on*. This covers the two cases that read does not: a
    * deployment where it was turned off (where the read deliberately never
    * touches storage, so nothing would ever be pruned), and cooldown keys, which
    * no roster read looks at. Opportunistic rather than scheduled, like the
-   * tombstone sweep — nobody is waiting on it, and a cell with nothing but
+   * tombstone sweep — nobody is waiting on it, and a shard with nothing but
    * decoys in it arms no alarm and needs none.
    */
   private async sweepHoneypots(now: number): Promise<void> {
@@ -2142,7 +2142,7 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
-   * Try a refund this cell already failed to make, at an operator's asking.
+   * Try a refund this shard already failed to make, at an operator's asking.
    *
    * Everything about *which* money is owed comes off the tombstone, not the
    * request: the only thing crossing this boundary is which match, because
@@ -2160,7 +2160,7 @@ export class NuggPool extends DurableObject<Env> {
     const key = `${TOMBSTONE_PREFIX}${ask.matchId}`
     const tombstone = await this.ctx.storage.get<PaymentTombstone>(key)
     // Nothing left to hand back: a late webhook already answered for it, or
-    // this cell never had it. Not a failure — the hold is simply over, and
+    // this shard never had it. Not a failure — the hold is simply over, and
     // saying so is what lets the caller close the row.
     if (tombstone === undefined) return Response.json({ ok: true, refundedCents: 0, heldCents: 0 })
 
@@ -2245,7 +2245,7 @@ export class NuggPool extends DurableObject<Env> {
     return refunded
   }
 
-  /** Seat a buyer in the queue, alive as of now, and arm the cell's alarm. */
+  /** Seat a buyer in the queue, alive as of now, and arm the shard's alarm. */
   private async enqueue(ws: WebSocket, identity: BuyerIdentity): Promise<void> {
     const waiting: WaitingState = {
       ...identity,
@@ -2385,7 +2385,7 @@ export class NuggPool extends DurableObject<Env> {
       // Free to queue for the next box.
       this.setState(peer.ws, principalOf(peer.state))
     }
-    // Only once the row exists somewhere that outlives this cell. A settled
+    // Only once the row exists somewhere that outlives this shard. A settled
     // split that is still only in Durable Object storage is the one thing this
     // object is not allowed to lose, so a failed write keeps the record and
     // `reconcileTerminal` retries it.
@@ -2399,7 +2399,7 @@ export class NuggPool extends DurableObject<Env> {
    * Nothing is written to the settled ledger: a split where one buddy says the
    * handoff happened and the other says nothing is not revenue. It is filed in
    * `disputes` instead — a queue for a human, not a report — because the state
-   * this used to leave behind was a dead end: a record in one cell's storage
+   * this used to leave behind was a dead end: a record in one shard's storage
    * that nobody could see and neither buyer could be made whole from.
    *
    * Callers re-arm the alarm afterwards.
@@ -2559,7 +2559,7 @@ export class NuggPool extends DurableObject<Env> {
     if (state.status !== 'matched') {
       // A waiting buyer who simply closed the tab still needs to fall out of
       // everyone else's roster — and may have been the last thing keeping this
-      // cell's alarm armed.
+      // shard's alarm armed.
       if (state.status === 'waiting') {
         await this.broadcastWaiting()
         await this.scheduleSweep()
@@ -2734,7 +2734,7 @@ export class NuggPool extends DurableObject<Env> {
    *
    * A tombstone still holding collected cents is never dropped: that one is the
    * record of money this pool failed to hand back, and deleting it would lose the
-   * only trace of it. Opportunistic rather than scheduled — a cell with nothing
+   * only trace of it. Opportunistic rather than scheduled — a shard with nothing
    * but a tombstone arms no alarm, and does not need to: there is nothing due.
    */
   private async sweepTombstones(now: number): Promise<void> {
@@ -2779,8 +2779,8 @@ export class NuggPool extends DurableObject<Env> {
   }
 
   /**
-   * Re-arm the cell's single alarm at the earliest of everything outstanding —
-   * and delete it when nothing is, so a cell nobody is using is never woken to
+   * Re-arm the shard's single alarm at the earliest of everything outstanding —
+   * and delete it when nothing is, so a shard nobody is using is never woken to
    * do nothing.
    *
    * The two match deadlines are computed from disjoint sets and that is what
@@ -2858,7 +2858,7 @@ export class NuggPool extends DurableObject<Env> {
    *
    * The decoy roster is read once for the whole broadcast rather than once per
    * recipient — a decoy has no socket, so its state lives in storage, and a
-   * `list()` per recipient would make a busy cell quadratic in its own queue.
+   * `list()` per recipient would make a busy shard quadratic in its own queue.
    * It costs nothing at all when the feature is off.
    */
   private async broadcastWaiting(): Promise<void> {
@@ -2917,7 +2917,7 @@ function livenessOf(state: WaitingState): QueueEntry {
  * expiring it here instead would erase a buddy's claim that the nuggets changed
  * hands, which is the one thing the handshake exists to prevent. A match nobody
  * has confirmed has no dispute deadline at all — `disputeDeadline` returns null
- * for it — so without this sweep it would sit in the cell forever.
+ * for it — so without this sweep it would sit in the shard forever.
  */
 function expirableMatches(records: Iterable<MatchRecord>): OpenMatch[] {
   const out: OpenMatch[] = []

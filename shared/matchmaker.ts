@@ -57,7 +57,7 @@ interface Eligible {
  * served — except that anyone who joined within `tiebreakWindowMs` *of that
  * longest waiter* counts as being at the front with them, and among the front the
  * better standing goes first. Equal standing falls straight back to who waited
- * longer, so a cell where nothing is known about anybody behaves exactly as it
+ * longer, so a shard where nothing is known about anybody behaves exactly as it
  * did before standing existed.
  *
  * **The queue stays starvation-free**, and the window is the reason. It is
@@ -115,7 +115,7 @@ export function findMatch(
 
   // A negative or malformed window collapses to pure first-come-first-served
   // rather than throwing: this figure is a Worker var, and a typo in it must not
-  // take a cell's matching down.
+  // take a shard's matching down.
   const window = Number.isFinite(tiebreakWindowMs) ? Math.max(0, tiebreakWindowMs) : 0
   const cutoff = front.candidate.joinedAt + window
 

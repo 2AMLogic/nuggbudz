@@ -4,7 +4,7 @@
  * `shared/honeypot.ts` owns what a decoy *is* and what counts as a signal; this
  * owns where a signal lives. The split is the same one `worker/reputation.ts`
  * makes, and for the same reason: the Durable Object is the only thing that sees
- * the behaviour, and D1 is the only thing that remembers it after the cell is
+ * the behaviour, and D1 is the only thing that remembers it after the shard is
  * evicted.
  *
  * **A signal carries no chat content.** Which match, which decoy, which caller,

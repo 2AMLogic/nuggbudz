@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { findDeal } from '../shared/deals'
 import { settle } from '../shared/economics'
 import { honeypotUserId } from '../shared/honeypot'
+import type { Env } from '../worker/env'
+import app from '../worker/index'
 import {
   allLegsPaid,
   applyPaymentOutcome,
@@ -12,6 +14,8 @@ import {
   openLedger,
   type PaymentLedger,
   type PaymentLeg,
+  type PaymentTombstone,
+  parsePaymentEventReport,
   parsePaymentOutcome,
   paymentDisposition,
   paymentIntentSpecs,
@@ -20,7 +24,9 @@ import {
   retainedFeeCents,
   retireLedger,
   serverPaymentMode,
+  totalCents,
 } from '../worker/lib/payments'
+import { NuggPool } from '../worker/pool'
 import poolSource from '../worker/pool.ts?raw'
 
 const RETIRED_AT = 1_700_000_000_000
@@ -531,6 +537,345 @@ describe('the late-refund path stays reachable from worker/pool.ts', () => {
     expect(body).not.toContain('releasePickupCode')
     expect(body).not.toContain('pickupCode')
     expect(body).not.toContain('matchSockets')
+  })
+})
+
+/**
+ * What the money did, as seen from outside the Durable Object.
+ *
+ * Driven through the real `/api/stripe/webhook` route — signature verification,
+ * `parsePaymentEvent`, the stub Durable Object namespace, `NuggPool.fetch`, and
+ * back out as the HTTP body Stripe's delivery receives. Calling the reducer and
+ * asserting its `refundedCents` is exactly the test that was already green while
+ * no caller could reach the branch (#19), so it is the route that is asserted
+ * here and nothing else.
+ *
+ * A tombstone lives in one cell's storage and there is no registry of live cells,
+ * so this response is the only place a late refund's outcome is observable at
+ * all: a refund Stripe confirmed and a refund Stripe refused used to be the same
+ * `{ ok: true, handled: true }`.
+ */
+describe('POST /api/stripe/webhook reports what happened to late money', () => {
+  const WEBHOOK_SECRET = 'whsec_issue_95'
+  // Never reached: the refund call is a stubbed global `fetch`. Set so the pool
+  // believes Stripe is configured and actually attempts one.
+  const STRIPE_API_BASE = 'https://stripe.invalid/v1'
+  const RECEIVER_SHARE = settle(DEAL, 2).shares[1].payCents
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /**
+   * Stripe's `/refunds`, answering however the case under test needs it to, and
+   * recording which intent was asked about at which endpoint — a refund nobody
+   * asked for and a refund asked for at the wrong URL both read as "held".
+   */
+  function stubStripe(status: number) {
+    const asked: string[] = []
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      const intent = new URLSearchParams(String(init?.body)).get('payment_intent')
+      asked.push(`${String(url)} ${intent}`)
+      const body = status === 200 ? { id: 're_1' } : { error: { message: 'no' } }
+      return Response.json(body, { status })
+    }) as unknown as typeof fetch
+    vi.stubGlobal('fetch', fetchImpl)
+    return asked
+  }
+
+  /**
+   * A cell holding whatever this match left behind, behind the Durable Object
+   * namespace the route resolves `cell` through. The real pool class, not a
+   * stand-in for it — the storage `Map` is the only stub, and nothing asserts
+   * about the `Map` itself beyond how many of this match's keys survive.
+   */
+  function poolEnv(seed: Array<[string, unknown]>) {
+    const cell = new Map<string, unknown>(seed)
+    const ctx = {
+      getWebSockets: () => [],
+      storage: {
+        get: async (key: string) => cell.get(key),
+        put: async (key: string, value: unknown) => void cell.set(key, value),
+        delete: async (key: string) => cell.delete(key),
+        list: async ({ prefix }: { prefix: string }) =>
+          new Map([...cell].filter(([key]) => key.startsWith(prefix))),
+        getAlarm: async () => null,
+        setAlarm: async () => {},
+        deleteAlarm: async () => {},
+      },
+    }
+    const secrets = {
+      STRIPE_SECRET_KEY: 'sk_test_issue_95',
+      STRIPE_WEBHOOK_SECRET: WEBHOOK_SECRET,
+      STRIPE_API_BASE,
+    }
+    const pool = new NuggPool(ctx as unknown as DurableObjectState, secrets as unknown as Env)
+    return {
+      cell,
+      env: { ...secrets, NUGG_POOL: { idFromName: (name: string) => name, get: () => pool } },
+    }
+  }
+
+  async function signature(payload: string): Promise<string> {
+    const timestamp = Math.floor(Date.now() / 1000)
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(WEBHOOK_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    )
+    const digest = await crypto.subtle.sign(
+      'HMAC',
+      key,
+      new TextEncoder().encode(`${timestamp}.${payload}`),
+    )
+    const hex = Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+    return `t=${timestamp},v1=${hex}`
+  }
+
+  /** The receiver's card clearing behind 3DS, against a match that is gone. */
+  async function deliverReceiverSuccess(env: Record<string, unknown>) {
+    const payload = JSON.stringify({
+      id: 'evt_late_success',
+      type: 'payment_intent.succeeded',
+      data: {
+        object: {
+          id: 'pi_receiver',
+          amount: RECEIVER_SHARE,
+          metadata: { match_id: MATCH_ID, role: 'receiver', cell: CELL },
+        },
+      },
+    })
+    const response = await app.request(
+      new Request('http://localhost/api/stripe/webhook', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Stripe-Signature': await signature(payload),
+        },
+        body: payload,
+      }),
+      undefined,
+      env,
+    )
+    return { status: response.status, body: (await response.json()) as Record<string, unknown> }
+  }
+
+  /** The orderer declined, the match was torn down, the receiver is still open. */
+  function afterDecline(): PaymentTombstone {
+    const base = ledger()
+    const legs = base.legs.map((leg) =>
+      leg.role === 'orderer' ? { ...leg, status: 'failed' as const } : leg,
+    )
+    const tombstone = retireLedger({ ...base, legs }, RETIRED_AT)
+    if (tombstone === null) throw new Error('fixture: expected a tombstone worth keeping')
+    return tombstone
+  }
+
+  /** The ordinary late path: the record is gone and only its money is left. */
+  function tombstoned(): Array<[string, unknown]> {
+    return [[`paytomb:${MATCH_ID}`, afterDecline()]]
+  }
+
+  /**
+   * The *other* late path: a live `match:` record whose ledger is already closed.
+   *
+   * `retireMatch` writes the tombstone and deletes the record in one tick, so
+   * this shape should not exist — which is exactly why its branch needs driving
+   * from outside. Only `ledger` is read on it (`handlePaymentEvent` refunds and
+   * writes `{ ...record, ledger }` back), so the rest of a `MatchRecord` is
+   * deliberately absent rather than faked: a field this fixture invented would be
+   * a field the test could start asserting about.
+   */
+  function liveRecordAlreadyClosed(): Array<[string, unknown]> {
+    return [[`match:${MATCH_ID}`, { matchId: MATCH_ID, ledger: afterDecline().ledger }]]
+  }
+
+  it('says the money went back, and how much, when Stripe confirms the refund', async () => {
+    const asked = stubStripe(200)
+    const { env, cell } = poolEnv(tombstoned())
+
+    const { status, body } = await deliverReceiverSuccess(env)
+
+    expect(status).toBe(200)
+    expect(body).toEqual({
+      ok: true,
+      handled: true,
+      effect: 'late_refund',
+      late: true,
+      refundedCents: RECEIVER_SHARE,
+      heldCents: 0,
+    })
+    expect(asked).toEqual([`${STRIPE_API_BASE}/refunds pi_receiver`])
+    // Nothing left to land and nothing left owed, so the tombstone is gone.
+    expect(cell.size).toBe(0)
+  })
+
+  it('says the money is held, and how much, when Stripe refuses the refund', async () => {
+    const asked = stubStripe(500)
+    const { env, cell } = poolEnv(tombstoned())
+
+    const { status, body } = await deliverReceiverSuccess(env)
+
+    // The distinction this whole route change exists for: same effect, same 200,
+    // and the only difference is which of the two figures carries the money.
+    expect(status).toBe(200)
+    expect(body).toEqual({
+      ok: true,
+      handled: true,
+      effect: 'late_refund',
+      late: true,
+      refundedCents: 0,
+      heldCents: RECEIVER_SHARE,
+    })
+    expect(asked).toEqual([`${STRIPE_API_BASE}/refunds pi_receiver`])
+    // And the money is still remembered, so a retry has something to ask about.
+    expect(cell.size).toBe(1)
+  })
+
+  it('never reports a refund it only attempted', async () => {
+    // The rule #19 established for what a buyer is told, restated one layer out:
+    // the figure comes from the legs Stripe answered for, so a refund call that
+    // threw before any answer reports nothing refunded rather than the amount.
+    vi.stubGlobal('fetch', (() => Promise.reject(new TypeError('network down'))) as typeof fetch)
+    const { env } = poolEnv(tombstoned())
+
+    const { body } = await deliverReceiverSuccess(env)
+
+    expect(body.refundedCents).toBe(0)
+    expect(body.heldCents).toBe(RECEIVER_SHARE)
+  })
+
+  it('reports a live record whose ledger is closed exactly as a tombstone', async () => {
+    // The two late-refund branches are a different handler each, and before this
+    // the live-record one answered `{ ok, effect }` with no money on it at all.
+    // Asserted against the tombstone answer rather than against a literal, so the
+    // two cannot drift apart again without this failing.
+    const viaTombstone = await (async () => {
+      stubStripe(500)
+      const { body } = await deliverReceiverSuccess(poolEnv(tombstoned()).env)
+      vi.unstubAllGlobals()
+      return body
+    })()
+
+    stubStripe(500)
+    const { env, cell } = poolEnv(liveRecordAlreadyClosed())
+    const { status, body } = await deliverReceiverSuccess(env)
+
+    expect(status).toBe(200)
+    expect(body).toEqual(viaTombstone)
+    expect(body.heldCents).toBe(RECEIVER_SHARE)
+    // The record is still the record — this handler refunds, it never retires.
+    expect([...cell.keys()]).toEqual([`match:${MATCH_ID}`])
+  })
+
+  it('carries no money figures for a live match, and says so with late: false', async () => {
+    // The other half of the unification: a live leg's money is reported to the
+    // two buyers over their own sockets, so repeating an amount here would be a
+    // second channel for it. `late: false` is what tells a reader that the
+    // absence is deliberate rather than the old flat acknowledgement.
+    const asked = stubStripe(200)
+    const { env } = poolEnv([[`match:${MATCH_ID}`, { matchId: MATCH_ID, ledger: ledger() }]])
+
+    const { status, body } = await deliverReceiverSuccess(env)
+
+    expect(status).toBe(200)
+    expect(body).toEqual({ ok: true, handled: true, effect: 'pending', late: false })
+    // Nothing was refunded, because nothing is over.
+    expect(asked).toEqual([])
+  })
+
+  it('tells a late event for a match this pool never had apart from a refund', async () => {
+    stubStripe(200)
+    const { env } = poolEnv([])
+
+    const { status, body } = await deliverReceiverSuccess(env)
+
+    expect(status).toBe(200)
+    expect(body).toEqual({
+      ok: true,
+      handled: true,
+      effect: 'unknown_match',
+      late: true,
+      refundedCents: 0,
+      heldCents: 0,
+    })
+  })
+
+  it('falls back to a plain acknowledgement when the pool answers unreadably', async () => {
+    stubStripe(200)
+    const { env } = poolEnv([])
+    // A late answer missing half its money is the ambiguity the report exists to
+    // remove, so the route must not repeat it.
+    const unreadable = () => Response.json({ ok: true, effect: 'late_refund', late: true })
+    const broken = {
+      ...env,
+      NUGG_POOL: { idFromName: () => 'x', get: () => ({ fetch: unreadable }) },
+    }
+
+    const { status, body } = await deliverReceiverSuccess(
+      broken as unknown as Record<string, unknown>,
+    )
+
+    // A 200 with no money figures is the honest answer to a body the route
+    // cannot read — never half a report, and never a fabricated zero.
+    expect(status).toBe(200)
+    expect(body).toEqual({ ok: true, handled: true })
+  })
+})
+
+describe('totalCents', () => {
+  it('sums both roles, where centsFor answers for one', () => {
+    const settlement = settle(DEAL, 2)
+    expect(totalCents(ledger().legs)).toBe(settlement.totalCollectedCents)
+    expect(totalCents([])).toBe(0)
+  })
+})
+
+describe('parsePaymentEventReport', () => {
+  it('reads back every answer the pool can give', () => {
+    expect(parsePaymentEventReport({ ok: true, effect: 'cleared', late: false })).toEqual({
+      effect: 'cleared',
+      late: false,
+    })
+    expect(
+      parsePaymentEventReport({
+        ok: true,
+        effect: 'late_refund',
+        late: true,
+        refundedCents: 449,
+        heldCents: 0,
+      }),
+    ).toEqual({ effect: 'late_refund', late: true, refundedCents: 449, heldCents: 0 })
+  })
+
+  it('refuses a late answer missing either half of the money', () => {
+    // Half a report is the ambiguity the report exists to remove: a caller that
+    // read `refundedCents` off one and nothing off the other would be guessing.
+    for (const partial of [
+      { effect: 'late_refund', late: true, refundedCents: 449 },
+      { effect: 'late_refund', late: true, heldCents: 449 },
+      { effect: 'late_refund', late: true, refundedCents: 449, heldCents: null },
+      { effect: 'late_refund', late: true, refundedCents: 4.49, heldCents: 0 },
+      { effect: 'late_refund', late: true, refundedCents: -449, heldCents: 0 },
+    ]) {
+      expect(parsePaymentEventReport(partial)).toBeNull()
+    }
+  })
+
+  it('refuses an effect it does not know, including one off the prototype', () => {
+    for (const effect of ['refunded', '', 'constructor', 'toString', '__proto__', 7]) {
+      expect(parsePaymentEventReport({ effect, late: false })).toBeNull()
+    }
+  })
+
+  it('refuses anything not shaped like an answer at all', () => {
+    for (const bad of [null, undefined, 'late_refund', [], { effect: 'cleared' }]) {
+      expect(parsePaymentEventReport(bad)).toBeNull()
+    }
   })
 })
 

@@ -115,7 +115,28 @@ export type LegStatus = 'pending' | 'succeeded' | 'failed' | 'refunded'
 export interface PaymentLeg {
   role: BuyerRole
   paymentIntentId: string
-  /** Copied from `share.payCents`, never recomputed. */
+  /**
+   * Copied from `share.payCents`, never recomputed.
+   *
+   * A ledger figure, not a gate: `collectedCents`, `centsFor` and `totalCents`
+   * read it to say what is held and what was handed back, and that is the whole
+   * of its job. **`applyPaymentOutcome` deliberately does not consult it** — the
+   * reducer decides from `status` and `closedAt` alone, and a leg is found by
+   * role and `paymentIntentId`. Two reasons it stays that way, and the field is
+   * documented rather than validated on their account (#95):
+   *
+   * 1. It cannot disagree with the settlement. `openLedger` writes every leg
+   *    from `settlement.shares` in one expression and `divideCents` guarantees
+   *    those shares sum back to `totalCollectedCents` exactly, so comparing the
+   *    two here would assert a tautology rather than catch anything.
+   * 2. It could disagree with *Stripe* — `StripePaymentEvent.amountCents` is
+   *    parsed and then dropped on the way into `PaymentOutcomeRequest` — but a
+   *    reducer could not act on that either. By the time a
+   *    `payment_intent.succeeded` arrives the money is already collected, so
+   *    refusing to fold the leg in would strand it uncollected *and*
+   *    unrefunded, which is strictly worse than recording it and letting the
+   *    teardown paths hand it back.
+   */
   amountCents: number
   status: LegStatus
 }
@@ -222,6 +243,82 @@ export interface PaymentTransition {
   effect: PaymentEffect
 }
 
+/**
+ * What a payment event resolved to, as the Durable Object reports it.
+ *
+ * `unknown_match` is the one answer no `PaymentEffect` can produce: it is the
+ * pool having neither a record nor a tombstone for the match, which is a
+ * decision about routing rather than about money.
+ */
+export type PaymentEventEffect = PaymentEffect['kind'] | 'unknown_match'
+
+/**
+ * A map rather than a list so a new `PaymentEffect` kind fails `tsc` here,
+ * instead of being silently refused by the parser below and reported to Stripe
+ * as an unreadable answer.
+ */
+const PAYMENT_EVENT_EFFECTS: Record<PaymentEventEffect, true> = {
+  noop: true,
+  pending: true,
+  cleared: true,
+  unwind: true,
+  late_refund: true,
+  unknown_match: true,
+}
+
+/**
+ * What the pool did about one payment result, on its way back out to the
+ * webhook's caller.
+ *
+ * The late paths are the reason this exists. A leg that clears after its match
+ * died is refunded by a tombstone nobody can enumerate — there is no registry of
+ * live cells — so the webhook's own answer is the only place that outcome is
+ * visible from outside the Durable Object. It used to be a flat
+ * `{ ok, handled: true }`, which made "the money went back" and "Stripe refused
+ * the refund and we are sitting on it" the same 200.
+ */
+export interface PaymentEventReport {
+  effect: PaymentEventEffect
+  /**
+   * Money for a match that is already over, rather than money folded into a live
+   * one. Every late answer carries `refundedCents` and `heldCents`; a live answer
+   * carries neither, because a live teardown reports its money to the two buyers
+   * over their own sockets and there is nobody left to tell on a late one.
+   */
+  late: boolean
+  /** Late answers only. Summed from the legs Stripe *confirmed* a refund for. */
+  refundedCents?: number
+  /** Late answers only. Still collected once those confirmed refunds landed. */
+  heldCents?: number
+}
+
+/**
+ * Narrow the pool's answer before the Worker repeats it to Stripe.
+ *
+ * Validated rather than cast for the same reason `parsePaymentOutcome` validates
+ * the other direction: this crosses a request boundary, and a shape the route
+ * cannot read must become a plain acknowledgement rather than a 200 carrying
+ * half a money figure.
+ */
+export function parsePaymentEventReport(payload: unknown): PaymentEventReport | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const { effect, late, refundedCents, heldCents } = payload as Record<string, unknown>
+  if (typeof effect !== 'string' || !Object.hasOwn(PAYMENT_EVENT_EFFECTS, effect)) return null
+  if (typeof late !== 'boolean') return null
+  const kind = effect as PaymentEventEffect
+  if (!late) return { effect: kind, late: false }
+  // A late answer without both halves of the money is the ambiguity this report
+  // exists to remove, so it is not a late answer at all.
+  if (!Number.isInteger(refundedCents) || !Number.isInteger(heldCents)) return null
+  if ((refundedCents as number) < 0 || (heldCents as number) < 0) return null
+  return {
+    effect: kind,
+    late: true,
+    refundedCents: refundedCents as number,
+    heldCents: heldCents as number,
+  }
+}
+
 function roleOf(index: number): BuyerRole {
   return index === 0 ? 'orderer' : 'receiver'
 }
@@ -313,6 +410,9 @@ export function allLegsPaid(ledger: PaymentLedger): boolean {
  * finds its leg already final and yields a `noop`, so a duplicate
  * `payment_intent.succeeded` cannot clear a match twice or a duplicate failure
  * refund twice.
+ *
+ * A leg is identified by role *and* `paymentIntentId`, and never by amount —
+ * see `PaymentLeg.amountCents` for why this reducer does not consult it.
  */
 export function applyPaymentOutcome(
   ledger: PaymentLedger,
@@ -442,6 +542,17 @@ export function markRefunded(ledger: PaymentLedger, refunded: PaymentLeg[]): Pay
       ids.has(leg.paymentIntentId) ? { ...leg, status: 'refunded' } : leg,
     ),
   }
+}
+
+/**
+ * The sum of a set of legs, in cents — both roles together.
+ *
+ * The operator's view, where `centsFor` below is a buyer's: a late refund has no
+ * sockets left to report per-role amounts to, and what an operator has to know
+ * is how much of the match went back in total.
+ */
+export function totalCents(legs: PaymentLeg[]): number {
+  return legs.reduce((sum, leg) => sum + leg.amountCents, 0)
 }
 
 /** The sum of one role's share across a set of legs, in cents. */

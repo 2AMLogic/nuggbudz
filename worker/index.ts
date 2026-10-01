@@ -25,7 +25,11 @@ import { brandForMerchant, type NearbyStores, storesWithin } from '../shared/sto
 import { adminRoutes } from './admin'
 import { authRoutes, sessionFromRequest } from './auth'
 import { boolVar, type Env, intVar, stripeConfigured } from './env'
-import { type PaymentOutcomeRequest, serverPaymentMode } from './lib/payments'
+import {
+  type PaymentOutcomeRequest,
+  parsePaymentEventReport,
+  serverPaymentMode,
+} from './lib/payments'
 import { lookupStores } from './lib/stores'
 import { parsePaymentEvent, verifyStripeSignature } from './lib/stripe'
 import { INTERNAL_PAYMENT_PATH } from './pool'
@@ -447,7 +451,16 @@ app.post('/api/stripe/webhook', async (c) => {
     }),
   )
   if (!response.ok) return c.json({ error: 'pool rejected the payment event' }, 500)
-  return c.json({ ok: true, handled: true })
+
+  // The pool's own answer, repeated rather than discarded. A leg that clears
+  // after its match died is refunded off a tombstone in one cell's storage, and
+  // there is no registry of live cells to ask afterwards — so this response is
+  // the only place that outcome is visible from outside the Durable Object, and
+  // a flat `{ ok, handled: true }` made "the money went back" and "Stripe
+  // refused the refund and we are holding it" the same 200.
+  const report = parsePaymentEventReport(await response.json().catch(() => null))
+  if (report === null) return c.json({ ok: true, handled: true })
+  return c.json({ ok: true, handled: true, ...report })
 })
 
 app.all('/api/*', (c) => c.json({ error: 'not found' }, 404))

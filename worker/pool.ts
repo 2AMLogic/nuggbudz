@@ -72,6 +72,8 @@ import {
   markRefunded,
   openLedger,
   type PaymentDisposition,
+  type PaymentEventEffect,
+  type PaymentEventReport,
   type PaymentLedger,
   type PaymentLeg,
   type PaymentOutcomeRequest,
@@ -82,6 +84,7 @@ import {
   refundableLegs,
   refundIdempotencyKey,
   retireLedger,
+  totalCents,
 } from './lib/payments'
 import { createPaymentIntent, refundPaymentIntent, type StripeClientConfig } from './lib/stripe'
 import { type ReputationUpdate, readStandings, recordReputation } from './reputation'
@@ -346,6 +349,31 @@ function heldMatchFrom(
     heldCents: collectedCents(tombstone.ledger),
     names: { orderer: record.orderer.name, receiver: record.receiver.name },
     userIds: { orderer: record.orderer.userId, receiver: record.receiver.userId },
+  }
+}
+
+/**
+ * What a late refund tells the webhook, in one place.
+ *
+ * There are two of these paths — a tombstone, and the defensive live record whose
+ * ledger is already closed — and before this they answered in two shapes, one of
+ * them carrying no money figures at all. The same money described two ways is how
+ * an operator reads a refund Stripe refused as one it accepted.
+ *
+ * `refundedCents` is summed from the legs `settleRefunds` saw Stripe *confirm*,
+ * never the legs it asked about, and `heldCents` is what is still collected after
+ * those landed — the same pair, and the same rule, a buyer is told on every other
+ * teardown.
+ */
+function lateReport(
+  effect: PaymentEventEffect,
+  settled: { ledger: PaymentLedger; refunded: PaymentLeg[] },
+): PaymentEventReport {
+  return {
+    effect,
+    late: true,
+    refundedCents: totalCents(settled.refunded),
+    heldCents: collectedCents(settled.ledger),
   }
 }
 
@@ -1912,13 +1940,18 @@ export class NuggPool extends DurableObject<Env> {
           ...record,
           ledger: settled.ledger,
         })
-        break
+        // Answered here rather than at the bottom, so this reports exactly what
+        // the tombstone path reports for the same money.
+        return Response.json({ ok: true, ...lateReport('late_refund', settled) })
       }
       default:
         break
     }
 
-    return Response.json({ ok: true, effect: effect.kind })
+    // Live money: the two buyers are told what happened to it over their own
+    // sockets, so there is no amount to repeat here.
+    const live: PaymentEventReport = { effect: effect.kind, late: false }
+    return Response.json({ ok: true, ...live })
   }
 
   /**
@@ -1941,7 +1974,15 @@ export class NuggPool extends DurableObject<Env> {
     if (tombstone === undefined) {
       // Already settled, never ours, or a match that owed nothing when it died.
       // Acknowledge so Stripe stops retrying a delivery nobody is waiting for.
-      return Response.json({ ok: true, effect: 'unknown_match' })
+      // Still a late answer, with both figures at zero: this pool holds none of
+      // this match's money, which is a different statement from not saying.
+      const nothing: PaymentEventReport = {
+        effect: 'unknown_match',
+        late: true,
+        refundedCents: 0,
+        heldCents: 0,
+      }
+      return Response.json({ ok: true, ...nothing })
     }
 
     const { ledger, effect } = applyPaymentOutcome(tombstone.ledger, outcome)
@@ -1952,13 +1993,7 @@ export class NuggPool extends DurableObject<Env> {
     if (next === null) await this.ctx.storage.delete(key)
     else await this.ctx.storage.put<PaymentTombstone>(key, next)
 
-    return Response.json({
-      ok: true,
-      effect: effect.kind,
-      late: true,
-      refundedCents: settled.refunded.reduce((sum, leg) => sum + leg.amountCents, 0),
-      heldCents: collectedCents(settled.ledger),
-    })
+    return Response.json({ ok: true, ...lateReport(effect.kind, settled) })
   }
 
   /**
@@ -2172,7 +2207,7 @@ export class NuggPool extends DurableObject<Env> {
 
     return Response.json({
       ok: true,
-      refundedCents: settled.refunded.reduce((sum, leg) => sum + leg.amountCents, 0),
+      refundedCents: totalCents(settled.refunded),
       // What is still sitting in the account after this attempt. A refund
       // refused again leaves the figure where it was, and the row stays open.
       heldCents: collectedCents(settled.ledger),
@@ -2508,7 +2543,7 @@ export class NuggPool extends DurableObject<Env> {
 
     return Response.json({
       ok: true,
-      refundedCents: settled.refunded.reduce((sum, leg) => sum + leg.amountCents, 0),
+      refundedCents: totalCents(settled.refunded),
       // What is still sitting in the account after this: a refund Stripe refused
       // leaves money held, and saying so is the whole point of the distinction.
       heldCents: collectedCents(settled.ledger),
@@ -2517,7 +2552,7 @@ export class NuggPool extends DurableObject<Env> {
       // halves on purpose and owes nothing, and `refund_orderer` leaves the
       // receiver's half collected by design. Money this resolution promised to
       // hand back and Stripe would not — nothing else.
-      outstandingCents: settled.held.reduce((sum, leg) => sum + leg.amountCents, 0),
+      outstandingCents: totalCents(settled.held),
     })
   }
 

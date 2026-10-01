@@ -1,12 +1,11 @@
 import { describe, expect, it } from 'vitest'
-// The job graph, read as text: which job runs which lane, and in which step, is
-// the only thing isolating a scenario that has no coordinate to be far from.
-import ciWorkflow from '../.github/workflows/ci.yml?raw'
+import ciSource from '../.github/workflows/ci.yml?raw'
+import packageSource from '../package.json?raw'
+import playwrightSource from '../playwright.config.ts?raw'
 // scripts/pool-fixtures.mjs is a plain, side-effect-free data module — unlike
 // scripts/smoke.mjs itself, importing it does not dial a dev server.
 import {
   FIXTURE_COORDS,
-  LANES,
   MARKET_RELATIONS,
   MARKETS,
   MAX_MARKET_SPAN_METERS,
@@ -49,19 +48,11 @@ import { jobIds, jobSteps, stepInvokes } from './lib/ci-workflow'
  * exactly the reassuring-but-false green this file exists to prevent. So
  * **isolation is by distance**, derived from the fixture table and the repo's own
  * `distanceMeters` rather than from any hand-maintained list of expected cells.
- *
- * Issue #96 is the hole in that: a scenario whose sockets send no coordinates has
- * no fixture, so it was absent from every check here — and an absence is reported
- * as a pass. Those scenarios are isolated in time instead, by the CI job graph and
- * by whatever serializes the lane inside one job, and the last block of this file
- * derives that from `.github/workflows/ci.yml` rather than from a list of
- * scenarios somebody remembered to keep current.
  */
 
 const scenarioNames = Object.keys(SCENARIOS)
 const fixtureIds = Object.keys(FIXTURE_COORDS)
 const marketNames = Object.keys(MARKETS)
-const laneNames = Object.keys(LANES)
 
 /** Which market each fixture belongs to, read off the scenario table. */
 const marketOf = new Map<string, string>()
@@ -105,10 +96,7 @@ describe('the fixture table', () => {
       expect(marketNames, `${scenario} names unknown market '${spec.market}'`).toContain(
         spec.market,
       )
-      // Derived from LANES rather than restated as an enum here: the lane is what
-      // isolates a fixture-less scenario, and a lane with no entry there has no
-      // runner, no CI job and therefore no isolation story at all (#96).
-      expect(laneNames, `${scenario}.lane names a lane LANES does not declare`).toContain(spec.lane)
+      expect(['smoke', 'e2e', 'payments'], `${scenario}.lane`).toContain(spec.lane)
       expect(spec.what.length, `${scenario}.what should say what it proves`).toBeGreaterThan(20)
       for (const id of spec.fixtures) {
         const coord = FIXTURE_COORDS[id]
@@ -333,218 +321,6 @@ describe('the in-market relationships each scenario depends on', () => {
   })
 })
 
-/**
- * The scenarios distance cannot isolate, and the reason a vacuous pass is not a
- * pass (issue #96).
- *
- * Every check above iterates fixtures. A scenario whose sockets send no
- * coordinates has none — the server places them, on `DEMO_ORIGIN`, and nothing
- * can choose otherwise — so it appeared in none of those checks, and a check that
- * examined nothing is indistinguishable in the output from one that examined
- * something and found it correct. This repo has been bitten by exactly that
- * ambiguity before: a storage scan during #73's review reported a clean bill of
- * health on text that was provably on disk, and only its author mutation-testing
- * his own scan caught it.
- *
- * So these scenarios get the check that matches how they are *actually* kept
- * apart: in time, not in space. Two mechanisms, both derived here rather than
- * declared:
- *
- *  1. **The job graph.** Two different CI jobs are two machines with a `pnpm dev`
- *     each, and two steps of one job run in sequence. So two scenarios driven by
- *     different runner commands can never be live against one dev server — read
- *     out of `.github/workflows/ci.yml`, including that neither command is
- *     backgrounded, since a `&` would let one step outlive itself into the next.
- *  2. **The lane's own serializer**, for the only case the job graph cannot
- *     answer: several fixture-less scenarios driven by *one* runner. Today that is
- *     the `e2e` lane and `playwright.config.ts`'s `workers: 1`, and the claim is
- *     checked against that file's source — raise it to 2 and this block goes red
- *     rather than the isolation going quietly away.
- */
-describe('the scenarios the server places itself are isolated in time, not by distance', () => {
-  const ciJobs = jobIds(ciWorkflow)
-  /** Scenarios with no coordinate of their own — every distance check above skips these. */
-  const serverPlaced = scenarioNames.filter((name) => SCENARIOS[name].fixtures.length === 0)
-  const explicitlyPlaced = scenarioNames.filter((name) => SCENARIOS[name].fixtures.length > 0)
-
-  /** Steps of `job` that invoke `command`, by position, so sequence is readable. */
-  const stepsInvoking = (job: string, command: string): number[] =>
-    jobSteps(ciWorkflow, job).flatMap((step, index) => (stepInvokes(step, command) ? [index] : []))
-
-  const jobsInvoking = (command: string): string[] =>
-    ciJobs.filter((job) => stepsInvoking(job, command).length > 0)
-
-  /** The lane a scenario names, or a failure that says so rather than a TypeError. */
-  const laneOf = (scenario: string) => {
-    const name = SCENARIOS[scenario].lane
-    const lane = LANES[name]
-    if (lane === undefined) {
-      throw new Error(
-        `'${scenario}' is driven by lane '${name}', which LANES does not declare — so it has no ` +
-          'runner, no CI job and no stated isolation at all',
-      )
-    }
-    return lane
-  }
-
-  /** Source of a file at the repo root, which is where a lane's serializer lives. */
-  const rootSources = import.meta.glob('../*.ts', {
-    query: '?raw',
-    import: 'default',
-    eager: true,
-  }) as Record<string, string>
-  const rootSource = (file: string): string => {
-    const text = rootSources[`../${file}`]
-    if (text === undefined) {
-      throw new Error(
-        `cannot read '${file}', so the serializer claiming to live there cannot be checked. ` +
-          'A lane serializer must be a .ts file at the repo root; if that has to change, widen ' +
-          'the glob here rather than leaving the claim unverified.',
-      )
-    }
-    return text
-  }
-
-  it('has scenarios to check, so this block is not the vacuous pass it replaces', () => {
-    // If this ever reaches zero, delete this block — leaving it green would be the
-    // same defect one level up.
-    expect(
-      serverPlaced,
-      'no scenario has an empty `fixtures` list any more, so nothing here is being checked',
-    ).not.toEqual([])
-    expect([...serverPlaced, ...explicitlyPlaced].sort()).toEqual([...scenarioNames].sort())
-  })
-
-  it('reaches every scenario between them: by distance, or by lane, never neither', () => {
-    // The partition is the anti-vacuity property. A scenario is either measured
-    // above (it has fixtures, and `marketOf` carries every one of them) or named
-    // below (it has none, and its lane is its isolation).
-    for (const name of explicitlyPlaced) {
-      for (const id of SCENARIOS[name].fixtures) {
-        expect(marketOf.get(id), `fixture '${id}' of '${name}' is in no market`).toBe(
-          SCENARIOS[name].market,
-        )
-      }
-    }
-    expect(explicitlyPlaced.length + serverPlaced.length).toBe(scenarioNames.length)
-  })
-
-  it('keeps the server-resolved market and the fixture-less scenarios the same set', () => {
-    // Both directions matter. A fixture-less scenario in some other market would be
-    // claiming an isolation nobody checks, and an explicitly-placed fixture inside
-    // `serverResolved` would sit where every promptless socket lands — which the
-    // "clear of the demo origin" check above exempts by market, so it would pass.
-    for (const name of serverPlaced) {
-      expect(
-        SCENARIOS[name].market,
-        `'${name}' has no fixtures, so only the server can have placed it — that is the ` +
-          '`serverResolved` market, and declaring any other one claims a distance nothing measures',
-      ).toBe('serverResolved')
-    }
-    for (const name of explicitlyPlaced) {
-      expect(
-        SCENARIOS[name].market,
-        `'${name}' places its own fixtures inside the market reserved for sockets the server ` +
-          'places, where they would share a Durable Object with every promptless socket in the suite',
-      ).not.toBe('serverResolved')
-    }
-  })
-
-  it('declares exactly the lanes the scenario table uses, and no more', () => {
-    const used = [...new Set(scenarioNames.map((name) => SCENARIOS[name].lane))].sort()
-    expect(
-      [...laneNames].sort(),
-      'LANES and the scenario table disagree about which lanes exist. A lane in one and not the ' +
-        'other is either a scenario nothing runs or an isolation story for nothing.',
-    ).toEqual(used)
-  })
-
-  for (const [lane, spec] of Object.entries(LANES)) {
-    for (const runner of spec.runners) {
-      it(`'${lane}' is run by CI as '${runner}', in the foreground`, () => {
-        const jobs = jobsInvoking(runner)
-        expect(
-          jobs,
-          `no step in .github/workflows/ci.yml runs '${runner}'. The whole isolation argument ` +
-            'for a fixture-less scenario is which job and which step runs it, so a runner CI ' +
-            'does not invoke — renamed, dropped, or never wired — leaves that scenario isolated ' +
-            'by nothing.',
-        ).not.toEqual([])
-        for (const job of jobs) {
-          for (const step of jobSteps(ciWorkflow, job).filter((text) =>
-            stepInvokes(text, runner),
-          )) {
-            const backgrounded = step
-              .split('\n')
-              .some((line) => stepInvokes(line, runner) && /&\s*$/.test(line))
-            expect(
-              backgrounded,
-              `job '${job}' backgrounds '${runner}'. Steps run in sequence, which is what keeps ` +
-                'two lanes in one job out of each other’s market; a backgrounded one outlives ' +
-                'its own step and can be live during the next.',
-            ).toBe(false)
-          }
-        }
-      })
-    }
-  }
-
-  for (let x = 0; x < serverPlaced.length; x += 1) {
-    for (let y = x + 1; y < serverPlaced.length; y += 1) {
-      const a = serverPlaced[x]
-      const b = serverPlaced[y]
-      it(`'${a}' and '${b}' cannot be live against one dev server at the same time`, () => {
-        const laneA = SCENARIOS[a].lane
-        const laneB = SCENARIOS[b].lane
-
-        if (laneA === laneB) {
-          // One runner, one job, one dev server: the job graph has nothing to say,
-          // so the lane's own serializer is the entire argument.
-          const serializer = laneOf(a).serializer
-          expect(
-            serializer,
-            `'${a}' and '${b}' are both driven by the '${laneA}' lane, so CI cannot separate ` +
-              'them — they share a job, a dev server and the Durable Object on the demo origin. ' +
-              `Declare what serializes them in LANES.${laneA}.serializer in ` +
-              'scripts/pool-fixtures.mjs, or give one of them a runner of its own.',
-          ).not.toBeNull()
-          if (serializer === null) return
-          expect(serializer.why.length, `LANES.${laneA}.serializer.why`).toBeGreaterThan(20)
-          expect(
-            rootSource(serializer.file),
-            `LANES.${laneA}.serializer claims '${serializer.file}' contains ` +
-              `'${serializer.claim}', and it does not. That claim is the only thing standing ` +
-              `between '${a}' and '${b}' queueing buyers in the same Durable Object at once.`,
-          ).toContain(serializer.claim)
-          return
-        }
-
-        // Different lanes: different commands, and a command is a step. Two steps
-        // of one job run in sequence and two jobs are two machines, so the only
-        // way these could overlap is one step invoking both.
-        const runnersA = laneOf(a).runners
-        const runnersB = laneOf(b).runners
-        expect(
-          runnersA.filter((runner) => runnersB.includes(runner)),
-          `lanes '${laneA}' and '${laneB}' share a runner command, so "different lanes" is not ` +
-            'the separation it looks like',
-        ).toEqual([])
-        for (const job of ciJobs) {
-          const stepsA = new Set(runnersA.flatMap((runner) => stepsInvoking(job, runner)))
-          const stepsB = new Set(runnersB.flatMap((runner) => stepsInvoking(job, runner)))
-          if (stepsA.size === 0 || stepsB.size === 0) continue
-          const shared = [...stepsA].filter((step) => stepsB.has(step))
-          expect(
-            shared,
-            `one step of job '${job}' runs both the '${laneA}' and '${laneB}' lanes, so ` +
-              `'${a}' and '${b}' can be live against that job's one dev server together`,
-          ).toEqual([])
-        }
-      })
-    }
-  }
-})
-
 describe('the radius is configured in one place', () => {
   it('matches wrangler.jsonc to the default the code derives', () => {
     expect(Number(wranglerVar('MATCH_RADIUS_METERS'))).toBe(DEFAULT_MATCH_RADIUS_METERS)
@@ -602,5 +378,132 @@ describe('the radius is configured in one place', () => {
       .filter(([, text]) => text.includes('export const FIXTURE_COORDS'))
       .map(([path]) => path)
     expect(tables, 'more than one module exports a fixture coordinate table').toHaveLength(1)
+  })
+})
+
+/**
+ * The scenarios in `serverResolved` have `fixtures: []`, so every geometric check
+ * above has nothing to measure for them and passes without examining them. They
+ * are isolated by *where they run*, and that is what is asserted here, derived from
+ * the scenario table, package.json and the CI job definitions rather than from a
+ * list of which scenarios may share a runner.
+ *
+ * Two things the first version of this block could not see, both found by mutating
+ * the workflow rather than by reading it:
+ *
+ *  - **A renamed runner.** `\bpnpm demo-check\b` matches `pnpm demo-check-renamed`,
+ *    because `-` is a word boundary — so dropping a runner out of CI left this green
+ *    while the scenario it drives became isolated by nothing. `stepInvokes` in
+ *    `test/lib/ci-workflow.ts` requires the command to be *ended*, not merely begun.
+ *  - **A backgrounded runner.** "No job serves two runners" rests on steps running in
+ *    sequence. A `&` breaks that: the runner outlives its own step and is still live
+ *    when the next one starts. That is now asserted rather than assumed.
+ *
+ * The job graph is read through `test/lib/ci-workflow.ts`, which is also what
+ * `test/main-red-alert.test.ts` reads it with — one parser for this workflow, and a
+ * step-at-a-time one, so a command inside a multi-line `run: |` block is found and a
+ * command in a *comment* about a sibling job is not.
+ */
+describe('server-resolved scenarios are isolated by runner, not by distance', () => {
+  const resolved = Object.entries(SCENARIOS).filter(([, spec]) => spec.market === 'serverResolved')
+
+  const scripts = (JSON.parse(packageSource) as { scripts: Record<string, string> }).scripts
+
+  const ciJobs = jobIds(ciSource)
+
+  /** The steps of `job` that run `pnpm <script>` — one entry per step, in job order. */
+  const stepsRunning = (job: string, script: string): string[] =>
+    jobSteps(ciSource, job).filter((step) => stepInvokes(step, `pnpm ${script}`))
+
+  const jobsRunning = (script: string): string[] =>
+    ciJobs.filter((job) => stepsRunning(job, script).length > 0)
+
+  /** The script a server-resolved scenario names, or a failure that says it named none. */
+  const runnerOf = (name: string): string => {
+    const runner = SCENARIOS[name].runner
+    if (runner === undefined) {
+      throw new Error(`'${name}' is server-resolved and must say which script runs it`)
+    }
+    return runner
+  }
+
+  it('is not vacuous: there are server-resolved scenarios and CI jobs to read', () => {
+    expect(resolved.length).toBeGreaterThan(0)
+    expect(ciJobs.length).toBeGreaterThan(3)
+  })
+
+  it('covers every scenario the geometric checks cannot see, and only those', () => {
+    // An empty fixture list on any other market would escape both assertions.
+    for (const [name, spec] of Object.entries(SCENARIOS)) {
+      expect(
+        spec.fixtures.length === 0,
+        `${name} has ${spec.fixtures.length} fixtures on '${spec.market}': a scenario with no ` +
+          'fixtures is invisible to the distance checks and must be server-resolved',
+      ).toBe(spec.market === 'serverResolved')
+    }
+  })
+
+  for (const [name] of resolved) {
+    it(`${name} names a runner package.json defines and CI runs, in the foreground`, () => {
+      const runner = SCENARIOS[name].runner
+      expect(runner, `${name} is server-resolved and must say which script runs it`).toBeDefined()
+      if (runner === undefined) return
+      expect(Object.keys(scripts), `${name}.runner`).toContain(runner)
+      const jobs = jobsRunning(runner)
+      expect(
+        jobs,
+        `no CI job runs 'pnpm ${runner}', so ${name} is never exercised`,
+      ).not.toHaveLength(0)
+      for (const job of jobs) {
+        for (const step of stepsRunning(job, runner)) {
+          const backgrounded = step
+            .split('\n')
+            .some((line) => stepInvokes(line, `pnpm ${runner}`) && /&\s*$/.test(line))
+          expect(
+            backgrounded,
+            `job '${job}' backgrounds 'pnpm ${runner}'. "No job serves two runners" below rests ` +
+              'on steps running in sequence; a backgrounded runner outlives its own step and can ' +
+              'still be queueing buyers on the demo origin when the next step starts.',
+          ).toBe(false)
+        }
+      }
+    })
+  }
+
+  it('gives each runner jobs of its own, so no server process sees two runners', () => {
+    const owner = new Map<string, string>()
+    for (const [name] of resolved) {
+      const runner = runnerOf(name)
+      for (const job of jobsRunning(runner)) {
+        const other = owner.get(job)
+        expect(
+          other === undefined || other === runner,
+          `CI job '${job}' runs both 'pnpm ${other}' and 'pnpm ${runner}' (${name}); both put ` +
+            'promptless sockets in the same market on one server, and fixture distance cannot ' +
+            'separate them',
+        ).toBe(true)
+        owner.set(job, runner)
+      }
+    }
+  })
+
+  it('lets scenarios share a runner only when that runner is serial', () => {
+    const byRunner = new Map<string, string[]>()
+    for (const [name] of resolved) {
+      const runner = runnerOf(name)
+      byRunner.set(runner, [...(byRunner.get(runner) ?? []), name])
+    }
+    for (const [runner, names] of byRunner) {
+      if (names.length < 2) continue
+      const serial =
+        scripts[runner].startsWith('playwright test') &&
+        /^\s*workers:\s*1\s*,/m.test(playwrightSource) &&
+        !/fullyParallel:\s*true/.test(playwrightSource)
+      expect(
+        serial,
+        `${names.join(', ')} all run under 'pnpm ${runner}' and land in one market; that is only ` +
+          'safe when the runner executes one scenario at a time (Playwright with workers: 1)',
+      ).toBe(true)
+    }
   })
 })

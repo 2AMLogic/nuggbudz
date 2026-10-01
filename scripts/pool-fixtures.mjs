@@ -30,12 +30,6 @@
  * textually clean and green in `vitest`, then died at runtime in `pnpm smoke`
  * ("timed out waiting for waiting"). The catalogue is a product decision that
  * will keep changing; a hundred kilometres will not.
- *
- * The one market distance cannot reach (issue #96): a socket that sends no
- * coordinates is placed by the server, so every `serverResolved` scenario shares
- * `DEMO_ORIGIN` and declares `fixtures: []`. Those are isolated *in time* rather
- * than in space, and `LANES` below is the table that says by what — a check with
- * nothing to examine used to be reported as a check that passed.
  */
 
 /** @typedef {{ lat: number, lng: number }} LatLng */
@@ -274,73 +268,20 @@ export const FIXTURE_COORDS = {
 FIXTURE_COORDS.badRejoin = FIXTURE_COORDS.robb
 
 /**
- * What runs each lane, and what keeps two of its scenarios from being live at the
- * same time.
- *
- * Distance isolates every scenario that owns a coordinate — which is all of them
- * but one market. Nothing can choose where a *promptless* socket lands, so every
- * `serverResolved` scenario sits on `DEMO_ORIGIN` together, with `fixtures: []`
- * and nothing for a distance check to measure. Until issue #96 that absence was
- * reported as a pass: every check in `test/fixture-separation.test.ts` iterates
- * fixtures, so a scenario with none was *missing* from all of them, and a missing
- * check reads in the output exactly like one that ran and found nothing wrong.
- *
- * Those scenarios are isolated **in time** instead, and this table is what says
- * how. `runners` are the commands as `.github/workflows/ci.yml` invokes them,
- * because the job graph is what actually decides who can be live together: steps
- * inside one job run in sequence, and two jobs are two runners on two machines
- * with a dev server each. The separation test resolves every command against that
- * workflow rather than trusting this table, so a lane whose runner CI stopped
- * calling fails instead of going quiet.
- *
- * `serializer` is the second mechanism, needed only where one lane drives more
- * than one `serverResolved` scenario — then the job graph does not separate them
- * and the runner itself has to, so the claim names the file that makes it and is
- * checked against that file's source. If a lane ever needs one because two of its
- * *different* runners drive fixture-less scenarios, split the lane rather than
- * declaring a serializer neither runner implements.
- *
- * @type {Record<string, { runners: string[],
- *                         serializer: { file: string, claim: string, why: string } | null }>}
- */
-export const LANES = {
-  smoke: {
-    runners: ['pnpm smoke'],
-    serializer: null,
-  },
-  e2e: {
-    runners: ['pnpm test:e2e'],
-    serializer: {
-      file: 'playwright.config.ts',
-      claim: 'workers: 1',
-      why:
-        'Several `serverResolved` specs share the one `e2e` job, and so share the one dev server ' +
-        'its webServer boots — the job graph cannot separate them. Playwright running on a ' +
-        'single worker is what does. Raise that to 2 and two promptless specs queue buyers in ' +
-        'the same Durable Object at the same time, which fails as a race, not as a broken test.',
-    },
-  },
-  payments: {
-    // One lane, four CI jobs: `pnpm payment-gate` runs in `smoke` (the uncharged
-    // branch), `payment-gate-closed` and `payment-gate-live`; the other two have a
-    // job each. All three are foreground steps, which is what keeps them apart
-    // from each other and from `pnpm smoke` inside the job they share.
-    runners: ['pnpm payment-gate', 'pnpm demo-check', 'pnpm honeypot-check'],
-    serializer: null,
-  },
-}
-
-/**
  * Which fixtures belong to which scenario, and which market each scenario owns.
  *
  * `lane` says which runner drives it, so a failure names a file a reader can
- * open — and, for a scenario with no fixtures, it is the *whole* isolation story:
- * see `LANES` above. Two scenarios may share a market only when they are
- * deliberately in one market (the opening pair and the socket that rejoins its
- * market after it empties); everything else gets a metro to itself.
+ * open. Two scenarios may share a market only when they are deliberately in one
+ * market (the opening pair and the socket that rejoins its market after it
+ * empties); everything else gets a metro to itself.
  *
- * @type {Record<string, { lane: keyof typeof LANES, market: string,
- *                          fixtures: string[], what: string }>}
+ * A `serverResolved` scenario has no coordinate to separate by, so it is isolated by
+ * *where it runs* instead, and says so with `runner`: the `package.json` script that
+ * drives it. `test/fixture-separation.test.ts` derives the rest from that script and
+ * `.github/workflows/ci.yml`. Required there, and meaningless on any other market.
+ *
+ * @type {Record<string, { lane: 'smoke' | 'e2e' | 'payments', market: string,
+ *                          fixtures: string[], what: string, runner?: string }>}
  */
 export const SCENARIOS = {
   openingPair: {
@@ -454,6 +395,7 @@ export const SCENARIOS = {
   promptlessPair: {
     lane: 'smoke',
     market: 'serverResolved',
+    runner: 'smoke',
     fixtures: [],
     what: 'two buyers who never send a coordinate are placed by the server and pair anyway',
   },
@@ -527,6 +469,7 @@ export const SCENARIOS = {
   e2eNativeHandoff: {
     lane: 'e2e',
     market: 'serverResolved',
+    runner: 'test:e2e',
     fixtures: [],
     what:
       'the handoff link opened in a second tab carries the receiver into the same match — ' +
@@ -550,6 +493,7 @@ export const SCENARIOS = {
   e2eRefusedPrompt: {
     lane: 'e2e',
     market: 'serverResolved',
+    runner: 'test:e2e',
     fixtures: [],
     what: 'a refused location prompt still pairs, placed by the server',
   },
@@ -572,6 +516,7 @@ export const SCENARIOS = {
   e2eLateSignInResume: {
     lane: 'e2e',
     market: 'serverResolved',
+    runner: 'test:e2e',
     fixtures: [],
     what:
       'back from the sign-in round trip, the buyer takes the seat they were taking with the ' +
@@ -580,6 +525,7 @@ export const SCENARIOS = {
   demoCheckPair: {
     lane: 'payments',
     market: 'serverResolved',
+    runner: 'demo-check',
     fixtures: [],
     what: 'two demo clients with no accounts and no coordinates pair on stage',
   },

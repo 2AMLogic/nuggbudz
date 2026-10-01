@@ -14,39 +14,22 @@ export interface Market extends LatLng {
   label: string
 }
 
-/**
- * A lane name is whatever `LANES` declares, and deliberately not a union written
- * out again here (#96).
- *
- * A second list of the lanes was exactly the defect: `test/fixture-separation.test.ts`
- * validated `lane` against a three-value enum of its own, which said nothing about
- * whether a lane had a runner, a CI job, or any isolation at all. The set is now
- * derived from `LANES` and checked against the scenario table and the CI job graph
- * in one place; a union here would be the copy that goes stale.
- */
-export type FixtureLane = string
+export type FixtureLane = 'smoke' | 'e2e' | 'payments'
 
 export interface Scenario {
   lane: FixtureLane
   market: string
   fixtures: string[]
   what: string
-}
-
-/**
- * What serializes a lane's own scenarios when the CI job graph cannot, named by
- * the file that implements it so the claim can be checked against the source.
- */
-export interface LaneSerializer {
-  file: string
-  claim: string
-  why: string
-}
-
-export interface Lane {
-  /** The commands `.github/workflows/ci.yml` invokes, spelled as it spells them. */
-  runners: string[]
-  serializer: LaneSerializer | null
+  /**
+   * The `package.json` script that drives this scenario — required on
+   * `serverResolved`, where it is the whole isolation story, and meaningless
+   * anywhere else (#96). Declared here so the separation test reads it rather
+   * than casting `spec` to a shape this file does not admit: a cast would keep
+   * compiling after the field was renamed, which is the one change that would
+   * make the check stop finding anything.
+   */
+  runner?: string
 }
 
 export type MarketRelation = 'within-radius' | 'beyond-radius' | 'same-point'
@@ -65,8 +48,6 @@ export const MAX_MARKET_SPAN_METERS: number
 export const MARKETS: Record<string, Market>
 
 export const FIXTURE_COORDS: Record<string, LatLng>
-
-export const LANES: Record<FixtureLane, Lane>
 
 export const SCENARIOS: Record<string, Scenario>
 

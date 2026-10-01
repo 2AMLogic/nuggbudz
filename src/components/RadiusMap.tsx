@@ -1,5 +1,5 @@
 import { formatMiles } from '@shared/geo'
-import type { CellBuddy } from '@shared/protocol'
+import type { RadiusBuddy } from '@shared/protocol'
 import { describeStoresOnMap, type StoresOnMap } from '@shared/stores'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -11,7 +11,7 @@ export interface RadiusMapProps {
   /** How far a buddy may be and still be matched, as the server reported it. */
   radiusMeters: number
   /** Everyone else waiting inside that circle, already snapped to a coarse grid. */
-  buddies: CellBuddy[]
+  buddies: RadiusBuddy[]
   /** How the centre was arrived at, e.g. 'your exact location'. */
   centreLabel: string
   /**
@@ -42,7 +42,7 @@ const MAP_HEIGHT_PX = 192
 /** A plain dot, not Leaflet's default blue pin — receipt ink, not a map app. */
 function dot(color: string, label: string): L.DivIcon {
   return L.divIcon({
-    className: 'cell-map-dot',
+    className: 'radius-map-dot',
     html: `<span aria-label="${label}" style="display:block;width:12px;height:12px;border-radius:50%;background:${color};border:2px solid ${TUBE};box-shadow:0 0 0 1px ${CHROME};"></span>`,
     iconSize: [12, 12],
     iconAnchor: [6, 6],
@@ -60,7 +60,7 @@ const BUDDY_ICON = dot(PHOSPHOR, 'A buddy waiting nearby')
  * which Leaflet sets as a DOM property.
  */
 const STORE_ICON = L.divIcon({
-  className: 'cell-map-store',
+  className: 'radius-map-store',
   html: `<span aria-label="A store" style="display:block;width:11px;height:11px;border-radius:2px;background:${KETCHUP};border:2px solid ${TUBE};box-shadow:0 0 0 1px ${CHROME};"></span>`,
   iconSize: [11, 11],
   iconAnchor: [5.5, 5.5],
@@ -134,13 +134,13 @@ export function RadiusMap({
     // The tell is that the placeholder is a constant image — an empty ocean
     // tile and a dense city tile came back byte-identical at 2049 bytes.
     //
-    // The console palette does not depend on the basemap: `.cell-map-tiles`
+    // The console palette does not depend on the basemap: `.radius-map-tiles`
     // re-tones whatever is underneath onto it (see `src/styles/globals.css`), so
     // this swap is a drop-in. OSM's standard style does carry labels, and that
     // filter brings them *up* as pale street context rather than burying them.
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
-      className: 'cell-map-tiles',
+      className: 'radius-map-tiles',
     }).addTo(map)
 
     layerRef.current = L.layerGroup().addTo(map)

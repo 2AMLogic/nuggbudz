@@ -7,10 +7,10 @@
  *   in the Worker, so a flood is turned away before any Durable Object runs.
  *   Since #150 there are two of these buckets per address, one for signed-in
  *   upgrades and a tighter one for anonymous ones (see `UpgradeBucket`);
- * - a cap on *concurrent* anonymous sockets per IP per cell, checked against
- *   the cell's live sockets by hibernation tag, because only the cell knows
+ * - a cap on *concurrent* anonymous sockets per IP per shard, checked against
+ *   the shard's live sockets by hibernation tag, because only the shard knows
  *   when a socket has closed (`anonSocketTag`);
- * - a cap on *concurrent* sockets per signed-in account per cell
+ * - a cap on *concurrent* sockets per signed-in account per shard
  *   (`accountSocketTag`), keyed on the account rather than the IP because
  *   carrier NAT puts many unrelated buyers behind one address.
  *
@@ -87,7 +87,7 @@ export function upgradeRateKey(bucket: UpgradeBucket, clientKey: string): string
  * Keyed on the connecting address (`clientKey`) rather than the identity,
  * because an anonymous identity costs nothing to mint — a caller with no demo
  * cookie gets a fresh one per socket — so a per-identity cap would cap nothing.
- * It bounds how many idle sockets one address can hold open in one cell, which
+ * It bounds how many idle sockets one address can hold open in one shard, which
  * is what every queue change then has to fan a `market` count out to.
  */
 export function anonSocketTag(clientKey: string): string {

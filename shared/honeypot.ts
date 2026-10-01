@@ -233,8 +233,8 @@ const PLACEMENT_MAX_FRACTION = 0.85
 /**
  * Where one decoy stands, relative to the buyer whose market it is stocking.
  *
- * Placed around the *buyer*, never around the cell: the shard is ~156 km across
- * and the market is two miles, so a decoy seeded from the cell would be a dot
+ * Placed around the *buyer*, never around the shard: the shard is ~156 km across
+ * and the market is two miles, so a decoy seeded from the shard would be a dot
  * nobody could ever reach and a count that lied. Deterministic in `seed`, so the
  * same decoy is in the same place every time it is read back.
  */

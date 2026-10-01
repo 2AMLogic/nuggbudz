@@ -200,8 +200,8 @@ function edgeCoords(request: Request): RawCoords | null {
  *
  * Two things are decided here and never by the client: who you are, from your
  * session cookie (or, with none, the anonymous identity off this browser's
- * cookie), and which cell you are in, from a location this Worker resolves. A
- * caller who could name their own cell would park themselves in someone else's
+ * cookie), and which shard you are in, from a location this Worker resolves. A
+ * caller who could name their own shard would park themselves in someone else's
  * market; a caller who could name themselves would show a stranger any name
  * they liked.
  *
@@ -226,7 +226,7 @@ app.get('/api/pool/ws', async (c) => {
 
   // Rung 1, and opt-in only. Sending nothing is the normal case, so absence is
   // not an error — but coordinates that are present and unusable are a client
-  // bug, and answering that by quietly filing the buyer under a different cell
+  // bug, and answering that by quietly filing the buyer under a different shard
   // would be a worse answer than saying so.
   const clientCoords: RawCoords = { lat: c.req.query('lat'), lng: c.req.query('lng') }
   if (coordsSupplied(clientCoords) && parseCoords(clientCoords) === null) {
@@ -247,7 +247,7 @@ app.get('/api/pool/ws', async (c) => {
   // its own, tighter than the signed-in one and separate from it, keyed on
   // `clientKey` rather than on identity — minting a fresh anonymous id does not
   // buy a new bucket. Behind it, the pool caps how many anonymous sockets one
-  // address may hold open in a cell (`anonSocketTag`), because a window only
+  // address may hold open in a shard (`anonSocketTag`), because a window only
   // bounds how fast sockets arrive, not how many pile up.
   const anonymous = active === null
   const rate = await checkUpgradeRate(c.env, clientKey, anonymous ? 'anonymous' : 'session')

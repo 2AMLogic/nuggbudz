@@ -112,7 +112,7 @@ export function parseStandingBand(raw: unknown): StandingBand {
  * queue. Higher wins; equal ranks fall through to first-come-first-served.
  *
  * An absent band ranks exactly with `new`, which is what makes standing a pure
- * addition to the pairing rule: a cell where nothing is known about anybody
+ * addition to the pairing rule: a shard where nothing is known about anybody
  * matches precisely as it did before this existed.
  */
 export function standingRank(band: StandingBand | undefined): number {

@@ -60,3 +60,19 @@ export function jobSteps(yaml: string, id: string): string[] {
     .slice(1)
     .map((step) => step.trimEnd())
 }
+
+/**
+ * Does this step run exactly `command`, rather than something that merely starts
+ * with it?
+ *
+ * A plain substring test answers yes for `pnpm demo-check-renamed` when asked
+ * about `pnpm demo-check`, which is the shape of the only mutation that got past
+ * the first version of this check: renaming a runner in the workflow left the test
+ * green, so a lane whose runner CI no longer invoked still looked wired. The
+ * command has to be followed by something that ends it — a newline, a space, a
+ * shell separator — and never by another word character, `-` or `:`.
+ */
+export function stepInvokes(step: string, command: string): boolean {
+  const literal = command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`${literal}(?![\\w:-])`).test(step)
+}

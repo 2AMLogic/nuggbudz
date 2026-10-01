@@ -25,7 +25,7 @@ import { DEMO_ORIGIN } from '../shared/location'
 // file's job is to check the numbers the Worker is actually given rather than a
 // second copy of them.
 import wranglerSource from '../wrangler.jsonc?raw'
-import { jobIds, jobSteps } from './lib/ci-workflow'
+import { jobIds, jobSteps, stepInvokes } from './lib/ci-workflow'
 
 /**
  * Every live-pairing fixture in this repo — `scripts/smoke.mjs` and `e2e/` — has
@@ -369,10 +369,23 @@ describe('the scenarios the server places itself are isolated in time, not by di
 
   /** Steps of `job` that invoke `command`, by position, so sequence is readable. */
   const stepsInvoking = (job: string, command: string): number[] =>
-    jobSteps(ciWorkflow, job).flatMap((step, index) => (step.includes(command) ? [index] : []))
+    jobSteps(ciWorkflow, job).flatMap((step, index) => (stepInvokes(step, command) ? [index] : []))
 
   const jobsInvoking = (command: string): string[] =>
     ciJobs.filter((job) => stepsInvoking(job, command).length > 0)
+
+  /** The lane a scenario names, or a failure that says so rather than a TypeError. */
+  const laneOf = (scenario: string) => {
+    const name = SCENARIOS[scenario].lane
+    const lane = LANES[name]
+    if (lane === undefined) {
+      throw new Error(
+        `'${scenario}' is driven by lane '${name}', which LANES does not declare — so it has no ` +
+          'runner, no CI job and no stated isolation at all',
+      )
+    }
+    return lane
+  }
 
   /** Source of a file at the repo root, which is where a lane's serializer lives. */
   const rootSources = import.meta.glob('../*.ts', {
@@ -458,10 +471,12 @@ describe('the scenarios the server places itself are isolated in time, not by di
             'by nothing.',
         ).not.toEqual([])
         for (const job of jobs) {
-          for (const step of jobSteps(ciWorkflow, job).filter((text) => text.includes(runner))) {
+          for (const step of jobSteps(ciWorkflow, job).filter((text) =>
+            stepInvokes(text, runner),
+          )) {
             const backgrounded = step
               .split('\n')
-              .some((line) => line.includes(runner) && /&\s*$/.test(line))
+              .some((line) => stepInvokes(line, runner) && /&\s*$/.test(line))
             expect(
               backgrounded,
               `job '${job}' backgrounds '${runner}'. Steps run in sequence, which is what keeps ` +
@@ -485,7 +500,7 @@ describe('the scenarios the server places itself are isolated in time, not by di
         if (laneA === laneB) {
           // One runner, one job, one dev server: the job graph has nothing to say,
           // so the lane's own serializer is the entire argument.
-          const serializer = LANES[laneA].serializer
+          const serializer = laneOf(a).serializer
           expect(
             serializer,
             `'${a}' and '${b}' are both driven by the '${laneA}' lane, so CI cannot separate ` +
@@ -507,8 +522,8 @@ describe('the scenarios the server places itself are isolated in time, not by di
         // Different lanes: different commands, and a command is a step. Two steps
         // of one job run in sequence and two jobs are two machines, so the only
         // way these could overlap is one step invoking both.
-        const runnersA = LANES[laneA].runners
-        const runnersB = LANES[laneB].runners
+        const runnersA = laneOf(a).runners
+        const runnersB = laneOf(b).runners
         expect(
           runnersA.filter((runner) => runnersB.includes(runner)),
           `lanes '${laneA}' and '${laneB}' share a runner command, so "different lanes" is not ` +

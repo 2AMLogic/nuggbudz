@@ -471,6 +471,12 @@ app.post('/api/stripe/webhook', async (c) => {
     role,
     paymentIntentId: event.paymentIntentId,
     outcome: event.type === 'payment_intent.succeeded' ? 'succeeded' : 'failed',
+    // Stripe's own figure for this charge, forwarded rather than dropped (#170):
+    // the pool's ledger leg is the number every operator money figure is summed
+    // from, and until this line nothing compared the two. As trustworthy as the
+    // `match_id` and `role` beside it — same signature-verified event — and it
+    // still goes through `parsePaymentOutcome` at the other end.
+    amountCents: event.amountCents,
   }
 
   const stub = c.env.NUGG_POOL.get(c.env.NUGG_POOL.idFromName(cell))

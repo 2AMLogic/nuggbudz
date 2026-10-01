@@ -120,22 +120,26 @@ export interface PaymentLeg {
    *
    * A ledger figure, not a gate: `collectedCents`, `centsFor` and `totalCents`
    * read it to say what is held and what was handed back, and that is the whole
-   * of its job. **`applyPaymentOutcome` deliberately does not consult it** — the
-   * reducer decides from `status` and `closedAt` alone, and a leg is found by
-   * role and `paymentIntentId`. Two reasons it stays that way, and the field is
-   * documented rather than validated on their account (#95):
+   * of its job. **The fold decides nothing from it** — `foldLeg` reads `status`
+   * and `closedAt` alone and is not even handed an amount, and a leg is found by
+   * role and `paymentIntentId`. Two reasons a disagreement cannot be a *gate*
+   * (#95):
    *
    * 1. It cannot disagree with the settlement. `openLedger` writes every leg
    *    from `settlement.shares` in one expression and `divideCents` guarantees
    *    those shares sum back to `totalCollectedCents` exactly, so comparing the
    *    two here would assert a tautology rather than catch anything.
-   * 2. It could disagree with *Stripe* — `StripePaymentEvent.amountCents` is
-   *    parsed and then dropped on the way into `PaymentOutcomeRequest` — but a
-   *    reducer could not act on that either. By the time a
-   *    `payment_intent.succeeded` arrives the money is already collected, so
-   *    refusing to fold the leg in would strand it uncollected *and*
-   *    unrefunded, which is strictly worse than recording it and letting the
-   *    teardown paths hand it back.
+   * 2. It could disagree with *Stripe*, and a reducer could not act on that
+   *    either. By the time a `payment_intent.succeeded` arrives the money is
+   *    already collected, so refusing to fold the leg in would strand it
+   *    uncollected *and* unrefunded, which is strictly worse than recording it
+   *    and letting the teardown paths hand it back.
+   *
+   * Neither reason rules out an *observation*, which is what #170 added: Stripe's
+   * own figure now reaches `applyPaymentOutcome` on the request and is compared
+   * against this one, reported beside the fold as a `PaymentAmountMismatch` and
+   * never adopted onto the leg. See that type for why reporting rather than
+   * adopting is the decision.
    */
   amountCents: number
   status: LegStatus
@@ -216,6 +220,55 @@ export interface PaymentOutcomeRequest {
   role: BuyerRole
   paymentIntentId: string
   outcome: PaymentOutcome
+  /**
+   * What Stripe says this PaymentIntent is for, in cents — the `amount` on the
+   * event object, as `parsePaymentEvent` narrowed it.
+   *
+   * Required rather than optional, and that is the point. An amount the Worker
+   * could stop sending would make "the two figures agreed" and "nobody looked"
+   * the same answer, which is the shape of every cross-check in this repo that
+   * turned out to enforce nothing. The one caller has it on a signature-verified
+   * event, so no legitimate path lacks it, and `parsePaymentOutcome` refuses a
+   * body without one rather than cross-checking against a default.
+   */
+  amountCents: number
+}
+
+/**
+ * Stripe's amount for a PaymentIntent and the ledger leg's, when they differ.
+ *
+ * **Reported, never adopted — a decision, not an omission (#170).** Stripe is
+ * the authority on money that actually moved, so adopting its figure onto the
+ * leg is the tempting repair: `collectedCents` would then say what was really
+ * collected, and a late `refundedCents` would be Stripe's own number instead of
+ * ours summed from legs. It is refused for three reasons:
+ *
+ * 1. Adopting corrects one figure and quietly breaks the settlement-relative
+ *    ones. `amountCents` is not merely "what moved", it is *this leg's share of
+ *    a settlement*, and `retainedFeeCents` books the pairing fee only while
+ *    `collectedCents` equals `totalCollectedCents`. One adopted cent on a match
+ *    that otherwise cleared normally would zero the fee, with nothing anywhere
+ *    recording why.
+ * 2. A disagreement is not a rounding to absorb. It is evidence that what was
+ *    charged is not what the settlement asked Stripe for, which is an operator
+ *    question — and this repo's answer to money it cannot account for is to
+ *    surface it (`holds`, `disputes`), never to rewrite the record underneath it.
+ * 3. Reporting loses nothing and stays reversible. Both figures ride out on the
+ *    webhook's own answer, which for the late paths is the only place money is
+ *    observable outside the Durable Object at all. Adopting overwrites a
+ *    settlement figure with no record that it was overwritten; if drift is ever
+ *    actually observed, adopting can be decided then, from a real case.
+ *
+ * Its *presence* is the whole signal, so the two figures are never equal — a
+ * report claiming otherwise is refused by `parsePaymentEventReport`.
+ */
+export interface PaymentAmountMismatch {
+  role: BuyerRole
+  paymentIntentId: string
+  /** The leg's figure: `share.payCents`, as `openLedger` copied it. */
+  ledgerCents: number
+  /** Stripe's figure for the same PaymentIntent, off the verified event. */
+  stripeCents: number
 }
 
 export type PaymentEffect =
@@ -241,6 +294,15 @@ export type PaymentEffect =
 export interface PaymentTransition {
   ledger: PaymentLedger
   effect: PaymentEffect
+  /**
+   * Set when Stripe's reported amount disagreed with the leg this result was
+   * folded into, and absent otherwise.
+   *
+   * Beside `effect` rather than inside it, deliberately: the fold is identical
+   * either way, so no caller has to branch on this to do the right thing with the
+   * money. It is an observation travelling alongside a decision.
+   */
+  amountMismatch?: PaymentAmountMismatch
 }
 
 /**
@@ -290,6 +352,42 @@ export interface PaymentEventReport {
   refundedCents?: number
   /** Late answers only. Still collected once those confirmed refunds landed. */
   heldCents?: number
+  /**
+   * The cross-check (#170): Stripe's amount against the leg it was folded into,
+   * present only when the two disagreed.
+   *
+   * Carried on live answers as well as late ones, unlike the money figures. Those
+   * are absent on a live answer because the two buyers are told them over their
+   * own sockets; an amount neither buyer is ever shown has no such second channel,
+   * and the `refundedCents` every operator figure is summed from is this figure —
+   * so a live match quietly charged something other than its settlement share
+   * would otherwise be visible nowhere.
+   */
+  amountMismatch?: PaymentAmountMismatch
+}
+
+/**
+ * Narrow a reported mismatch, or refuse it.
+ *
+ * Equal figures are refused rather than passed through as a mismatch of zero:
+ * the field's presence is the signal, so a report that says "they disagreed" and
+ * then names one number twice is not readable, and reading it as a disagreement
+ * would put an operator onto a match where nothing happened.
+ */
+function parseAmountMismatch(value: unknown): PaymentAmountMismatch | null {
+  if (typeof value !== 'object' || value === null) return null
+  const { role, paymentIntentId, ledgerCents, stripeCents } = value as Record<string, unknown>
+  if (role !== 'orderer' && role !== 'receiver') return null
+  if (typeof paymentIntentId !== 'string' || paymentIntentId.length === 0) return null
+  if (!Number.isInteger(ledgerCents) || !Number.isInteger(stripeCents)) return null
+  if ((ledgerCents as number) < 0 || (stripeCents as number) < 0) return null
+  if (ledgerCents === stripeCents) return null
+  return {
+    role,
+    paymentIntentId,
+    ledgerCents: ledgerCents as number,
+    stripeCents: stripeCents as number,
+  }
 }
 
 /**
@@ -302,11 +400,26 @@ export interface PaymentEventReport {
  */
 export function parsePaymentEventReport(payload: unknown): PaymentEventReport | null {
   if (typeof payload !== 'object' || payload === null) return null
-  const { effect, late, refundedCents, heldCents } = payload as Record<string, unknown>
+  const { effect, late, refundedCents, heldCents, amountMismatch } = payload as Record<
+    string,
+    unknown
+  >
   if (typeof effect !== 'string' || !Object.hasOwn(PAYMENT_EVENT_EFFECTS, effect)) return null
   if (typeof late !== 'boolean') return null
+
+  // A mismatch this parser cannot read is refused outright rather than dropped
+  // from an otherwise-good report: the same rule as the money figures below, one
+  // field out. A cross-check that could not be read must never print as one that
+  // found nothing.
+  let cross: { amountMismatch?: PaymentAmountMismatch } = {}
+  if (amountMismatch !== undefined) {
+    const mismatch = parseAmountMismatch(amountMismatch)
+    if (mismatch === null) return null
+    cross = { amountMismatch: mismatch }
+  }
+
   const kind = effect as PaymentEventEffect
-  if (!late) return { effect: kind, late: false }
+  if (!late) return { effect: kind, late: false, ...cross }
   // A late answer without both halves of the money is the ambiguity this report
   // exists to remove, so it is not a late answer at all.
   if (!Number.isInteger(refundedCents) || !Number.isInteger(heldCents)) return null
@@ -316,6 +429,7 @@ export function parsePaymentEventReport(payload: unknown): PaymentEventReport | 
     late: true,
     refundedCents: refundedCents as number,
     heldCents: heldCents as number,
+    ...cross,
   }
 }
 
@@ -411,8 +525,11 @@ export function allLegsPaid(ledger: PaymentLedger): boolean {
  * `payment_intent.succeeded` cannot clear a match twice or a duplicate failure
  * refund twice.
  *
- * A leg is identified by role *and* `paymentIntentId`, and never by amount —
- * see `PaymentLeg.amountCents` for why this reducer does not consult it.
+ * A leg is identified by role *and* `paymentIntentId`, and never by amount. The
+ * amount is *compared* — see `PaymentAmountMismatch` — and the comparison is
+ * structural rather than promised: `foldLeg` below is handed the outcome alone,
+ * so the branch that decides what happens to the money cannot read an amount
+ * even by accident.
  */
 export function applyPaymentOutcome(
   ledger: PaymentLedger,
@@ -421,9 +538,45 @@ export function applyPaymentOutcome(
   const index = ledger.legs.findIndex(
     (leg) => leg.role === result.role && leg.paymentIntentId === result.paymentIntentId,
   )
+  // No leg, nothing to compare against: an event for a PaymentIntent this match
+  // does not own is a routing answer, not an amount one.
   if (index === -1) return { ledger, effect: { kind: 'noop', reason: 'unknown_leg' } }
 
   const leg = ledger.legs[index]
+  // Every branch a leg was found for, replays included. A second delivery of a
+  // mismatched event is still a mismatched event, and reporting it only on the
+  // first would hide the signal behind whichever delivery Stripe happened to
+  // retry.
+  const mismatch = compareAmount(leg, result.amountCents)
+  const transition = foldLeg(ledger, index, leg, result.outcome)
+  return mismatch === null ? transition : { ...transition, amountMismatch: mismatch }
+}
+
+/**
+ * Stripe's figure against the leg's, as an observation.
+ *
+ * `parsePaymentEvent` floors an event with no readable `amount` to 0, so a
+ * malformed delivery reads as a disagreement rather than as agreement. That is
+ * the direction to fail in: the figure is unusable either way, and a silent 0
+ * matching nothing is how a cross-check comes to enforce nothing.
+ */
+function compareAmount(leg: PaymentLeg, stripeCents: number): PaymentAmountMismatch | null {
+  if (stripeCents === leg.amountCents) return null
+  return {
+    role: leg.role,
+    paymentIntentId: leg.paymentIntentId,
+    ledgerCents: leg.amountCents,
+    stripeCents,
+  }
+}
+
+/** The fold itself: `status` and `closedAt`, and deliberately no amount. */
+function foldLeg(
+  ledger: PaymentLedger,
+  index: number,
+  leg: PaymentLeg,
+  outcome: PaymentOutcome,
+): PaymentTransition {
   if (leg.status !== 'pending') {
     return { ledger, effect: { kind: 'noop', reason: 'already_final' } }
   }
@@ -441,16 +594,16 @@ export function applyPaymentOutcome(
   if (ledger.closedAt !== undefined) {
     const settledLeg: PaymentLeg = {
       ...leg,
-      status: result.outcome === 'succeeded' ? 'succeeded' : 'failed',
+      status: outcome === 'succeeded' ? 'succeeded' : 'failed',
     }
     const next = replaceLeg(ledger, index, settledLeg)
-    if (result.outcome !== 'succeeded') {
+    if (outcome !== 'succeeded') {
       return { ledger: next, effect: { kind: 'noop', reason: 'match_over' } }
     }
     return { ledger: next, effect: { kind: 'late_refund', refund: [settledLeg] } }
   }
 
-  if (result.outcome === 'succeeded') {
+  if (outcome === 'succeeded') {
     const next = replaceLeg(ledger, index, { ...leg, status: 'succeeded' })
     if (allLegsPaid(next)) return { ledger: next, effect: { kind: 'cleared' } }
     return { ledger: next, effect: { kind: 'pending' } }
@@ -462,7 +615,7 @@ export function applyPaymentOutcome(
   // call — is how a failed refund used to leave a record claiming money had been
   // returned that was in fact still sitting in the account.
   const refund = next.legs.filter((l) => l.status === 'succeeded')
-  return { ledger: next, effect: { kind: 'unwind', failedRole: result.role, refund } }
+  return { ledger: next, effect: { kind: 'unwind', failedRole: leg.role, refund } }
 }
 
 /**
@@ -583,10 +736,15 @@ export function parsePaymentOutcome(raw: string): PaymentOutcomeRequest | null {
   if (typeof data !== 'object' || data === null) return null
   const msg = data as Record<string, unknown>
 
-  const { matchId, role, paymentIntentId, outcome } = msg
+  const { matchId, role, paymentIntentId, outcome, amountCents } = msg
   if (typeof matchId !== 'string' || matchId.length === 0) return null
   if (typeof paymentIntentId !== 'string' || paymentIntentId.length === 0) return null
   if (role !== 'orderer' && role !== 'receiver') return null
   if (outcome !== 'succeeded' && outcome !== 'failed') return null
-  return { matchId, role, paymentIntentId, outcome }
+  // Integer cents or nothing — a fractional amount is not money in this codebase,
+  // and a missing one is a body that cannot be cross-checked, which is refused
+  // rather than defaulted. Stripe sends minor units, so the only way to reach
+  // either branch is a body the one real caller did not build.
+  if (!Number.isInteger(amountCents) || (amountCents as number) < 0) return null
+  return { matchId, role, paymentIntentId, outcome, amountCents: amountCents as number }
 }

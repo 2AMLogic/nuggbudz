@@ -71,6 +71,7 @@ import {
   holdsCollectedMoney,
   markRefunded,
   openLedger,
+  type PaymentAmountMismatch,
   type PaymentDisposition,
   type PaymentEventEffect,
   type PaymentEventReport,
@@ -368,12 +369,19 @@ function heldMatchFrom(
 function lateReport(
   effect: PaymentEventEffect,
   settled: { ledger: PaymentLedger; refunded: PaymentLeg[] },
+  amountMismatch?: PaymentAmountMismatch,
 ): PaymentEventReport {
   return {
     effect,
     late: true,
     refundedCents: totalCents(settled.refunded),
     heldCents: collectedCents(settled.ledger),
+    // Reported wherever the fold reported one, live and late alike. On a late
+    // answer it matters most: `refundedCents` above is the *ledger's* figure, since
+    // a refund is issued for the whole PaymentIntent and no amount is sent on the
+    // call, so a drifted leg would make that number confidently wrong with nothing
+    // to notice it by.
+    ...(amountMismatch === undefined ? {} : { amountMismatch }),
   }
 }
 
@@ -1915,7 +1923,7 @@ export class NuggPool extends DurableObject<Env> {
     // exactly this, so look there before answering `unknown_match`.
     if (record?.ledger === undefined) return await this.handleLatePaymentEvent(outcome)
 
-    const { ledger, effect } = applyPaymentOutcome(record.ledger, outcome)
+    const { ledger, effect, amountMismatch } = applyPaymentOutcome(record.ledger, outcome)
     await this.ctx.storage.put<MatchRecord>(`match:${outcome.matchId}`, { ...record, ledger })
 
     switch (effect.kind) {
@@ -1937,15 +1945,20 @@ export class NuggPool extends DurableObject<Env> {
         })
         // Answered here rather than at the bottom, so this reports exactly what
         // the tombstone path reports for the same money.
-        return Response.json({ ok: true, ...lateReport('late_refund', settled) })
+        return Response.json({ ok: true, ...lateReport('late_refund', settled, amountMismatch) })
       }
       default:
         break
     }
 
     // Live money: the two buyers are told what happened to it over their own
-    // sockets, so there is no amount to repeat here.
-    const live: PaymentEventReport = { effect: effect.kind, late: false }
+    // sockets, so there is no amount to repeat here — except a disagreement with
+    // Stripe, which is the one money fact no socket is ever told.
+    const live: PaymentEventReport = {
+      effect: effect.kind,
+      late: false,
+      ...(amountMismatch === undefined ? {} : { amountMismatch }),
+    }
     return Response.json({ ok: true, ...live })
   }
 
@@ -1980,7 +1993,7 @@ export class NuggPool extends DurableObject<Env> {
       return Response.json({ ok: true, ...nothing })
     }
 
-    const { ledger, effect } = applyPaymentOutcome(tombstone.ledger, outcome)
+    const { ledger, effect, amountMismatch } = applyPaymentOutcome(tombstone.ledger, outcome)
     const owed = effect.kind === 'late_refund' ? effect.refund : []
     const settled = await this.settleRefunds(outcome.matchId, ledger, owed)
     const next = retireLedger(settled.ledger, tombstone.retiredAt)
@@ -1988,7 +2001,7 @@ export class NuggPool extends DurableObject<Env> {
     if (next === null) await this.ctx.storage.delete(key)
     else await this.ctx.storage.put<PaymentTombstone>(key, next)
 
-    return Response.json({ ok: true, ...lateReport(effect.kind, settled) })
+    return Response.json({ ok: true, ...lateReport(effect.kind, settled, amountMismatch) })
   }
 
   /**

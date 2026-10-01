@@ -275,8 +275,13 @@ FIXTURE_COORDS.badRejoin = FIXTURE_COORDS.robb
  * market (the opening pair and the socket that rejoins its market after it
  * empties); everything else gets a metro to itself.
  *
+ * A `serverResolved` scenario has no coordinate to separate by, so it is isolated by
+ * *where it runs* instead, and says so with `runner`: the `package.json` script that
+ * drives it. `test/fixture-separation.test.ts` derives the rest from that script and
+ * `.github/workflows/ci.yml`. Required there, and meaningless on any other market.
+ *
  * @type {Record<string, { lane: 'smoke' | 'e2e' | 'payments', market: string,
- *                          fixtures: string[], what: string }>}
+ *                          fixtures: string[], what: string, runner?: string }>}
  */
 export const SCENARIOS = {
   openingPair: {
@@ -390,6 +395,7 @@ export const SCENARIOS = {
   promptlessPair: {
     lane: 'smoke',
     market: 'serverResolved',
+    runner: 'smoke',
     fixtures: [],
     what: 'two buyers who never send a coordinate are placed by the server and pair anyway',
   },
@@ -463,6 +469,7 @@ export const SCENARIOS = {
   e2eNativeHandoff: {
     lane: 'e2e',
     market: 'serverResolved',
+    runner: 'test:e2e',
     fixtures: [],
     what:
       'the handoff link opened in a second tab carries the receiver into the same match — ' +
@@ -486,6 +493,7 @@ export const SCENARIOS = {
   e2eRefusedPrompt: {
     lane: 'e2e',
     market: 'serverResolved',
+    runner: 'test:e2e',
     fixtures: [],
     what: 'a refused location prompt still pairs, placed by the server',
   },
@@ -508,6 +516,7 @@ export const SCENARIOS = {
   e2eLateSignInResume: {
     lane: 'e2e',
     market: 'serverResolved',
+    runner: 'test:e2e',
     fixtures: [],
     what:
       'back from the sign-in round trip, the buyer takes the seat they were taking with the ' +
@@ -516,6 +525,7 @@ export const SCENARIOS = {
   demoCheckPair: {
     lane: 'payments',
     market: 'serverResolved',
+    runner: 'demo-check',
     fixtures: [],
     what: 'two demo clients with no accounts and no coordinates pair on stage',
   },

@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import ciSource from '../.github/workflows/ci.yml?raw'
+import packageSource from '../package.json?raw'
+import playwrightSource from '../playwright.config.ts?raw'
 // scripts/pool-fixtures.mjs is a plain, side-effect-free data module — unlike
 // scripts/smoke.mjs itself, importing it does not dial a dev server.
 import {
@@ -374,5 +377,97 @@ describe('the radius is configured in one place', () => {
       .filter(([, text]) => text.includes('export const FIXTURE_COORDS'))
       .map(([path]) => path)
     expect(tables, 'more than one module exports a fixture coordinate table').toHaveLength(1)
+  })
+})
+
+/**
+ * The scenarios in `serverResolved` have `fixtures: []`, so every geometric check
+ * above has nothing to measure for them and passes without examining them. They
+ * are isolated by *where they run*, and that is what is asserted here, derived from
+ * the scenario table, package.json and the CI job definitions rather than from a
+ * list of which scenarios may share a runner.
+ */
+describe('server-resolved scenarios are isolated by runner, not by distance', () => {
+  const resolved = Object.entries(SCENARIOS).filter(([, spec]) => spec.market === 'serverResolved')
+
+  const scripts = (JSON.parse(packageSource) as { scripts: Record<string, string> }).scripts
+
+  /** Job id -> the text of its definition, split on the two-space-indented keys. */
+  const jobs = new Map<string, string>()
+  const jobsBlock = ciSource.slice(ciSource.search(/^jobs:\s*$/m))
+  for (const part of jobsBlock.split(/^ {2}(?=[\w-]+:\s*$)/m).slice(1)) {
+    jobs.set(part.slice(0, part.indexOf(':')), part)
+  }
+
+  const jobsRunning = (script: string) =>
+    [...jobs]
+      .filter(([, text]) =>
+        new RegExp(`^\\s*-?\\s*run:.*\\bpnpm ${script.replace(':', '\\:')}\\b`, 'm').test(text),
+      )
+      .map(([id]) => id)
+
+  it('is not vacuous: there are server-resolved scenarios and CI jobs to read', () => {
+    expect(resolved.length).toBeGreaterThan(0)
+    expect(jobs.size).toBeGreaterThan(3)
+  })
+
+  it('covers every scenario the geometric checks cannot see, and only those', () => {
+    // An empty fixture list on any other market would escape both assertions.
+    for (const [name, spec] of Object.entries(SCENARIOS)) {
+      expect(
+        spec.fixtures.length === 0,
+        `${name} has ${spec.fixtures.length} fixtures on '${spec.market}': a scenario with no ` +
+          'fixtures is invisible to the distance checks and must be server-resolved',
+      ).toBe(spec.market === 'serverResolved')
+    }
+  })
+
+  for (const [name, spec] of resolved) {
+    it(`${name} names a runner that package.json defines and CI actually runs`, () => {
+      const runner = (spec as { runner?: string }).runner
+      expect(runner, `${name} is server-resolved and must say which script runs it`).toBeDefined()
+      expect(Object.keys(scripts), `${name}.runner`).toContain(runner)
+      expect(
+        jobsRunning(runner as string),
+        `no CI job runs 'pnpm ${runner}', so ${name} is never exercised`,
+      ).not.toHaveLength(0)
+    })
+  }
+
+  it('gives each runner jobs of its own, so no server process sees two runners', () => {
+    const owner = new Map<string, string>()
+    for (const [name, spec] of resolved) {
+      const runner = (spec as { runner?: string }).runner as string
+      for (const job of jobsRunning(runner)) {
+        const other = owner.get(job)
+        expect(
+          other === undefined || other === runner,
+          `CI job '${job}' runs both 'pnpm ${other}' and 'pnpm ${runner}' (${name}); both put ` +
+            'promptless sockets in the same market on one server, and fixture distance cannot ' +
+            'separate them',
+        ).toBe(true)
+        owner.set(job, runner)
+      }
+    }
+  })
+
+  it('lets scenarios share a runner only when that runner is serial', () => {
+    const byRunner = new Map<string, string[]>()
+    for (const [name, spec] of resolved) {
+      const runner = (spec as { runner?: string }).runner as string
+      byRunner.set(runner, [...(byRunner.get(runner) ?? []), name])
+    }
+    for (const [runner, names] of byRunner) {
+      if (names.length < 2) continue
+      const serial =
+        scripts[runner].startsWith('playwright test') &&
+        /^\s*workers:\s*1\s*,/m.test(playwrightSource) &&
+        !/fullyParallel:\s*true/.test(playwrightSource)
+      expect(
+        serial,
+        `${names.join(', ')} all run under 'pnpm ${runner}' and land in one market; that is only ` +
+          'safe when the runner executes one scenario at a time (Playwright with workers: 1)',
+      ).toBe(true)
+    }
   })
 })

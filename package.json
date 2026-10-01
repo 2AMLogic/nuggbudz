@@ -17,6 +17,7 @@
     "cf-typegen": "wrangler types",
     "smoke": "node scripts/smoke.mjs",
     "demo-check": "node scripts/demo-pairing-check.mjs",
+    "migration-check": "node scripts/migration-check.mjs",
     "honeypot-check": "node scripts/honeypot-check.mjs",
     "payment-gate": "node scripts/payment-gate-check.mjs",
     "upgrade-rate-check": "node scripts/upgrade-rate-check.mjs",

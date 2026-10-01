@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Prints which pairing and payment modes the just-deployed Worker is actually in.
+ * Prints which pairing and payment modes the just-deployed Worker is actually
+ * in, and whether the database behind it holds this checkout's migrations.
  *
  * `pnpm run deploy` (strict) and `pnpm run deploy:demo` (`--var
  * ALLOW_DEMO_PAIRING:1`) both end in `wrangler deploy`, and until #74 neither
@@ -19,6 +20,7 @@
  *   DEPLOY_HEALTH_URL=https://nuggbudz.com/api/health  (default)
  */
 import { assessClientKey, BUILD_INFO_FILE, parseBuildInfo } from './build-info.mjs'
+import { checkMigrations } from './migration-check.mjs'
 
 const HEALTH_URL = process.env.DEPLOY_HEALTH_URL ?? 'https://nuggbudz.com/api/health'
 
@@ -35,7 +37,7 @@ async function readBuildInfo() {
   }
 }
 
-async function main() {
+async function reportWorkerModes() {
   let health
   try {
     const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(15_000) })
@@ -103,6 +105,21 @@ async function main() {
   const client = assessClientKey(String(health.payments), await readBuildInfo())
   console.log(client.message)
   if (!client.ok) process.exitCode = 1
+}
+
+async function main() {
+  await reportWorkerModes()
+  // Independent of the readback above, and run even when that one could not
+  // reach the Worker: production sat three migrations behind for an unknown
+  // period precisely because nothing asked the database anything (#135). A
+  // health endpoint that is down is no reason to also stop asking.
+  const schema = await checkMigrations({ remote: true })
+  if (schema.ok) {
+    console.log(schema.message)
+  } else {
+    console.error(`\n${schema.message}`)
+    process.exitCode = 1
+  }
 }
 
 await main()

@@ -261,6 +261,23 @@ state.
   the record and `reconcileTerminal` replays it off the next alarm. Get that
   order backwards and nothing looks broken until a D1 blip erases the only
   evidence two strangers are out of pocket.
+- **A deploy readback has three answers, and "could not run" is one of them.**
+  `scripts/post-deploy-mode.mjs` is where a deploy finds out what it actually
+  shipped: the Worker's pairing and payment modes off `/api/health` (#74), the
+  bundle's publishable key off `build-info.json` (#149), and since #135 the
+  database's schema off `wrangler d1 migrations list --remote`
+  (`scripts/migration-check.mjs`). Production ran three migrations behind the
+  repo with everything green, because `/api/health` describes the Worker and
+  `demo-check` passes against a missing table — a demo pair writes no rows.
+  `wrangler` **exits 0 whether or not migrations are pending**, so the banner
+  line is the whole answer, and that same clean banner is what an empty
+  `migrations/` prints — which is why the verdict carries `determined` beside
+  `ok` and why zero migration files is undetermined rather than a pass. Never
+  collapse the two: a check that could not run and one that passed must not print
+  the same way, and both exit non-zero. Each readback runs even when another has
+  already failed, and none of them apply a fix — applying migrations stays a
+  human step by decision, recorded in README "The schema the deployment is
+  actually on".
 - **The operator surface is a session plus an allowlist, never a shared token.**
   `OPERATOR_USER_IDS` names `users.id` values and `shared/operators.ts` drops
   anything not shaped like an id a sign-in could mint. A resolution moves money
@@ -390,6 +407,7 @@ pnpm smoke        # end-to-end pairing against a running `pnpm dev`
 pnpm payment-gate # the money gate, in whichever mode that server reports
 pnpm honeypot-check # decoy buyers, in whichever mode that server reports
 pnpm fake-stripe  # a local stand-in for Stripe's REST API, for the charged path
+pnpm migration-check # is the deployed D1 on this checkout's migrations? (--local for the local one)
 pnpm test:e2e     # Playwright — two browsers driving the real UI end to end
 pnpm typecheck    # wrangler types && tsc --noEmit
 pnpm lint         # biome

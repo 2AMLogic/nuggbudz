@@ -8,12 +8,17 @@ export interface Env {
   POOL_CELL_PRECISION: string
   MATCH_RADIUS_METERS: string
   POOL_MAX_SOCKETS_PER_CELL: string
+  /**
+   * Upgrade attempts one *buyer* may make per window — an account, or a
+   * browser's demo cookie — never one address (#106). See `upgradeWindows` in
+   * `shared/ratelimit.ts`, and the venue model beside the figure in wrangler.jsonc.
+   */
   POOL_UPGRADE_LIMIT: string
   POOL_UPGRADE_WINDOW_SECONDS: string
   /**
    * Upgrade attempts one address may make *without a session* per window — a
-   * bucket of its own, tighter than `POOL_UPGRADE_LIMIT` (#150). See
-   * `UpgradeBucket` in `shared/ratelimit.ts`.
+   * bucket of its own, separate from any signed-in window (#150), and the one
+   * that turns away a flood from one machine. See `upgradeWindows`.
    */
   POOL_ANON_UPGRADE_LIMIT: string
   /**

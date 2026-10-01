@@ -154,12 +154,14 @@ market rather than an empty circle — see
 cannot do. It is off by default everywhere, including in every test lane, so a
 suite that expects an empty market stays correct.
 
-Add `POOL_UPGRADE_LIMIT="300"` there too before running `pnpm test:e2e`, and
-`POOL_ANON_UPGRADE_LIMIT="300"` beside it. The socket limiter keys on
-`CF-Connecting-IP`, which `pnpm dev` never sets, so every local client shares the
-`unknown` bucket and a suite that opens several dozen sockets a minute trips a
-limit sized for a venue NAT. It surfaces as "Lost the connection. Try again."
-rather than as a refusal you can read.
+Add `POOL_ANON_UPGRADE_LIMIT="300"` there too before running `pnpm test:e2e`.
+This is about the local server, not the production figure: the anonymous upgrade
+window is counted per connecting address, the limiter reads that from
+`CF-Connecting-IP`, and `pnpm dev` never sets it — so every signed-out local
+client shares one `unknown` address, and a suite that opens a browse socket per
+landing page trips a window sized for one venue NAT. The signed-in window needs
+nothing: since #106 it is per buyer, not per address (see "The flood backstop"
+under [Browsing before signing in](#browsing-before-signing-in)).
 
 ```bash
 pnpm test             # pure logic: settlement, geo, matchmaking, auth, protocol
@@ -425,11 +427,13 @@ the upgrade was doing double duty: an unauthenticated flood never reached the
 rate limiter, because the session check refused it first. With the socket open,
 the limiter has to stand on its own, so anonymous upgrades are:
 
-- counted in a **separate, tighter** KV window (`POOL_ANON_UPGRADE_LIMIT`, 20 a
-  minute per address against the signed-in 30) — separate so a crowd browsing
-  signed-out on one venue NAT can never spend the budget of the signed-in buyers
-  standing next to them, and keyed on the address rather than the identity, so
-  minting a fresh anonymous id buys nothing; and
+- counted in a **separate** KV window per address (`POOL_ANON_UPGRADE_LIMIT`,
+  20 a minute) — separate so a crowd browsing signed-out on one venue NAT can
+  never spend the budget of the signed-in buyers standing next to them, and keyed
+  on the address rather than the identity, so minting a fresh anonymous id buys
+  nothing. A browser with a demo cookie is *also* counted in a window of its own
+  in the same decision, and a buyer refused there is never charged to the
+  address, so one phone reconnecting cannot spend the room's budget; and
 - **capped concurrently** per address per shard (`POOL_ANON_SOCKETS_PER_IP`,
   20), counted by hibernation tag inside the Durable Object. A window only
   bounds how fast sockets arrive; this bounds how many one address can hold open,

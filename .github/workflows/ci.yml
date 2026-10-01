@@ -45,19 +45,13 @@ jobs:
       # a checkout is in. The id is `BUYERS.op` in scripts/smoke.mjs, and
       # SMOKE_REQUIRE_ADMIN below turns "no operator configured" from a skip into
       # a failure, so a drift between the two cannot quietly delete this lane.
-      # Every client shares one rate-limit bucket here, and only here: the limiter
-      # keys on `CF-Connecting-IP`, which a local `pnpm dev` never sets, so all of
-      # them fall into the `unknown` bucket. The production figure (30 upgrades a
-      # minute, wrangler.jsonc) is sized for a venue NAT with a handful of phones
-      # on it; a suite that opens several dozen sockets a minute from one process
-      # is not that shape, and hitting the limit surfaces as a socket that closes
-      # rather than as a refusal you can read — "Lost the connection. Try again."
-      # Raised for this step's server only. Never `wrangler.jsonc`.
+      # No upgrade limit is raised here (#106): the signed-in window is per buyer,
+      # and every scenario is its own seeded account, so this suite runs against
+      # the production figure rather than around it.
       - run: |
           {
             echo 'ALLOW_UNCHARGED_PAIRING="1"'
             echo 'OPERATOR_USER_IDS="5eed5eed-0000-4000-8000-000000000033"'
-            echo 'POOL_UPGRADE_LIMIT="300"'
           } > .dev.vars
       # Live pairing across two WebSocket clients, against the real Worker.
       - run: pnpm dev --port 5199 &
@@ -96,20 +90,16 @@ jobs:
       # Same reasoning as the `smoke` job: this suite is about the screen, not the
       # money, so it opts out of charging explicitly rather than relying on the
       # absence of secrets -- which now refuses to pair at all.
-      # Every client shares one rate-limit bucket here, and only here: the limiter
-      # keys on `CF-Connecting-IP`, which a local `pnpm dev` never sets, so all of
-      # them fall into the `unknown` bucket. The production figure (30 upgrades a
-      # minute, wrangler.jsonc) is sized for a venue NAT with a handful of phones
-      # on it; a suite that opens several dozen sockets a minute from one process
-      # is not that shape, and hitting the limit surfaces as a socket that closes
-      # rather than as a refusal you can read — "Lost the connection. Try again."
-      # Raised for this step's server only. Never `wrangler.jsonc`.
-      # Every landing page now opens a browse socket too (#150), and a signed-out
-      # one is counted in the anonymous bucket -- raised alongside, same reason.
+      # The anonymous upgrade window is per connecting address, read off
+      # `CF-Connecting-IP` -- which a local `pnpm dev` never sets, so every
+      # signed-out browser here shares one `unknown` address, and every landing
+      # page opens a browse socket from it (#150). That is a property of this
+      # server, not a verdict on the production figure (wrangler.jsonc, derived
+      # from a venue model), so it is raised for this step's server only. The
+      # signed-in window is per buyer since #106 and needs nothing.
       - run: |
           {
             echo 'ALLOW_UNCHARGED_PAIRING="1"'
-            echo 'POOL_UPGRADE_LIMIT="300"'
             echo 'POOL_ANON_UPGRADE_LIMIT="300"'
           } > .dev.vars
       # Drives the real UI in two browser contexts; playwright.config.ts's
@@ -307,7 +297,6 @@ jobs:
       - run: |
           {
             echo 'ALLOW_UNCHARGED_PAIRING="1"'
-            echo 'POOL_UPGRADE_LIMIT="300"'
           } > .dev.vars
       - run: pnpm dev --port 5250 &
       - run: npx wait-on http://localhost:5250/api/health --timeout 90000
@@ -328,7 +317,6 @@ jobs:
       - run: |
           {
             echo 'HONEYPOT_BUYERS="1"'
-            echo 'POOL_UPGRADE_LIMIT="300"'
             echo 'STRIPE_SECRET_KEY="sk_test_not_a_real_key"'
             echo 'STRIPE_WEBHOOK_SECRET="whsec_not_a_real_secret"'
             echo 'STRIPE_API_BASE="http://127.0.0.1:9/v1"'
@@ -359,8 +347,9 @@ jobs:
   # The upgrade limiter's refusal, reachable off the wire (issue #105). A
   # browser handed a non-101 response from a `WebSocket` constructor never
   # sees the 429 body — it only fires `close` — so this is invisible to every
-  # other job here: `smoke`, `e2e` and the rest all raise `POOL_UPGRADE_LIMIT`
-  # specifically so a shared-bucket dev server never trips it. This job does
+  # other job here: none of them goes near a limit, and `e2e` raises
+  # `POOL_ANON_UPGRADE_LIMIT` specifically so its shared local address never
+  # trips it. This job does
   # the opposite on purpose, with its own port and its own tiny window, so the
   # refusal is forced and the probe that is supposed to surface it is proved
   # to actually surface it.

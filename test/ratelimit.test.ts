@@ -1,21 +1,34 @@
 import { describe, expect, it } from 'vitest'
+import { demoUserId } from '../shared/demo'
 import {
+  ANON_VENUE_MINUTE,
   accountSocketTag,
+  anonAddressRateKey,
+  anonAddressUpgradeLimit,
   anonSocketTag,
+  BUYER_BUSIEST_MINUTE,
+  buyerRateKey,
+  buyerUpgradeLimit,
   clientKey,
+  combineVerdicts,
+  enforceableWindowLimit,
   parseHits,
   slidingWindow,
+  UPGRADES_PER_PAIRING,
+  type UpgradeCaller,
   underConcurrencyCap,
-  upgradeRateKey,
+  upgradeWindows,
 } from '../shared/ratelimit'
+import type { Env } from '../worker/env'
+import { checkUpgradeRate } from '../worker/ratelimit'
 // The deployed configuration, read as text (it is JSONC): the figures below are
 // asserted against what the Worker is actually given.
 import wranglerSource from '../wrangler.jsonc?raw'
 
-// Mirrors the defaults in wrangler.jsonc, so the demo tests below exercise the
-// limits that actually ship.
-const WINDOW_MS = 60_000
-const LIMIT = 30
+// Read from wrangler.jsonc, so the tests below exercise the limits that ship.
+const WINDOW_MS = wranglerInt('POOL_UPGRADE_WINDOW_SECONDS') * 1000
+const LIMIT = wranglerInt('POOL_UPGRADE_LIMIT')
+const ANON_LIMIT = wranglerInt('POOL_ANON_UPGRADE_LIMIT')
 const CAP = 3
 
 /**
@@ -143,46 +156,6 @@ describe('concurrent-socket cap is per account', () => {
   })
 })
 
-describe('two-phone demo on one venue NAT', () => {
-  // Both phones share a public IP, so they share one upgrade-attempt key. The
-  // concurrent-socket cap is per account, so there they are independent.
-  const venue = clientKey('203.0.113.7')
-
-  it('keys both phones identically for the upgrade limit, which must allow for it', () => {
-    expect(clientKey('203.0.113.7')).toBe(venue)
-  })
-
-  it('lets two accounts on one NAT each hold a socket with a reconnect in flight', () => {
-    // Worst honest case: each phone's old socket has not closed yet when its
-    // reconnect opens, so four sockets are briefly live at once. Under the old
-    // per-IP key those four counted against one cap; per account, two each.
-    const live = new Map<string, number>()
-    for (const phone of ['phone-a', 'phone-b', 'phone-a', 'phone-b']) {
-      expect(openSocket(live, phone)).toBe(true)
-    }
-    expect(live.get(accountSocketTag('phone-a'))).toBe(2)
-    expect(live.get(accountSocketTag('phone-b'))).toBe(2)
-  })
-
-  it('survives a rough demo: both phones connect, then reconnect repeatedly', () => {
-    // Two initial connects, then each phone reconnects every 5s for a minute
-    // (flaky venue Wi-Fi, app backgrounded, page reloads).
-    const times = [0, 500]
-    for (let t = 5_000; t < WINDOW_MS; t += 5_000) times.push(t, t + 250)
-    const verdicts = replay(times)
-    expect(times.length).toBeLessThanOrEqual(LIMIT)
-    expect(verdicts.every((v) => v.allowed)).toBe(true)
-  })
-
-  it('lets a fresh demo run start right after a previous one', () => {
-    // A full minute of demo reconnects, then a second pair of phones joins.
-    const first = [0, 500]
-    for (let t = 5_000; t < WINDOW_MS; t += 5_000) first.push(t, t + 250)
-    const verdicts = replay([...first, WINDOW_MS + 1_000, WINDOW_MS + 1_500])
-    expect(verdicts.every((v) => v.allowed)).toBe(true)
-  })
-})
-
 describe('parseHits', () => {
   it('keeps finite numbers only', () => {
     expect(parseHits([1, '2', null, Number.NaN, 3, Number.POSITIVE_INFINITY])).toEqual([1, 3])
@@ -246,43 +219,239 @@ function wranglerInt(name: string): number {
   return Number(found[1])
 }
 
-describe('anonymous upgrades have an answer of their own (#150)', () => {
-  // Until #150 a signed-out upgrade never reached the limiter outside demo mode:
-  // the 401 refused it first. These pin the answer that replaced it.
-  it('are counted in a bucket separate from signed-in upgrades from the same address', () => {
-    const key = clientKey('203.0.113.7') ?? ''
-    expect(upgradeRateKey('anonymous', key)).not.toBe(upgradeRateKey('session', key))
-    // The signed-in key is the one that shipped before, so no live window resets.
-    expect(upgradeRateKey('session', key)).toBe(`ratelimit:pool-ws:${key}`)
+describe('the upgrade figures are derived from a venue model (#106)', () => {
+  it('deploys the buyer window the model adds up to', () => {
+    expect(LIMIT).toBe(buyerUpgradeLimit())
+    expect(buyerUpgradeLimit()).toBe(10)
   })
 
-  it('are allowed fewer attempts than signed-in ones, as deployed', () => {
-    const anon = wranglerInt('POOL_ANON_UPGRADE_LIMIT')
-    const session = wranglerInt('POOL_UPGRADE_LIMIT')
-    expect(anon).toBeGreaterThan(0)
-    expect(anon).toBeLessThan(session)
+  it('deploys the anonymous address window the model adds up to', () => {
+    expect(ANON_LIMIT).toBe(anonAddressUpgradeLimit())
+    expect(anonAddressUpgradeLimit()).toBe(20)
   })
 
-  it('so a signed-out crowd behind one NAT cannot spend the signed-in budget', () => {
-    const anonLimit = wranglerInt('POOL_ANON_UPGRADE_LIMIT')
-    const sessionLimit = wranglerInt('POOL_UPGRADE_LIMIT')
-    const buckets = new Map<string, number[]>()
-    const attempt = (bucket: 'session' | 'anonymous', now: number) => {
-      const kvKey = upgradeRateKey(bucket, 'ip4:198.51.100.1')
-      const limit = bucket === 'session' ? sessionLimit : anonLimit
-      const verdict = slidingWindow(buckets.get(kvKey) ?? [], now, WINDOW_MS, limit)
-      buckets.set(kvKey, verdict.hits)
-      return verdict.allowed
+  it('charges a pairing for the handoff tab, which #104 made a third socket', () => {
+    // Two buddies each browse and join, and the receiver's camera app opens one more.
+    expect(UPGRADES_PER_PAIRING).toBe(5)
+    expect(BUYER_BUSIEST_MINUTE.handoffTab).toBe(1)
+    expect(BUYER_BUSIEST_MINUTE.rescan).toBeGreaterThanOrEqual(1)
+  })
+
+  it('keeps every window at a size KV can actually enforce', () => {
+    // One write a second per key: a window allowing more than that drops writes,
+    // under-counts, and never trips — so "raise the figure" has a ceiling.
+    const windowSeconds = WINDOW_MS / 1000
+    expect(LIMIT).toBeLessThanOrEqual(enforceableWindowLimit(windowSeconds))
+    expect(ANON_LIMIT).toBeLessThanOrEqual(enforceableWindowLimit(windowSeconds))
+  })
+
+  it('leaves one buyer unable to exhaust an address on their own', () => {
+    expect(LIMIT).toBeLessThan(ANON_LIMIT)
+    // And the address fits the rush it was sized for, with nothing left over
+    // that a reconnect would need: reconnects are the buyer window's.
+    expect(ANON_VENUE_MINUTE.pairings * UPGRADES_PER_PAIRING + ANON_VENUE_MINUTE.browsers).toBe(
+      ANON_LIMIT,
+    )
+  })
+})
+
+describe('upgradeWindows', () => {
+  const limits = { buyer: 10, anonAddress: 20 }
+  const venue = clientKey('203.0.113.7') ?? ''
+
+  it('counts a signed-in upgrade in its account window and nowhere else', () => {
+    const windows = upgradeWindows(
+      { bucket: 'session', clientKey: venue, buyerId: 'acct-1' },
+      limits,
+    )
+    expect(windows).toEqual([{ kvKey: buyerRateKey('session', 'acct-1'), limit: 10 }])
+  })
+
+  it('counts an anonymous upgrade with a cookie in its own window, then the address', () => {
+    const buyer = demoUserId('a'.repeat(22))
+    const windows = upgradeWindows(
+      { bucket: 'anonymous', clientKey: venue, buyerId: buyer },
+      limits,
+    )
+    expect(windows).toEqual([
+      { kvKey: buyerRateKey('anonymous', buyer), limit: 10 },
+      { kvKey: anonAddressRateKey(venue), limit: 20 },
+    ])
+  })
+
+  it('counts an anonymous upgrade with no cookie by address alone', () => {
+    const windows = upgradeWindows({ bucket: 'anonymous', clientKey: venue, buyerId: null }, limits)
+    expect(windows).toEqual([{ kvKey: anonAddressRateKey(venue), limit: 20 }])
+  })
+
+  it('never shares a key between an account, an anonymous buyer and an address', () => {
+    const keys = [
+      buyerRateKey('session', 'x'),
+      buyerRateKey('anonymous', 'x'),
+      anonAddressRateKey('x'),
+    ]
+    expect(new Set(keys).size).toBe(keys.length)
+    // The anonymous address key is the one that shipped with #150, so no live
+    // window resets on deploy.
+    expect(anonAddressRateKey(venue)).toBe(`ratelimit:pool-ws-anon:${venue}`)
+  })
+})
+
+describe('combineVerdicts', () => {
+  it('allows only when every window does, and waits for the slowest to reopen', () => {
+    const ok = { allowed: true, hits: [], retryAfterSeconds: 0 }
+    const soon = { allowed: false, hits: [], retryAfterSeconds: 4 }
+    const late = { allowed: false, hits: [], retryAfterSeconds: 40 }
+    expect(combineVerdicts([ok, ok])).toEqual({ allowed: true, retryAfterSeconds: 0 })
+    expect(combineVerdicts([ok, soon])).toEqual({ allowed: false, retryAfterSeconds: 4 })
+    expect(combineVerdicts([late, soon, ok])).toEqual({ allowed: false, retryAfterSeconds: 40 })
+    expect(combineVerdicts([])).toEqual({ allowed: true, retryAfterSeconds: 0 })
+  })
+})
+
+/**
+ * The real `checkUpgradeRate` against an in-memory KV, with the deployed
+ * figures. Only `get` and `put` are modelled — enough for the limiter, and
+ * nothing a test below asserts about the runtime.
+ */
+function limiter() {
+  const kv = new Map<string, string>()
+  const env = {
+    SESSIONS: {
+      get: async (key: string) => {
+        const raw = kv.get(key)
+        return raw === undefined ? null : JSON.parse(raw)
+      },
+      put: async (key: string, value: string) => {
+        kv.set(key, value)
+      },
+    },
+    POOL_UPGRADE_LIMIT: String(LIMIT),
+    POOL_ANON_UPGRADE_LIMIT: String(ANON_LIMIT),
+    POOL_UPGRADE_WINDOW_SECONDS: String(WINDOW_MS / 1000),
+  } as unknown as Env
+  let clock = 0
+  // A tenth of a second apart, so every scenario below fits inside one window.
+  const attempt = async (caller: UpgradeCaller) => {
+    clock += 100
+    return (await checkUpgradeRate(env, caller, clock)).allowed
+  }
+  return { kv, attempt }
+}
+
+const VENUE = clientKey('203.0.113.7') ?? ''
+const signedIn = (buyerId: string): UpgradeCaller => ({
+  bucket: 'session',
+  clientKey: VENUE,
+  buyerId,
+})
+const anonymous = (token: string | null): UpgradeCaller => ({
+  bucket: 'anonymous',
+  clientKey: VENUE,
+  buyerId: token === null ? null : demoUserId(token),
+})
+
+/** Everything one completed pairing opens: both buddies browse and join, plus the handoff tab. */
+function pairing(orderer: UpgradeCaller, receiver: UpgradeCaller): UpgradeCaller[] {
+  return [orderer, orderer, receiver, receiver, receiver]
+}
+
+describe('one venue NAT, through the real limiter (#106)', () => {
+  it('pairs fifteen signed-in couples in a minute, which the per-address window refused', async () => {
+    const { attempt } = limiter()
+    const all: boolean[] = []
+    for (let i = 0; i < 15; i++) {
+      // Every receiver also backs out of the handoff tab and scans again.
+      for (const caller of [
+        ...pairing(signedIn(`o-${i}`), signedIn(`r-${i}`)),
+        signedIn(`r-${i}`),
+      ]) {
+        all.push(await attempt(caller))
+      }
     }
-    // The browsing crowd exhausts its own window...
-    const anonymous = Array.from({ length: anonLimit + 5 }, (_, i) => attempt('anonymous', i))
-    expect(anonymous.filter(Boolean)).toHaveLength(anonLimit)
-    // ...and the signed-in buyers on the same Wi-Fi still get every one of theirs.
-    const signedIn = Array.from({ length: sessionLimit }, (_, i) => attempt('session', 100 + i))
-    expect(signedIn.every(Boolean)).toBe(true)
+    // Ninety upgrades from one address in one minute, three times the old ceiling.
+    expect(all).toHaveLength(90)
+    expect(all.every(Boolean)).toBe(true)
   })
 
-  it('and anonymous sockets are counted per address, not per throwaway identity', () => {
+  it("lets one signed-in buyer's busiest honest minute through", async () => {
+    const { attempt } = limiter()
+    const results = []
+    for (let i = 0; i < buyerUpgradeLimit(); i++) results.push(await attempt(signedIn('alice')))
+    expect(results.every(Boolean)).toBe(true)
+  })
+
+  it("does not let one signed-in buyer's reconnect storm touch a neighbour", async () => {
+    const { attempt } = limiter()
+    const storm = []
+    for (let i = 0; i < 50; i++) storm.push(await attempt(signedIn('mallory')))
+    expect(storm.filter(Boolean)).toHaveLength(LIMIT)
+    expect(await attempt(signedIn('alice'))).toBe(true)
+  })
+
+  it("charges an anonymous buyer's refused reconnects to nobody but them", async () => {
+    const { kv, attempt } = limiter()
+    const storm = []
+    for (let i = 0; i < 50; i++) storm.push(await attempt(anonymous('m'.repeat(22))))
+    expect(storm.filter(Boolean)).toHaveLength(LIMIT)
+    // The address recorded the allowed ones only, never the refusals...
+    expect(parseHits(JSON.parse(kv.get(anonAddressRateKey(VENUE)) ?? '[]'))).toHaveLength(LIMIT)
+    // ...so the rest of the room still has the remainder of its window.
+    const room = []
+    for (let i = 0; i < ANON_LIMIT - LIMIT; i++) {
+      room.push(await attempt(anonymous(String(i).padStart(22, 'n'))))
+    }
+    expect(room.every(Boolean)).toBe(true)
+  })
+
+  it('turns away a flood from one machine with no cookie at the address window', async () => {
+    const { attempt } = limiter()
+    const flood = []
+    for (let i = 0; i < 200; i++) flood.push(await attempt(anonymous(null)))
+    expect(flood.filter(Boolean)).toHaveLength(ANON_LIMIT)
+  })
+
+  it('and one rotating a fresh demo cookie per attempt buys nothing by it', async () => {
+    const { attempt } = limiter()
+    const flood = []
+    for (let i = 0; i < 200; i++) flood.push(await attempt(anonymous(String(i).padStart(22, 'f'))))
+    expect(flood.filter(Boolean)).toHaveLength(ANON_LIMIT)
+  })
+
+  it('so a signed-out flood behind the venue NAT cannot spend a signed-in budget', async () => {
+    const { attempt } = limiter()
+    for (let i = 0; i < 200; i++) await attempt(anonymous(null))
+    expect(await attempt(anonymous(null))).toBe(false)
+    expect(await attempt(signedIn('alice'))).toBe(true)
+  })
+
+  it('counts a bystander who taps a photographed link against them, not the buddies', async () => {
+    const { attempt } = limiter()
+    // A bystander tapping the same link over and over runs out of their own window...
+    for (let i = 0; i < 50; i++) await attempt(signedIn('bystander'))
+    expect(await attempt(signedIn('bystander'))).toBe(false)
+    // ...and the receiver the link was meant for still opens it.
+    expect(await attempt(signedIn('receiver'))).toBe(true)
+  })
+
+  it('needs no raised POOL_UPGRADE_LIMIT for a local suite sharing the unknown address', async () => {
+    // `pnpm dev` never sets CF-Connecting-IP, so every local client is `unknown`.
+    // Signed-in windows are per account, so forty accounts each pairing is fine.
+    const { attempt } = limiter()
+    const local = (id: string): UpgradeCaller => ({
+      bucket: 'session',
+      clientKey: 'unknown',
+      buyerId: id,
+    })
+    const all: boolean[] = []
+    for (let i = 0; i < 40; i++) {
+      for (const caller of pairing(local(`o-${i}`), local(`r-${i}`)))
+        all.push(await attempt(caller))
+    }
+    expect(all.every(Boolean)).toBe(true)
+  })
+
+  it('anonymous sockets are still capped concurrently per address, not per identity', () => {
     // A caller with no demo cookie gets a fresh identity per socket, so the cap
     // has to key on the one thing it cannot rotate for free.
     expect(anonSocketTag('ip4:203.0.113.7')).toBe(anonSocketTag('ip4:203.0.113.7'))

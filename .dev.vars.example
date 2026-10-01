@@ -23,16 +23,18 @@ GOOGLE_CLIENT_SECRET=""
 # QUEUE_WARN_LEAD_SECONDS="3"
 # MATCH_CONFIRM_SECONDS="8"
 
-# Socket upgrades one client may make per minute. The limiter keys on
-# `CF-Connecting-IP`, which `pnpm dev` never sets, so locally EVERY client shares
-# the `unknown` bucket — and `pnpm test:e2e` opens several dozen sockets a minute
-# from one machine. Raise it here to run the suites; the production figure lives
-# in wrangler.jsonc and is sized for a venue NAT, not for a test runner. Hitting
-# it looks like "Lost the connection. Try again." rather than like a refusal.
-# POOL_UPGRADE_LIMIT="300"
+# Socket upgrades per minute. Nothing to raise for the signed-in path: since
+# #106 POOL_UPGRADE_LIMIT is each buyer's own window (an account, or a browser's
+# demo cookie), so a suite of many buyers fits the production figure as it is.
 #
-# The same, for upgrades with no session — a separate, tighter bucket since
-# signed-out visitors can browse the market (#150). Every landing page opens one.
+# The ANONYMOUS window is the exception, and the reason is local, not a sign the
+# production figure is wrong. It is counted per connecting address, and the
+# limiter reads that from `CF-Connecting-IP`, which `pnpm dev` never sets — so
+# locally every signed-out client shares one `unknown` address, and
+# `pnpm test:e2e` opens a browse socket per landing page from it, several dozen a
+# minute. Raise it here to run that suite; the production figure in
+# wrangler.jsonc is sized for one venue NAT and is unrelated to a test runner.
+# Hitting it reads "Too many connection attempts" (#105).
 # POOL_ANON_UPGRADE_LIMIT="300"
 
 # Stripe. Both of these are secrets in a deployed environment

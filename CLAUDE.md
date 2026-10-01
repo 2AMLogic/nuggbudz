@@ -114,9 +114,16 @@ state.
   for it before Stripe is consulted, so a seat that slipped past this gate on a
   charged deployment is a free pair. A socket without a seat is sent `market`
   counts and never the `buddies` roster. The upgrade limiter is the flood
-  backstop the old 401 used to be, so anonymous upgrades keep their own tighter
-  window (`POOL_ANON_UPGRADE_LIMIT`) and a per-address concurrent cap in the pool
-  (`POOL_ANON_SOCKETS_PER_IP`) — don't fold them into the signed-in bucket.
+  backstop the old 401 used to be, so anonymous upgrades keep their own
+  per-address window (`POOL_ANON_UPGRADE_LIMIT`) and a per-address concurrent cap
+  in the pool (`POOL_ANON_SOCKETS_PER_IP`) — don't fold them into the signed-in
+  bucket. Since #106 the signed-in window (`POOL_UPGRADE_LIMIT`) is per *buyer*
+  rather than per address, and a demo-cookie browser is counted in a buyer window
+  of its own too, in the same decision as its address: every phone on a venue's
+  Wi-Fi is one address, so an address window is the room's budget, and a buyer
+  refused by their own is never charged to the room. Both figures are derived
+  from the venue model in `shared/ratelimit.ts`, written out beside them in
+  `wrangler.jsonc`; change the model, never just the number.
 - **Nuggchat is relayed and never stored.** A message between matched buddies is
   handed to the other socket or refused — nothing reaches D1, Durable Object
   storage or KV, and there is no history to fetch on reconnect. That is a
@@ -409,12 +416,15 @@ belongs in `smoke` or `test:e2e`.
 
 Pairing needs `ALLOW_UNCHARGED_PAIRING="1"` in `.dev.vars` on a checkout with no
 Stripe keys — otherwise a join is refused rather than paired for free, which is
-the point. `pnpm test:e2e` also needs `POOL_UPGRADE_LIMIT="300"` (and
-`POOL_ANON_UPGRADE_LIMIT="300"`) there: the
-limiter keys on `CF-Connecting-IP`, which `pnpm dev` never sets, so locally every
-client shares one bucket and the suite trips a limit sized for a venue NAT —
-visible as "Lost the connection. Try again.", not as a refusal. `pnpm payment-gate` is the fourth lane: it asserts whichever money
-mode the server it is pointed at reports, and it is the only thing that
+the point. `pnpm test:e2e` also needs `POOL_ANON_UPGRADE_LIMIT="300"` there,
+and the reason is the local server, not the production figure: the anonymous
+window is per address, the limiter reads the address off `CF-Connecting-IP`,
+which `pnpm dev` never sets, so every signed-out local client shares one
+`unknown` address. `POOL_UPGRADE_LIMIT` needs nothing — since #106 it is one
+*buyer's* window (an account, or a demo cookie), and the venue model it is
+derived from sits beside it in `wrangler.jsonc`.
+
+`pnpm payment-gate` is the fourth lane: it asserts whichever money mode the server it is pointed at reports, and it is the only thing that
 exercises the charged path through the real Durable Object. `pnpm honeypot-check`
 is the fifth, and needs `HONEYPOT_BUYERS="1"` (plus Stripe "configured" at a dead
 address, the way CI sets it) to exercise the decoy path; with the flag off it

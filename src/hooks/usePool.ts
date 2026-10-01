@@ -178,8 +178,14 @@ function heldSuffix(heldCents: number): string {
  */
 export type SocketRequest = Pick<JoinRequest, 'lat' | 'lng' | 'demoName'>
 
-function socketUrl({ lat, lng, demoName }: SocketRequest): string {
-  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
+/**
+ * The query string the upgrade decides identity and placement from.
+ *
+ * Shared between the socket URL and the plain-HTTP probe below, so the probe
+ * asks the *same* question the socket did rather than a second one that could
+ * drift from it.
+ */
+function socketParams({ lat, lng, demoName }: SocketRequest): URLSearchParams {
   const params = new URLSearchParams()
   // Sent only on the opt-in precise path. With no coordinates the server falls
   // back to the edge's approximate location, which is why pairing needs no
@@ -193,7 +199,40 @@ function socketUrl({ lat, lng, demoName }: SocketRequest): string {
   if (demoName !== undefined && demoName.trim().length > 0) {
     params.set('name', demoName.trim())
   }
-  return `${scheme}://${window.location.host}/api/pool/ws?${params}`
+  return params
+}
+
+function socketUrl(request: SocketRequest): string {
+  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  return `${scheme}://${window.location.host}/api/pool/ws?${socketParams(request)}`
+}
+
+/**
+ * Tell a tripped rate limit apart from a dead network (#105).
+ *
+ * A browser handed a non-101 response to a `WebSocket` constructor never sees
+ * the body — it only fires `close` — so a refusal and a lost connection are
+ * one event on the wire a client can see. This asks the exact same URL again,
+ * over plain `fetch`, which does surface a body: the Worker answers the rate
+ * check before it even looks for an `Upgrade` header (see `worker/index.ts`),
+ * so this plain GET gets the same 429 the socket attempt did, with
+ * `Retry-After` on it. Called only when a socket closed before it ever opened
+ * — an ordinary close after a successful upgrade never reaches this.
+ */
+async function probeUpgradeRefusal(request: SocketRequest): Promise<string> {
+  try {
+    const res = await fetch(`/api/pool/ws?${socketParams(request)}`)
+    if (res.status === 429) {
+      const retryAfterSeconds = Number.parseInt(res.headers.get('Retry-After') ?? '', 10)
+      return Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+        ? `Too many connection attempts — try again in ${humanWindow(retryAfterSeconds * 1_000)}.`
+        : 'Too many connection attempts — slow down and try again.'
+    }
+  } catch {
+    // The probe itself failed (offline, say) — fall through to the generic
+    // message, which is the truth in that case.
+  }
+  return 'Lost the connection. Try again.'
 }
 
 /**
@@ -207,6 +246,10 @@ export function usePool() {
   const [state, setState] = useState<PoolState>(INITIAL)
   const socketRef = useRef<WebSocket | null>(null)
   const keepaliveRef = useRef<number | null>(null)
+  // Bumped on every `connect` call so a `probeUpgradeRefusal` that resolves
+  // after a newer connection has started knows its answer is stale and must
+  // not overwrite that connection's state.
+  const connectionIdRef = useRef(0)
 
   const stopKeepalive = useCallback(() => {
     if (keepaliveRef.current !== null) window.clearInterval(keepaliveRef.current)
@@ -262,6 +305,7 @@ export function usePool() {
   const connect = useCallback(
     (request: SocketRequest, seat: JoinRequest | null) => {
       close()
+      const connectionId = ++connectionIdRef.current
       // No optimistic position here: `welcome` carries the one the server
       // actually used, which is the only one the radius on the map is true for.
       // A socket that is not asking for a seat stays `idle`: it is looking at
@@ -270,8 +314,12 @@ export function usePool() {
 
       const socket = new WebSocket(socketUrl(request))
       socketRef.current = socket
+      // Whether the upgrade ever completed. A 101 fires `open`; a refused
+      // upgrade (the rate limiter, say) never does — see `onclose` below.
+      let opened = false
 
       socket.onopen = () => {
+        opened = true
         if (seat === null) return
         // Coordinates are omitted unless the buyer opted into precise location:
         // the socket already carries a server-resolved one. Sauces are omitted
@@ -491,14 +539,38 @@ export function usePool() {
         if (socketRef.current !== socket) return
         socketRef.current = null
         stopKeepalive()
-        setState((prev) => {
-          if (TERMINAL.includes(prev.stage)) return prev
-          // A socket that only ever looked at the market has nothing to report
-          // losing: the counts go, and the landing screen carries on without
-          // them. A refused browse upgrade — a rate limit, say — must not greet
-          // a visitor with an error about a seat they never asked for.
-          if (seat === null) return { ...prev, stage: 'idle', market: null }
-          return { ...prev, stage: 'idle', error: 'Lost the connection. Try again.' }
+
+        // A socket that only ever looked at the market has nothing to report
+        // losing: the counts go, and the landing screen carries on without
+        // them. A refused browse upgrade — a rate limit, say — must not greet
+        // a visitor with an error about a seat they never asked for.
+        if (seat === null) {
+          setState((prev) =>
+            TERMINAL.includes(prev.stage) ? prev : { ...prev, stage: 'idle', market: null },
+          )
+          return
+        }
+
+        // An ordinary close after a successful upgrade is a lost connection —
+        // there is no body to read for that. A close before `open` ever fired
+        // might be a lost connection too, or it might be the upgrade limiter
+        // (#105): the two are the same event here, and only a plain HTTP
+        // request to the same URL can tell them apart.
+        if (opened) {
+          setState((prev) =>
+            TERMINAL.includes(prev.stage)
+              ? prev
+              : { ...prev, stage: 'idle', error: 'Lost the connection. Try again.' },
+          )
+          return
+        }
+
+        setState((prev) => (TERMINAL.includes(prev.stage) ? prev : { ...prev, stage: 'idle' }))
+        void probeUpgradeRefusal(request).then((message) => {
+          // A newer connection has started since; its own state owns this slot
+          // now and a stale probe must not stomp on it.
+          if (connectionIdRef.current !== connectionId) return
+          setState((prev) => (TERMINAL.includes(prev.stage) ? prev : { ...prev, error: message }))
         })
       }
     },

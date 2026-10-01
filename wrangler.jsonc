@@ -51,24 +51,43 @@
     // on the account, not the IP, so buyers behind one carrier NAT never share
     // it. An honest buyer needs one socket, or two while a reconnect overlaps.
     "POOL_MAX_SOCKETS_PER_CELL": "3",
-    // Upgrade attempts one client IP (per /64 on IPv6) may make per sliding
-    // window, across all shards. Sized for a venue NAT: two phones on one Wi-Fi,
-    // each reconnecting a few times, must never trip it. Each allowed attempt
-    // costs one KV write (the free tier allows 1,000 per day).
-    "POOL_UPGRADE_LIMIT": "30",
+    // Upgrade windows (#106). Every pool socket is a fresh upgrade, and since
+    // #104 the receiver's handoff tab is one more. Both figures are derived from
+    // the venue model below, which `shared/ratelimit.ts` holds as data and
+    // test/ratelimit.test.ts recomputes against these lines — change the model
+    // there, never just the number here. Each must stay at or under the window
+    // in seconds: KV takes one write a second per key, so a window allowing more
+    // than that under-counts and can never trip.
+    //
+    // POOL_UPGRADE_LIMIT is ONE BUYER's window — an account, or a browser's demo
+    // cookie — not an address's. The busiest honest minute of one phone: browse
+    // 1, turn on precise location 1, join 1, handoff tab 1, back out and rescan
+    // 1, leave and rejoin 2, a socket that drops before opening (usePool's probe
+    // plus the retry) 2, a page reload 1 = 10. Signed-in upgrades are counted
+    // here alone: the per-address window this replaced was the whole room's
+    // budget, since every phone on venue Wi-Fi is one address — fifteen pairings
+    // in a minute behind one NAT were already at its ceiling of 30.
+    "POOL_UPGRADE_LIMIT": "10",
     "POOL_UPGRADE_WINDOW_SECONDS": "60",
-    // The same window for upgrades with no session (#150). Until then a
-    // signed-out upgrade never reached the limiter — the 401 refused it first —
-    // so opening the socket to browsers who have not signed in needs an answer
-    // of its own rather than an inherited one: a separate bucket, so a crowd
-    // browsing signed-out on one venue NAT can never spend the signed-in
-    // buyers' budget, and a tighter one, because a browse socket has no seat to
-    // protect. A page load costs one browse upgrade; a demo phone a few more.
+    // POOL_ANON_UPGRADE_LIMIT is the ADDRESS window, counted only for upgrades
+    // with no session (#150): an anonymous identity is free to mint, so the
+    // address is what turns a flood from one machine away before a Durable
+    // Object runs. A separate bucket, so a signed-out crowd can never spend a
+    // signed-in buyer's budget. Sized for the busiest venue NAT on a deployment
+    // that seats demo buyers: 2 pairings a minute at 5 upgrades each (two buddies
+    // browse and join, plus the handoff tab) = 10, plus 10 signed-out visitors
+    // who only look at the market at 1 each = 20. A reconnect is not in it — the
+    // buyer window above is checked in the same decision, and a buyer refused
+    // there is never charged here, so one phone can spend at most half of this.
+    // Each allowed attempt costs a KV write per window it is counted in (the
+    // free tier allows 1,000 a day).
     "POOL_ANON_UPGRADE_LIMIT": "20",
     // Anonymous sockets one address may hold open at once in one shard. The
     // hard backstop behind the window above: every queue change fans a count
     // out to each idle socket, so this bounds what one address can make that
-    // cost. Sized for a food court behind one NAT, not for a script.
+    // cost. Sized for a food court behind one NAT, not for a script. Left keyed
+    // on the address by #106 on purpose: what piles up on one address is the
+    // thing it bounds, and a fresh anonymous identity costs nothing.
     "POOL_ANON_SOCKETS_PER_IP": "20",
     // A handoff is two taps seconds apart once the buddies are standing
     // together, so five minutes of silence from the second side means the

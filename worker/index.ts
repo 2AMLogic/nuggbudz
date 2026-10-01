@@ -225,21 +225,23 @@ app.get('/api/pool/ws', async (c) => {
   const active = await sessionFromRequest(c.env, c.req.raw)
 
   // Cloudflare sets CF-Connecting-IP at the edge and a caller cannot override
-  // it, unlike X-Forwarded-For. Local dev may omit it; those share one bucket.
+  // it, unlike X-Forwarded-For. Local dev may omit it; those share one address
+  // — `unknown` — which only anonymous upgrades are counted against.
   const clientKey = deriveClientKey(c.req.header('CF-Connecting-IP')) ?? 'unknown'
 
   // Checked here, before the pool is addressed *and before the Upgrade header
   // is even looked at*, so a flood costs a KV read and no Durable Object time.
   //
-  // Until #150 an unauthenticated flood never reached this line outside demo
-  // mode: the session check refused it first, and that 401 was quietly the
-  // flood backstop. It is gone, so the answer is stated rather than inherited
-  // (see `UpgradeBucket`): an upgrade with no session is counted in a bucket of
-  // its own, tighter than the signed-in one and separate from it, keyed on
-  // `clientKey` rather than on identity — minting a fresh anonymous id does not
-  // buy a new bucket. Behind it, the pool caps how many anonymous sockets one
-  // address may hold open in a shard (`anonSocketTag`), because a window only
-  // bounds how fast sockets arrive, not how many pile up.
+  // Which windows an attempt is counted in is `upgradeWindows`' answer (#106):
+  // a signed-in upgrade in its account's own, an anonymous one in its address's
+  // — the flood backstop the 401 used to be (#150), separate from and tighter
+  // than anything signed-in — and, when the browser carries a demo cookie, in
+  // that buyer's own window as well. Every phone on a venue's Wi-Fi is one
+  // address, so a window keyed only on the address is the whole room's budget;
+  // a buyer's own window is what stops one person's reconnects spending it.
+  // Behind all of it, the pool caps how many anonymous sockets one address may
+  // hold open in a shard (`anonSocketTag`), because a window only bounds how
+  // fast sockets arrive, not how many pile up.
   //
   // Ahead of the Upgrade check on purpose (#105): a browser handed a non-101
   // response to a WebSocket constructor never surfaces the body, it just fires
@@ -253,7 +255,19 @@ app.get('/api/pool/ws', async (c) => {
   // nothing extra against the same budget a real retry would also be refused
   // against.
   const anonymous = active === null
-  const rate = await checkUpgradeRate(c.env, clientKey, anonymous ? 'anonymous' : 'session')
+  // A pure header parse, read this early only so the limiter can give the
+  // browser a window of its own; the identity it names is decided further down.
+  const demoToken = demoTokenFromCookieHeader(c.req.header('Cookie'))
+  const rate = await checkUpgradeRate(
+    c.env,
+    active !== null
+      ? { bucket: 'session', clientKey, buyerId: active.session.userId }
+      : {
+          bucket: 'anonymous',
+          clientKey,
+          buyerId: demoToken === null ? null : demoUserId(demoToken),
+        },
+  )
   if (!rate.allowed) {
     c.header('Retry-After', String(rate.retryAfterSeconds))
     return c.json(
@@ -324,7 +338,6 @@ app.get('/api/pool/ws', async (c) => {
    * did. That path degrades to the manual one — the handoff link still shows
    * them six characters to read and type — rather than to a dead end.
    */
-  const demoToken = demoTokenFromCookieHeader(c.req.header('Cookie'))
   const identity =
     active !== null
       ? { userId: active.session.userId, displayName: active.session.displayName }

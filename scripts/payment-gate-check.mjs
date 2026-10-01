@@ -94,6 +94,12 @@ const BUYERS = {
   // against a match the pool has already torn down.
   una: { sid: sessionId('pay-una'), userId: accountId(6), name: 'Una' },
   vic: { sid: sessionId('pay-vic'), userId: accountId(7), name: 'Vic' },
+  // The late-refusal pair: same shape as una/vic — one card declines, the other
+  // clears against a dead match — but Stripe refuses the refund, so the webhook
+  // has to report money *held* rather than money returned (#95). A separate pair
+  // because una/vic's legs are both final by the time theirs is answered.
+  cal: { sid: sessionId('pay-cal'), userId: accountId(20), name: 'Cal' },
+  dot: { sid: sessionId('pay-dot'), userId: accountId(21), name: 'Dot' },
   // The refused-refund pair: one half pays, the other declines, and Stripe
   // refuses to hand the first one's money back.
   wes: { sid: sessionId('pay-wes'), userId: accountId(8), name: 'Wes' },
@@ -638,6 +644,19 @@ if (mode === 'unconfigured') {
       cell,
     })
     check('the late success is acknowledged', late.status === 200, JSON.stringify(late.body))
+    // ...and the acknowledgement says what became of the money, which is the
+    // only way to see it: the refund happens off a tombstone in one cell's
+    // storage, and there is no registry of live cells to ask afterwards.
+    check(
+      'the late success names itself a late refund',
+      late.body.effect === 'late_refund' && late.body.late === true,
+      JSON.stringify(late.body),
+    )
+    check(
+      'and reports the amount Stripe actually handed back, with nothing held',
+      late.body.refundedCents === rv.amountCents && late.body.heldCents === 0,
+      JSON.stringify(late.body),
+    )
 
     await new Promise((r) => setTimeout(r, 800))
     const afterLate = await fetch(`${FAKE_STRIPE}/__recorded`).then((r) => r.json())
@@ -658,6 +677,59 @@ if (mode === 'unconfigured') {
     check('the dead match still books no ledger row', (lateBooked[0]?.n ?? 0) === 0)
 
     for (const socket of [una, vic]) socket.ws.close()
+  }
+
+  // --- a late leg Stripe will NOT refund is reported as held, not as returned ---
+  //
+  // The same path and the same 200 as the block above, and the only difference an
+  // operator can see is which of the two figures carries the money. Before #95
+  // there was no such difference: the route answered `{ ok, handled: true }`
+  // either way, so a refund Stripe refused looked exactly like one it accepted,
+  // and nothing else in the system can tell them apart — the refusal leaves a
+  // tombstone in one cell's storage, and there is no registry of live cells.
+  if (FAKE_STRIPE !== null) {
+    const cal = open(BUYERS.cal, HERE)
+    const dot = open(BUYERS.dot, NEARBY)
+    await Promise.all([cal.opened, dot.opened])
+    await checkDistinctIdentities(cal, dot)
+    cal.join()
+    await cal.expect('waiting')
+    dot.join()
+    const [mc, md] = await Promise.all([cal.expect('matched'), dot.expect('matched')])
+    const rc = await cal.expect('payment_required')
+    const rd = await dot.expect('payment_required')
+
+    await failRefunds(500)
+
+    // Cal's card declines, killing the match with Dot's intent still open.
+    await deliverWebhook(intentOf(rc), 'payment_intent.payment_failed', {
+      match_id: mc.matchId,
+      role: mc.role,
+      cell,
+    })
+    await dot.expect('payment_failed')
+
+    // ...and Dot's clears afterwards, into a refund Stripe will not make.
+    const held = await deliverWebhook(intentOf(rd), 'payment_intent.succeeded', {
+      match_id: mc.matchId,
+      role: md.role,
+      cell,
+    })
+    check(
+      'a late refund the processor refuses is reported as money held',
+      held.status === 200 && held.body.effect === 'late_refund' && held.body.late === true,
+      JSON.stringify(held.body),
+    )
+    check(
+      'and the amount is on the held side, never claimed as refunded',
+      held.body.refundedCents === 0 && held.body.heldCents === rd.amountCents,
+      JSON.stringify(held.body),
+    )
+
+    const restored = await failRefunds(0)
+    check('the refund stub is restored', restored.refunds === 0, JSON.stringify(restored))
+
+    for (const socket of [cal, dot]) socket.ws.close()
   }
 
   // --- a refund the processor refuses is reported as a refund that did not happen ---

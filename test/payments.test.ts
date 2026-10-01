@@ -67,6 +67,16 @@ function ledger(): PaymentLedger {
   ])
 }
 
+/**
+ * What Stripe says each half was charged, when it agrees with the ledger.
+ *
+ * Derived from the settlement rather than typed, like every other money figure in
+ * this file: a cross-check asserted against a literal `449` would keep agreeing
+ * with itself after a reprice while disagreeing with the leg it is checking.
+ */
+const ORDERER_CENTS = settle(DEAL, 2).shares[0].payCents
+const RECEIVER_CENTS = settle(DEAL, 2).shares[1].payCents
+
 describe('paymentIntentSpecs', () => {
   it('charges each buyer exactly their settlement share', () => {
     const settlement = settle(DEAL, 2)
@@ -130,6 +140,7 @@ describe('retainedFeeCents', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     }).ledger
     expect(collectedCents(half)).toBe(449)
@@ -138,14 +149,15 @@ describe('retainedFeeCents', () => {
 
   it('books $0.99 once both halves clear', () => {
     let state = ledger()
-    for (const [role, id] of [
-      ['orderer', 'pi_orderer'],
-      ['receiver', 'pi_receiver'],
+    for (const [role, id, cents] of [
+      ['orderer', 'pi_orderer', ORDERER_CENTS],
+      ['receiver', 'pi_receiver', RECEIVER_CENTS],
     ] as const) {
       state = applyPaymentOutcome(state, {
         matchId: MATCH_ID,
         role,
         paymentIntentId: id,
+        amountCents: cents,
         outcome: 'succeeded',
       }).ledger
     }
@@ -161,6 +173,7 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     })
     expect(effect).toEqual({ kind: 'pending' })
@@ -171,12 +184,14 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     })
     const second = applyPaymentOutcome(first.ledger, {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
       outcome: 'succeeded',
     })
     expect(second.effect).toEqual({ kind: 'cleared' })
@@ -188,6 +203,7 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     }).ledger
 
@@ -195,6 +211,7 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
       outcome: 'failed',
     })
 
@@ -225,12 +242,14 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     }).ledger
     const { ledger: after, effect } = applyPaymentOutcome(paid, {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
       outcome: 'failed',
     })
     if (effect.kind !== 'unwind') throw new Error('expected an unwind')
@@ -249,6 +268,7 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'failed',
     })
     expect(effect).toEqual({ kind: 'unwind', failedRole: 'orderer', refund: [] })
@@ -266,6 +286,7 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'failed',
     }).ledger
 
@@ -273,6 +294,7 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
       outcome: 'succeeded',
     })
     expect(late.effect.kind).toBe('late_refund')
@@ -292,6 +314,7 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     })
     expect(first.effect.kind).toBe('late_refund')
@@ -300,6 +323,7 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
       outcome: 'succeeded',
     })
     expect(second.effect.kind).toBe('late_refund')
@@ -314,12 +338,14 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     })
     const replay = applyPaymentOutcome(first.ledger, {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     })
     expect(replay.effect).toEqual({ kind: 'noop', reason: 'already_final' })
@@ -329,12 +355,14 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
       outcome: 'succeeded',
     })
     const clearedReplay = applyPaymentOutcome(cleared.ledger, {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
       outcome: 'succeeded',
     })
     expect(clearedReplay.effect).toEqual({ kind: 'noop', reason: 'already_final' })
@@ -346,6 +374,7 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_somebody_else',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     })
     expect(effect).toEqual({ kind: 'noop', reason: 'unknown_leg' })
@@ -357,6 +386,7 @@ describe('applyPaymentOutcome', () => {
         matchId: MATCH_ID,
         role: 'orderer',
         paymentIntentId: 'pi_orderer',
+        amountCents: ORDERER_CENTS,
         outcome: 'failed',
       }).ledger,
     )
@@ -364,9 +394,119 @@ describe('applyPaymentOutcome', () => {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
       outcome: 'failed',
     })
     expect(second.effect).toEqual({ kind: 'noop', reason: 'match_over' })
+  })
+
+  it('says nothing about the amount when Stripe reports the settled share', () => {
+    // The control for the three below. Every other call in this file delivers an
+    // agreeing amount, so an `amountMismatch` anywhere would be a real signal.
+    const { amountMismatch } = applyPaymentOutcome(ledger(), {
+      matchId: MATCH_ID,
+      role: 'orderer',
+      paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
+      outcome: 'succeeded',
+    })
+    expect(amountMismatch).toBeUndefined()
+  })
+
+  it('observes a Stripe amount that disagrees, and folds the leg in regardless', () => {
+    const {
+      ledger: after,
+      effect,
+      amountMismatch,
+    } = applyPaymentOutcome(ledger(), {
+      matchId: MATCH_ID,
+      role: 'receiver',
+      paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS + 1,
+      outcome: 'succeeded',
+    })
+
+    // The money has already moved by the time a webhook says so, which is the
+    // whole reason a disagreement cannot be a gate here: refusing the fold would
+    // strand the charge uncollected *and* unrefunded.
+    expect(effect).toEqual({ kind: 'pending' })
+    expect(amountMismatch).toEqual({
+      role: 'receiver',
+      paymentIntentId: 'pi_receiver',
+      ledgerCents: RECEIVER_CENTS,
+      stripeCents: RECEIVER_CENTS + 1,
+    })
+    // Reported, never adopted — the leg keeps the settlement's figure.
+    expect(after.legs.find((l) => l.role === 'receiver')?.amountCents).toBe(RECEIVER_CENTS)
+    expect(collectedCents(after)).toBe(RECEIVER_CENTS)
+  })
+
+  it('keeps the pairing fee bookable on a match Stripe reported drifted amounts for', () => {
+    // The concrete cost of adopting Stripe's figures instead of reporting them,
+    // and the reason that question is answered `report`: `retainedFeeCents` books
+    // the fee only while `collectedCents` equals `totalCollectedCents`, so a
+    // single adopted cent would silently zero the revenue on a match that cleared
+    // normally, with nothing anywhere recording why.
+    let state = ledger()
+    for (const [role, id, cents] of [
+      ['orderer', 'pi_orderer', ORDERER_CENTS + 1],
+      ['receiver', 'pi_receiver', RECEIVER_CENTS + 1],
+    ] as const) {
+      const step = applyPaymentOutcome(state, {
+        matchId: MATCH_ID,
+        role,
+        paymentIntentId: id,
+        amountCents: cents,
+        outcome: 'succeeded',
+      })
+      expect(step.amountMismatch?.stripeCents).toBe(cents)
+      state = step.ledger
+    }
+    expect(collectedCents(state)).toBe(state.totalCollectedCents)
+    expect(retainedFeeCents(state)).toBe(state.platformFeeCents)
+  })
+
+  it('reports a disagreement on a replay too, which is still a disagreeing delivery', () => {
+    const paid = applyPaymentOutcome(ledger(), {
+      matchId: MATCH_ID,
+      role: 'orderer',
+      paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
+      outcome: 'succeeded',
+    }).ledger
+    const replay = applyPaymentOutcome(paid, {
+      matchId: MATCH_ID,
+      role: 'orderer',
+      paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS + 1,
+      outcome: 'succeeded',
+    })
+    expect(replay.effect).toEqual({ kind: 'noop', reason: 'already_final' })
+    expect(replay.amountMismatch?.ledgerCents).toBe(ORDERER_CENTS)
+  })
+
+  it('has nothing to say about an amount for a leg this match does not own', () => {
+    const { effect, amountMismatch } = applyPaymentOutcome(ledger(), {
+      matchId: MATCH_ID,
+      role: 'orderer',
+      paymentIntentId: 'pi_somebody_else',
+      amountCents: ORDERER_CENTS + 1,
+      outcome: 'succeeded',
+    })
+    expect(effect).toEqual({ kind: 'noop', reason: 'unknown_leg' })
+    expect(amountMismatch).toBeUndefined()
+  })
+
+  it('observes a disagreement on a late leg as well as a live one', () => {
+    const late = applyPaymentOutcome(retired(ledger()), {
+      matchId: MATCH_ID,
+      role: 'receiver',
+      paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS + 1,
+      outcome: 'succeeded',
+    })
+    expect(late.effect.kind).toBe('late_refund')
+    expect(late.amountMismatch?.stripeCents).toBe(RECEIVER_CENTS + 1)
   })
 })
 
@@ -376,6 +516,7 @@ describe('refundableLegs', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     }).ledger
     const owed = refundableLegs(paid)
@@ -398,12 +539,14 @@ describe('markRefunded', () => {
         matchId: MATCH_ID,
         role: 'orderer',
         paymentIntentId: 'pi_orderer',
+        amountCents: ORDERER_CENTS,
         outcome: 'succeeded',
       }).ledger,
       {
         matchId: MATCH_ID,
         role: 'receiver',
         paymentIntentId: 'pi_receiver',
+        amountCents: RECEIVER_CENTS,
         outcome: 'succeeded',
       },
     ).ledger
@@ -427,6 +570,7 @@ describe('retireLedger', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'failed',
     }).ledger
     const tombstone = retireLedger(dead, RETIRED_AT)
@@ -441,12 +585,14 @@ describe('retireLedger', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     }).ledger
     const { effect } = applyPaymentOutcome(paid, {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
       outcome: 'failed',
     })
     if (effect.kind !== 'unwind') throw new Error('expected an unwind')
@@ -455,6 +601,7 @@ describe('retireLedger', () => {
         matchId: MATCH_ID,
         role: 'receiver',
         paymentIntentId: 'pi_receiver',
+        amountCents: RECEIVER_CENTS,
         outcome: 'failed',
       }).ledger,
       effect.refund,
@@ -560,7 +707,6 @@ describe('POST /api/stripe/webhook reports what happened to late money', () => {
   // Never reached: the refund call is a stubbed global `fetch`. Set so the pool
   // believes Stripe is configured and actually attempts one.
   const STRIPE_API_BASE = 'https://stripe.invalid/v1'
-  const RECEIVER_SHARE = settle(DEAL, 2).shares[1].payCents
 
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -636,15 +782,23 @@ describe('POST /api/stripe/webhook reports what happened to late money', () => {
     return `t=${timestamp},v1=${hex}`
   }
 
-  /** The receiver's card clearing behind 3DS, against a match that is gone. */
-  async function deliverReceiverSuccess(env: Record<string, unknown>) {
+  /**
+   * The receiver's card clearing behind 3DS, against a match that is gone.
+   *
+   * `amount` defaults to the figure the ledger leg holds, so every case that is
+   * not *about* the amount delivers an event Stripe and the ledger agree on.
+   */
+  async function deliverReceiverSuccess(
+    env: Record<string, unknown>,
+    amount: number = RECEIVER_CENTS,
+  ) {
     const payload = JSON.stringify({
       id: 'evt_late_success',
       type: 'payment_intent.succeeded',
       data: {
         object: {
           id: 'pi_receiver',
-          amount: RECEIVER_SHARE,
+          amount,
           metadata: { match_id: MATCH_ID, role: 'receiver', cell: CELL },
         },
       },
@@ -694,6 +848,39 @@ describe('POST /api/stripe/webhook reports what happened to late money', () => {
     return [[`match:${MATCH_ID}`, { matchId: MATCH_ID, ledger: afterDecline().ledger }]]
   }
 
+  /** A live match with one half in, so the receiver's event clears it. */
+  function liveRecordHalfPaid(): Array<[string, unknown]> {
+    const paid = applyPaymentOutcome(ledger(), {
+      matchId: MATCH_ID,
+      role: 'orderer',
+      paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
+      outcome: 'succeeded',
+    }).ledger
+    return [[`match:${MATCH_ID}`, { matchId: MATCH_ID, ledger: paid }]]
+  }
+
+  /** A live match whose receiver leg is already final, so a redelivery is a replay. */
+  function liveRecordReceiverAlreadyIn(): Array<[string, unknown]> {
+    const paid = applyPaymentOutcome(ledger(), {
+      matchId: MATCH_ID,
+      role: 'receiver',
+      paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
+      outcome: 'succeeded',
+    }).ledger
+    return [[`match:${MATCH_ID}`, { matchId: MATCH_ID, ledger: paid }]]
+  }
+
+  /** One cent off the leg's figure: enough to be a disagreement, nothing more. */
+  const STRIPE_DISAGREES = RECEIVER_CENTS + 1
+  const RECEIVER_MISMATCH = {
+    role: 'receiver',
+    paymentIntentId: 'pi_receiver',
+    ledgerCents: RECEIVER_CENTS,
+    stripeCents: STRIPE_DISAGREES,
+  }
+
   it('says the money went back, and how much, when Stripe confirms the refund', async () => {
     const asked = stubStripe(200)
     const { env, cell } = poolEnv(tombstoned())
@@ -706,7 +893,7 @@ describe('POST /api/stripe/webhook reports what happened to late money', () => {
       handled: true,
       effect: 'late_refund',
       late: true,
-      refundedCents: RECEIVER_SHARE,
+      refundedCents: RECEIVER_CENTS,
       heldCents: 0,
     })
     expect(asked).toEqual([`${STRIPE_API_BASE}/refunds pi_receiver`])
@@ -729,7 +916,7 @@ describe('POST /api/stripe/webhook reports what happened to late money', () => {
       effect: 'late_refund',
       late: true,
       refundedCents: 0,
-      heldCents: RECEIVER_SHARE,
+      heldCents: RECEIVER_CENTS,
     })
     expect(asked).toEqual([`${STRIPE_API_BASE}/refunds pi_receiver`])
     // And the money is still remembered, so a retry has something to ask about.
@@ -746,7 +933,7 @@ describe('POST /api/stripe/webhook reports what happened to late money', () => {
     const { body } = await deliverReceiverSuccess(env)
 
     expect(body.refundedCents).toBe(0)
-    expect(body.heldCents).toBe(RECEIVER_SHARE)
+    expect(body.heldCents).toBe(RECEIVER_CENTS)
   })
 
   it('reports a live record whose ledger is closed exactly as a tombstone', async () => {
@@ -767,7 +954,7 @@ describe('POST /api/stripe/webhook reports what happened to late money', () => {
 
     expect(status).toBe(200)
     expect(body).toEqual(viaTombstone)
-    expect(body.heldCents).toBe(RECEIVER_SHARE)
+    expect(body.heldCents).toBe(RECEIVER_CENTS)
     // The record is still the record — this handler refunds, it never retires.
     expect([...cell.keys()]).toEqual([`match:${MATCH_ID}`])
   })
@@ -825,6 +1012,162 @@ describe('POST /api/stripe/webhook reports what happened to late money', () => {
     expect(status).toBe(200)
     expect(body).toEqual({ ok: true, handled: true })
   })
+
+  /**
+   * Stripe's amount against the ledger leg it was folded into (#170).
+   *
+   * In the same block, and through the same route, for the reason that block's
+   * header gives: the figure `parsePaymentEvent` narrows was dropped in
+   * `worker/index.ts` on its way to the pool, so a cross-check unit-tested on the
+   * reducer would have been green with nothing able to reach it — the defect #19
+   * fixed, and the one this repo keeps meeting.
+   *
+   * Every case here differs from the `amount` the tests above deliver by exactly
+   * one cent, and those tests assert whole bodies with no `amountMismatch` on them
+   * — so they are the control, and the signal here is the field's presence.
+   */
+  it('names a Stripe amount that disagrees with the leg it refunded', async () => {
+    const asked = stubStripe(200)
+    const { env } = poolEnv(tombstoned())
+
+    const { status, body } = await deliverReceiverSuccess(env, STRIPE_DISAGREES)
+
+    expect(status).toBe(200)
+    expect(body).toEqual({
+      ok: true,
+      handled: true,
+      effect: 'late_refund',
+      late: true,
+      refundedCents: RECEIVER_CENTS,
+      heldCents: 0,
+      amountMismatch: RECEIVER_MISMATCH,
+    })
+    // Reported, never adopted: `refundedCents` is still summed from the ledger's
+    // figure, which is the honest thing to report when the refund call names no
+    // amount at all. Adopting Stripe's number here is the decision this field
+    // exists instead of.
+    expect(body.refundedCents).not.toBe(STRIPE_DISAGREES)
+    expect(asked).toEqual([`${STRIPE_API_BASE}/refunds pi_receiver`])
+  })
+
+  it('still refunds the whole PaymentIntent, with no amount parameter', async () => {
+    // The cross-check is an observation and nothing else: a disagreeing amount
+    // must not change what Stripe is asked to do. The form body is asserted whole
+    // rather than just for the intent, because "refunds the whole intent" is a
+    // statement about what is *absent* from it.
+    const bodies: string[] = []
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(String(init?.body))
+      return Response.json({ id: 're_1' })
+    }) as unknown as typeof fetch
+    vi.stubGlobal('fetch', fetchImpl)
+    const { env } = poolEnv(tombstoned())
+
+    await deliverReceiverSuccess(env, STRIPE_DISAGREES)
+
+    expect(bodies).toEqual(['payment_intent=pi_receiver'])
+  })
+
+  it('names a disagreement on a live half, where there are no money figures', async () => {
+    // A live answer carries no `refundedCents`/`heldCents` because the two buyers
+    // are told their money over their own sockets. Neither is ever told an amount
+    // Stripe disagreed about, so this is the only channel it has.
+    const asked = stubStripe(200)
+    const { env } = poolEnv([[`match:${MATCH_ID}`, { matchId: MATCH_ID, ledger: ledger() }]])
+
+    const { status, body } = await deliverReceiverSuccess(env, STRIPE_DISAGREES)
+
+    expect(status).toBe(200)
+    expect(body).toEqual({
+      ok: true,
+      handled: true,
+      effect: 'pending',
+      late: false,
+      amountMismatch: RECEIVER_MISMATCH,
+    })
+    expect(asked).toEqual([])
+  })
+
+  it('names a disagreement on the half that clears the match, and clears it anyway', async () => {
+    const { env } = poolEnv(liveRecordHalfPaid())
+    stubStripe(200)
+
+    const { status, body } = await deliverReceiverSuccess(env, STRIPE_DISAGREES)
+
+    // The money moved, so the match clears: a disagreement is reported beside the
+    // fold, never in place of it.
+    expect(status).toBe(200)
+    expect(body).toEqual({
+      ok: true,
+      handled: true,
+      effect: 'cleared',
+      late: false,
+      amountMismatch: RECEIVER_MISMATCH,
+    })
+  })
+
+  it('names a disagreement on a replay rather than only on the first delivery', async () => {
+    // Which delivery Stripe happens to retry is not something this pool controls,
+    // so a mismatch reported only on the fold that moved a leg would be a signal
+    // that disappears on redelivery.
+    stubStripe(200)
+    const { env } = poolEnv(liveRecordReceiverAlreadyIn())
+
+    const { body } = await deliverReceiverSuccess(env, STRIPE_DISAGREES)
+
+    expect(body).toEqual({
+      ok: true,
+      handled: true,
+      effect: 'noop',
+      late: false,
+      amountMismatch: RECEIVER_MISMATCH,
+    })
+  })
+
+  it('reports no disagreement for a match it holds no leg of', async () => {
+    // Nothing to compare against is not the same as two figures agreeing, and the
+    // field would say the latter. There is no leg, so there is no claim to make.
+    stubStripe(200)
+    const { env } = poolEnv([])
+
+    const { body } = await deliverReceiverSuccess(env, STRIPE_DISAGREES)
+
+    expect(body).toEqual({
+      ok: true,
+      handled: true,
+      effect: 'unknown_match',
+      late: true,
+      refundedCents: 0,
+      heldCents: 0,
+    })
+    expect(body).not.toHaveProperty('amountMismatch')
+  })
+
+  it('drops a whole report rather than repeating a mismatch it cannot read', async () => {
+    stubStripe(200)
+    const { env } = poolEnv([])
+    // A cross-check that could not be read must never print as one that found
+    // nothing, so the route answers the plain acknowledgement instead — the same
+    // rule a late answer missing half its money follows.
+    const unreadable = () =>
+      Response.json({
+        ok: true,
+        effect: 'pending',
+        late: false,
+        amountMismatch: { role: 'receiver', paymentIntentId: 'pi_receiver', ledgerCents: 1 },
+      })
+    const broken = {
+      ...env,
+      NUGG_POOL: { idFromName: () => 'x', get: () => ({ fetch: unreadable }) },
+    }
+
+    const { status, body } = await deliverReceiverSuccess(
+      broken as unknown as Record<string, unknown>,
+    )
+
+    expect(status).toBe(200)
+    expect(body).toEqual({ ok: true, handled: true })
+  })
 })
 
 describe('totalCents', () => {
@@ -877,6 +1220,53 @@ describe('parsePaymentEventReport', () => {
       expect(parsePaymentEventReport(bad)).toBeNull()
     }
   })
+
+  it('reads back a reported amount disagreement, late or live', () => {
+    const mismatch = {
+      role: 'receiver',
+      paymentIntentId: 'pi_receiver',
+      ledgerCents: 449,
+      stripeCents: 450,
+    }
+    expect(
+      parsePaymentEventReport({ effect: 'pending', late: false, amountMismatch: mismatch }),
+    ).toEqual({ effect: 'pending', late: false, amountMismatch: mismatch })
+    expect(
+      parsePaymentEventReport({
+        effect: 'late_refund',
+        late: true,
+        refundedCents: 449,
+        heldCents: 0,
+        amountMismatch: mismatch,
+      }),
+    ).toEqual({
+      effect: 'late_refund',
+      late: true,
+      refundedCents: 449,
+      heldCents: 0,
+      amountMismatch: mismatch,
+    })
+  })
+
+  it('refuses a mismatch it cannot read rather than reporting none', () => {
+    // Dropping an unreadable field from an otherwise-good report would make a
+    // cross-check that could not be read print exactly like one that found
+    // nothing. Equal figures are refused on the same grounds: the field's
+    // presence is the signal, so a mismatch of zero is not readable either.
+    for (const amountMismatch of [
+      null,
+      'receiver',
+      {},
+      { role: 'admin', paymentIntentId: 'pi_1', ledgerCents: 449, stripeCents: 450 },
+      { role: 'receiver', paymentIntentId: '', ledgerCents: 449, stripeCents: 450 },
+      { role: 'receiver', paymentIntentId: 'pi_1', ledgerCents: 449 },
+      { role: 'receiver', paymentIntentId: 'pi_1', ledgerCents: 4.49, stripeCents: 450 },
+      { role: 'receiver', paymentIntentId: 'pi_1', ledgerCents: 449, stripeCents: -450 },
+      { role: 'receiver', paymentIntentId: 'pi_1', ledgerCents: 449, stripeCents: 449 },
+    ]) {
+      expect(parsePaymentEventReport({ effect: 'pending', late: false, amountMismatch })).toBeNull()
+    }
+  })
 })
 
 describe('refundIdempotencyKey', () => {
@@ -893,6 +1283,7 @@ describe('parsePaymentOutcome', () => {
     matchId: MATCH_ID,
     role: 'orderer',
     paymentIntentId: 'pi_1',
+    amountCents: ORDERER_CENTS,
     outcome: 'succeeded',
   }
 
@@ -914,6 +1305,20 @@ describe('parsePaymentOutcome', () => {
   it('rejects missing identifiers', () => {
     expect(parsePaymentOutcome(JSON.stringify({ ...good, matchId: '' }))).toBeNull()
     expect(parsePaymentOutcome(JSON.stringify({ ...good, paymentIntentId: 7 }))).toBeNull()
+  })
+
+  it('rejects an amount that is absent, fractional, negative or not a number', () => {
+    // The cross-check's figure is validated like every other field here rather
+    // than defaulted, because a body with no amount cannot be cross-checked, and
+    // an amount nobody looked at is indistinguishable from two that agreed.
+    // Fractional is refused on the repo's own terms: money is integer cents.
+    for (const amountCents of [undefined, null, '449', 4.49, -1, Number.NaN]) {
+      expect(parsePaymentOutcome(JSON.stringify({ ...good, amountCents }))).toBeNull()
+    }
+    expect(parsePaymentOutcome(JSON.stringify({ ...good, amountCents: 0 }))).toEqual({
+      ...good,
+      amountCents: 0,
+    })
   })
 })
 
@@ -1142,6 +1547,7 @@ describe('allLegsPaid', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     })
     expect(allLegsPaid(first.ledger)).toBe(false)
@@ -1149,6 +1555,7 @@ describe('allLegsPaid', () => {
       matchId: MATCH_ID,
       role: 'receiver',
       paymentIntentId: 'pi_receiver',
+      amountCents: RECEIVER_CENTS,
       outcome: 'succeeded',
     })
     expect(allLegsPaid(second.ledger)).toBe(true)
@@ -1159,6 +1566,7 @@ describe('allLegsPaid', () => {
       matchId: MATCH_ID,
       role: 'orderer',
       paymentIntentId: 'pi_orderer',
+      amountCents: ORDERER_CENTS,
       outcome: 'succeeded',
     })
     const unwound = markRefunded(paid.ledger, refundableLegs(paid.ledger))

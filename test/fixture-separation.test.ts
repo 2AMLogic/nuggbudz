@@ -24,6 +24,7 @@ import { DEMO_ORIGIN } from '../shared/location'
 // file's job is to check the numbers the Worker is actually given rather than a
 // second copy of them.
 import wranglerSource from '../wrangler.jsonc?raw'
+import { jobIds, jobSteps, stepInvokes } from './lib/ci-workflow'
 
 /**
  * Every live-pairing fixture in this repo — `scripts/smoke.mjs` and `e2e/` — has
@@ -386,29 +387,49 @@ describe('the radius is configured in one place', () => {
  * are isolated by *where they run*, and that is what is asserted here, derived from
  * the scenario table, package.json and the CI job definitions rather than from a
  * list of which scenarios may share a runner.
+ *
+ * Two things the first version of this block could not see, both found by mutating
+ * the workflow rather than by reading it:
+ *
+ *  - **A renamed runner.** `\bpnpm demo-check\b` matches `pnpm demo-check-renamed`,
+ *    because `-` is a word boundary — so dropping a runner out of CI left this green
+ *    while the scenario it drives became isolated by nothing. `stepInvokes` in
+ *    `test/lib/ci-workflow.ts` requires the command to be *ended*, not merely begun.
+ *  - **A backgrounded runner.** "No job serves two runners" rests on steps running in
+ *    sequence. A `&` breaks that: the runner outlives its own step and is still live
+ *    when the next one starts. That is now asserted rather than assumed.
+ *
+ * The job graph is read through `test/lib/ci-workflow.ts`, which is also what
+ * `test/main-red-alert.test.ts` reads it with — one parser for this workflow, and a
+ * step-at-a-time one, so a command inside a multi-line `run: |` block is found and a
+ * command in a *comment* about a sibling job is not.
  */
 describe('server-resolved scenarios are isolated by runner, not by distance', () => {
   const resolved = Object.entries(SCENARIOS).filter(([, spec]) => spec.market === 'serverResolved')
 
   const scripts = (JSON.parse(packageSource) as { scripts: Record<string, string> }).scripts
 
-  /** Job id -> the text of its definition, split on the two-space-indented keys. */
-  const jobs = new Map<string, string>()
-  const jobsBlock = ciSource.slice(ciSource.search(/^jobs:\s*$/m))
-  for (const part of jobsBlock.split(/^ {2}(?=[\w-]+:\s*$)/m).slice(1)) {
-    jobs.set(part.slice(0, part.indexOf(':')), part)
-  }
+  const ciJobs = jobIds(ciSource)
 
-  const jobsRunning = (script: string) =>
-    [...jobs]
-      .filter(([, text]) =>
-        new RegExp(`^\\s*-?\\s*run:.*\\bpnpm ${script.replace(':', '\\:')}\\b`, 'm').test(text),
-      )
-      .map(([id]) => id)
+  /** The steps of `job` that run `pnpm <script>` — one entry per step, in job order. */
+  const stepsRunning = (job: string, script: string): string[] =>
+    jobSteps(ciSource, job).filter((step) => stepInvokes(step, `pnpm ${script}`))
+
+  const jobsRunning = (script: string): string[] =>
+    ciJobs.filter((job) => stepsRunning(job, script).length > 0)
+
+  /** The script a server-resolved scenario names, or a failure that says it named none. */
+  const runnerOf = (name: string): string => {
+    const runner = SCENARIOS[name].runner
+    if (runner === undefined) {
+      throw new Error(`'${name}' is server-resolved and must say which script runs it`)
+    }
+    return runner
+  }
 
   it('is not vacuous: there are server-resolved scenarios and CI jobs to read', () => {
     expect(resolved.length).toBeGreaterThan(0)
-    expect(jobs.size).toBeGreaterThan(3)
+    expect(ciJobs.length).toBeGreaterThan(3)
   })
 
   it('covers every scenario the geometric checks cannot see, and only those', () => {
@@ -422,22 +443,37 @@ describe('server-resolved scenarios are isolated by runner, not by distance', ()
     }
   })
 
-  for (const [name, spec] of resolved) {
-    it(`${name} names a runner that package.json defines and CI actually runs`, () => {
-      const runner = (spec as { runner?: string }).runner
+  for (const [name] of resolved) {
+    it(`${name} names a runner package.json defines and CI runs, in the foreground`, () => {
+      const runner = SCENARIOS[name].runner
       expect(runner, `${name} is server-resolved and must say which script runs it`).toBeDefined()
+      if (runner === undefined) return
       expect(Object.keys(scripts), `${name}.runner`).toContain(runner)
+      const jobs = jobsRunning(runner)
       expect(
-        jobsRunning(runner as string),
+        jobs,
         `no CI job runs 'pnpm ${runner}', so ${name} is never exercised`,
       ).not.toHaveLength(0)
+      for (const job of jobs) {
+        for (const step of stepsRunning(job, runner)) {
+          const backgrounded = step
+            .split('\n')
+            .some((line) => stepInvokes(line, `pnpm ${runner}`) && /&\s*$/.test(line))
+          expect(
+            backgrounded,
+            `job '${job}' backgrounds 'pnpm ${runner}'. "No job serves two runners" below rests ` +
+              'on steps running in sequence; a backgrounded runner outlives its own step and can ' +
+              'still be queueing buyers on the demo origin when the next step starts.',
+          ).toBe(false)
+        }
+      }
     })
   }
 
   it('gives each runner jobs of its own, so no server process sees two runners', () => {
     const owner = new Map<string, string>()
-    for (const [name, spec] of resolved) {
-      const runner = (spec as { runner?: string }).runner as string
+    for (const [name] of resolved) {
+      const runner = runnerOf(name)
       for (const job of jobsRunning(runner)) {
         const other = owner.get(job)
         expect(
@@ -453,8 +489,8 @@ describe('server-resolved scenarios are isolated by runner, not by distance', ()
 
   it('lets scenarios share a runner only when that runner is serial', () => {
     const byRunner = new Map<string, string[]>()
-    for (const [name, spec] of resolved) {
-      const runner = (spec as { runner?: string }).runner as string
+    for (const [name] of resolved) {
+      const runner = runnerOf(name)
       byRunner.set(runner, [...(byRunner.get(runner) ?? []), name])
     }
     for (const [runner, names] of byRunner) {

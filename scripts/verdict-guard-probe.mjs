@@ -71,14 +71,29 @@ export function runPostVerdict(args, options = {}) {
       stub,
       [
         '#!/usr/bin/env bash',
-        // Only `pr comment` is answered. Anything else exits non-zero on
-        // purpose: this suite only exercises paths that must not need the
-        // forge, so an unexpected call should fail loudly rather than pass.
-        'if [ "$1" = "pr" ] && [ "$2" = "comment" ]; then',
+        // Handle both `pr comment` and `issue comment`. Anything else exits
+        // non-zero on purpose: this suite only exercises paths that must not
+        // need the forge, so an unexpected call should fail loudly rather than pass.
+        'if ([ "$1" = "pr" ] || [ "$1" = "issue" ]) && [ "$2" = "comment" ]; then',
+        '  body_file=""',
         '  while [ $# -gt 0 ]; do',
-        '    if [ "$1" = "--body" ]; then printf "%s" "$2" > "$STUB_RECORD"; fi',
-        '    shift',
+        '    if [ "$1" = "--body" ]; then',
+        '      printf "%s" "$2" > "$STUB_RECORD"',
+        '      shift 2',
+        '    elif [ "$1" = "--body-file" ]; then',
+        '      body_file="$2"',
+        '      shift 2',
+        '    else',
+        '      shift',
+        '    fi',
         '  done',
+        '  if [ -n "$body_file" ]; then',
+        '    if [ "$body_file" = "-" ]; then',
+        '      cat > "$STUB_RECORD"',
+        '    else',
+        '      cat "$body_file" > "$STUB_RECORD"',
+        '    fi',
+        '  fi',
         '  echo "https://example.invalid/pull/1#issuecomment-1"',
         '  exit 0',
         'fi',

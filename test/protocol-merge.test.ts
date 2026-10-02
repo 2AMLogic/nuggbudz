@@ -37,6 +37,9 @@ const MONEY_SUMMARY = 'Payment in front of the pickup code, on a branch that kno
 
 let merged: VersionBumpMergeResult
 
+// The 60s budget is deliberate: this runs a real two-branch `git` merge in a throwaway
+// temp repo (init, commits, checkouts, merge), which is process spawning and disk I/O
+// that stalls on a loaded CI box, not a slow pure function. Do not "optimise" it down.
 beforeAll(() => {
   merged = probeVersionBumpMerge({
     protocolSource,
@@ -46,7 +49,7 @@ beforeAll(() => {
       { name: 'money', summary: MONEY_SUMMARY },
     ],
   })
-})
+}, 60_000)
 
 describe('two branches bumping the wire version', () => {
   it('cannot merge cleanly', () => {

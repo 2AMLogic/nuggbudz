@@ -1,5 +1,5 @@
 import { pickupQrMatrix, QR_QUIET_ZONE_MODULES, qrModulePixels, qrSpanModules } from '@shared/qr'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 /**
  * The printed frame around the symbol, per side, in CSS pixels.
@@ -70,7 +70,18 @@ export function PickupQr({ value }: { value: string }) {
     return () => observer.disconnect()
   }, [])
 
-  useEffect(() => {
+  // Also a layout effect, and for the same reason as the measurement above:
+  // setting `canvas.width`/`height` (via the JSX attributes below) clears the
+  // backing store, so the commit that resizes the canvas is itself a blank
+  // frame until something draws into it. A plain `useEffect` runs after that
+  // commit paints, so the symbol would flash blank for one frame on first
+  // render and on every resize/rotation the `ResizeObserver` above reacts to
+  // (#176) — the identical flicker the pitch measurement was already a layout
+  // effect to avoid, just one step later in the same render. Up to 45x45
+  // `fillRect` calls is comfortably sub-millisecond (measured against this
+  // repo's longest-origin symbol), so moving it before paint costs nothing
+  // worth trading the flicker for.
+  useLayoutEffect(() => {
     const canvas = canvasRef.current
     if (canvas === null || span === 0) return
     const context = canvas.getContext('2d')

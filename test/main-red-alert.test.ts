@@ -11,6 +11,9 @@ import {
   notGreenJobs,
 } from '../scripts/main-red-alert.mjs'
 import { runAlertAgainstStub } from '../scripts/main-red-alert-probe.mjs'
+// The same reader `test/fixture-separation.test.ts` uses to ask which job runs
+// which lane — one parser for this workflow, not one per test file.
+import { jobBlock, jobIds } from './lib/ci-workflow'
 
 /**
  * The notifier that makes a red `main` something somebody is handed (issue #57).
@@ -31,34 +34,13 @@ import { runAlertAgainstStub } from '../scripts/main-red-alert-probe.mjs'
  * silence.
  */
 
-/** Top-level job ids under `jobs:` — those are the only keys at two spaces. */
-function workflowJobIds(yaml: string): string[] {
-  const lines = yaml.split('\n')
-  const start = lines.indexOf('jobs:')
-  expect(start).toBeGreaterThan(-1)
-  return lines.slice(start + 1).flatMap((line) => {
-    const match = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line)
-    return match ? [match[1]] : []
-  })
-}
-
-/** The alert job's own block, from its key to the next job id. */
-function jobBlock(yaml: string, id: string): string {
-  const lines = yaml.split('\n')
-  const start = lines.indexOf(`  ${id}:`)
-  expect(start).toBeGreaterThan(-1)
-  const rest = lines.slice(start + 1)
-  const end = rest.findIndex((line) => /^ {2}[A-Za-z0-9_-]+:\s*$/.test(line))
-  return (end === -1 ? rest : rest.slice(0, end)).join('\n')
-}
-
 /** Every label name `.loom/scripts/sync-labels.sh` would create on the forge. */
 const repoLabels = [...labelsYaml.matchAll(/^- name: (.+)$/gm)].map((match) => match[1].trim())
 
 const ALERT_JOB = 'main-red-alert'
 
 describe('the alert job is wired to every check it claims to watch', () => {
-  const jobs = workflowJobIds(ciWorkflow)
+  const jobs = jobIds(ciWorkflow)
   const block = jobBlock(ciWorkflow, ALERT_JOB)
 
   it('exists in the workflow at all', () => {

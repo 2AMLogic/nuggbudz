@@ -21,6 +21,15 @@ export interface Scenario {
   market: string
   fixtures: string[]
   what: string
+  /**
+   * The `package.json` script that drives this scenario — required on
+   * `serverResolved`, where it is the whole isolation story, and meaningless
+   * anywhere else (#96). Declared here so the separation test reads it rather
+   * than casting `spec` to a shape this file does not admit: a cast would keep
+   * compiling after the field was renamed, which is the one change that would
+   * make the check stop finding anything.
+   */
+  runner?: string
 }
 
 export type MarketRelation = 'within-radius' | 'beyond-radius' | 'same-point'

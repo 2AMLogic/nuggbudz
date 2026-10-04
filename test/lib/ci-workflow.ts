@@ -39,14 +39,17 @@ export function jobBlock(yaml: string, id: string): string {
 }
 
 /**
- * One entry per `- ` step of a job, in the order the job runs them, with comment
- * lines removed.
+ * One entry per `- ` step of a job, in the order the job runs them: the step's
+ * `run` scalar alone, with comment lines removed, or '' for a step that runs no
+ * shell (`uses:`).
  *
  * The comments have to go: this workflow explains itself at length, and a job
  * that merely *mentions* `pnpm smoke` in a comment about a sibling job does not
- * run it. The order is the point of the list — steps inside one job run in
- * sequence, so two commands in two different steps of one job are never live at
- * the same time.
+ * run it. So does everything but `run`: a step *named* `Run pnpm demo-check` whose
+ * command is `pnpm demo-check-renamed` invokes nothing called `demo-check`, and
+ * reading the name would say it does. The order is the point of the list — steps
+ * inside one job run in sequence, so two commands in two different steps of one
+ * job are never live at the same time.
  */
 export function jobSteps(yaml: string, id: string): string[] {
   const body = jobBlock(yaml, id)
@@ -58,7 +61,29 @@ export function jobSteps(yaml: string, id: string): string[] {
   return body
     .split(/^ {6}- /m)
     .slice(1)
-    .map((step) => step.trimEnd())
+    .map((step) => stepRun(step.trimEnd()))
+}
+
+/**
+ * The `run` value of one step, inline or block scalar. The step's keys sit at
+ * eight spaces (the first one shares the `- ` line, whose six-space dash was
+ * consumed by the split), so a `run:` nested under `with:` or `env:` is not it.
+ */
+function stepRun(step: string): string {
+  const lines = step.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const match = /^( *)run:\s*(.*)$/.exec(lines[i])
+    if (!match) continue
+    if (match[1].length !== (i === 0 ? 0 : 8)) continue
+    if (!/^[|>][+-]?\d*$/.test(match[2])) return match[2]
+    const block: string[] = []
+    for (const line of lines.slice(i + 1)) {
+      if (line.trim() !== '' && !/^ {9,}/.test(line)) break
+      block.push(line)
+    }
+    return block.join('\n').trimEnd()
+  }
+  return ''
 }
 
 /**

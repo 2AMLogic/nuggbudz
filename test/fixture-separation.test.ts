@@ -507,3 +507,36 @@ describe('server-resolved scenarios are isolated by runner, not by distance', ()
     }
   })
 })
+
+describe('the workflow reader looks at what a step runs, not what it is called', () => {
+  const workflow = (step: string): string => `jobs:\n  demo:\n    steps:\n${step}\n`
+
+  it('does not let a step name stand in for the command', () => {
+    const renamed = workflow(
+      [
+        '      - name: Run pnpm demo-check',
+        '        run: BASE=http://localhost:5211 pnpm demo-check-renamed',
+      ].join('\n'),
+    )
+    expect(jobSteps(renamed, 'demo').some((s) => stepInvokes(s, 'pnpm demo-check'))).toBe(false)
+  })
+
+  it('still finds the command in an inline run, a block run, and after a name', () => {
+    for (const step of [
+      '      - run: BASE=http://localhost:5211 pnpm demo-check',
+      '      - name: x\n        run: pnpm demo-check',
+      '      - name: x\n        run: |\n          echo hi\n          pnpm demo-check\n',
+    ]) {
+      expect(jobSteps(workflow(step), 'demo').some((s) => stepInvokes(s, 'pnpm demo-check'))).toBe(
+        true,
+      )
+    }
+  })
+
+  it('ignores a command in a sibling key such as with:', () => {
+    const step = '      - name: x\n        with:\n          run: pnpm demo-check'
+    expect(jobSteps(workflow(step), 'demo').some((s) => stepInvokes(s, 'pnpm demo-check'))).toBe(
+      false,
+    )
+  })
+})

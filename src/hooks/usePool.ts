@@ -246,9 +246,11 @@ export function usePool() {
   const [state, setState] = useState<PoolState>(INITIAL)
   const socketRef = useRef<WebSocket | null>(null)
   const keepaliveRef = useRef<number | null>(null)
-  // Bumped on every `connect` call so a `probeUpgradeRefusal` that resolves
-  // after a newer connection has started knows its answer is stale and must
-  // not overwrite that connection's state.
+  // Bumped by `close` — and so by every `connect`, `leave` and unmount — so a
+  // `probeUpgradeRefusal` that resolves after the connection it was asking
+  // about has been let go knows its answer is stale and must not write it
+  // anywhere. Bumping it in `connect` alone covered only the reconnecting
+  // callers (#178): sign-out leaves and reconnects a whole round trip later.
   const connectionIdRef = useRef(0)
 
   const stopKeepalive = useCallback(() => {
@@ -277,6 +279,12 @@ export function usePool() {
 
   const close = useCallback(() => {
     stopKeepalive()
+    // Retires the generation before the socket, because the thing that outlives
+    // a close is not the socket — detaching `onclose` takes care of that — but a
+    // refusal probe a *previous* close already started. There is no socket left
+    // to drop that answer on arrival, so the generation is the only thing that
+    // can, and a close with nothing open is exactly when it has to.
+    connectionIdRef.current += 1
     const socket = socketRef.current
     socketRef.current = null
     if (socket !== null) {
@@ -305,7 +313,9 @@ export function usePool() {
   const connect = useCallback(
     (request: SocketRequest, seat: JoinRequest | null) => {
       close()
-      const connectionId = ++connectionIdRef.current
+      // The generation `close` just minted: this connection owns it until the
+      // next close, whether that close reconnects or not.
+      const connectionId = connectionIdRef.current
       // No optimistic position here: `welcome` carries the one the server
       // actually used, which is the only one the radius on the map is true for.
       // A socket that is not asking for a seat stays `idle`: it is looking at
@@ -567,8 +577,9 @@ export function usePool() {
 
         setState((prev) => (TERMINAL.includes(prev.stage) ? prev : { ...prev, stage: 'idle' }))
         void probeUpgradeRefusal(request).then((message) => {
-          // A newer connection has started since; its own state owns this slot
-          // now and a stale probe must not stomp on it.
+          // This connection has been let go since — a newer one started, or the
+          // seat was simply left. Either way nobody is waiting on this answer
+          // and the state it would land on is not this connection's any more.
           if (connectionIdRef.current !== connectionId) return
           setState((prev) => (TERMINAL.includes(prev.stage) ? prev : { ...prev, error: message }))
         })

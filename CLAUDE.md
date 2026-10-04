@@ -197,6 +197,24 @@ state.
   because `demo` is answered before the secrets are consulted — enforced on the
   path, and proved by the `demo-check` CI job running with Stripe pointed at a
   dead address.
+- **Stripe's amount is cross-checked against the ledger leg, and reported rather
+  than adopted (#170).** `PaymentLeg.amountCents` is copied from `share.payCents`
+  and is the figure *every* operator money figure is summed from — `collectedCents`,
+  the webhook's `refundedCents` / `heldCents`, `holds.held_cents`,
+  `disputes.outstanding_cents` — and since `refundPaymentIntent` refunds the whole
+  PaymentIntent with no amount parameter, "what Stripe handed back" was only ever
+  the ledger's own number. So `applyPaymentOutcome` now compares the two and hands
+  a `PaymentAmountMismatch` out beside the fold, onto the webhook's JSON answer.
+  It is **never a gate** — the money has already moved, so refusing to fold a leg
+  in would strand it uncollected *and* unrefunded — and it is **never adopted**,
+  which is the decision, not an omission: `amountCents` is a leg's *share of a
+  settlement*, and `retainedFeeCents` books the pairing fee only while
+  `collectedCents` equals `totalCollectedCents`, so one adopted cent would zero
+  the revenue on a match that cleared normally with nothing recording why. Money
+  this repo cannot account for is surfaced (`holds`, `disputes`), never written
+  over. The fold is structurally unable to read an amount — `foldLeg` is handed the
+  outcome alone — and the comparison runs on every branch a leg was found for,
+  replays included, because which delivery Stripe retries is not ours to choose.
 - **A dispute holds the money; every other teardown refunds it — and a refund is
   only a refund once Stripe says so.** `disputeMatch` deliberately does not
   refund: auto-refunding when one buddy confirms and the other goes silent would
@@ -460,7 +478,7 @@ Work is coordinated through `loom:` labels on issues and pull requests, and the 
 <!-- END LOOM ORCHESTRATION -->
 
 <!-- BEGIN REPO-SKILLS -->
-This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.14.0 installed —
+This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.19.5 installed —
 general repository hygiene and environment commands invoked as `/repo:<command>`. Run
 `/repo:help` for the command list, or see `.claude/skills/repo/SKILL.md` for the full
 guide. Hygiene commands apply safe, reversible fixes by default and report each

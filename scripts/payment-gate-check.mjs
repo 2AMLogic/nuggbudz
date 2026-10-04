@@ -262,11 +262,28 @@ function open(buyer, at) {
 }
 
 /** A signed `payment_intent.*` delivery, exactly as Stripe would shape it. */
-async function deliverWebhook(intentId, type, metadata) {
+// The PaymentIntent id is the client secret up to the `_secret` marker, which
+// is how a real Stripe client secret is shaped too.
+const intentOf = (message) => message.clientSecret.split('_secret')[0]
+
+/**
+ * A signed delivery for the charge one buyer was told to make.
+ *
+ * Takes the buyer's own `payment_required` message rather than an intent id, so
+ * the id and the amount come off the same message and no call site can sign an
+ * event naming one buyer's intent at another buyer's price. The amount is a real
+ * figure for the same reason (#170): since the pool now cross-checks it against
+ * the ledger leg, the `amount: 0` this used to hardcode would make every
+ * delivery in this lane report a disagreement, and a lane that fabricates drift
+ * everywhere cannot notice drift anywhere. `amountCents` overrides it, for the
+ * one case below that is deliberately testing a disagreement.
+ */
+async function deliverWebhook(required, type, metadata, amountCents = required.amountCents) {
+  const intentId = intentOf(required)
   const body = JSON.stringify({
     id: `evt_${intentId}_${type}`,
     type,
-    data: { object: { id: intentId, amount: 0, metadata } },
+    data: { object: { id: intentId, amount: amountCents, metadata } },
   })
   const t = Math.floor(Date.now() / 1000)
   const v1 = createHmac('sha256', WEBHOOK_SECRET).update(`${t}.${body}`).digest('hex')
@@ -481,14 +498,11 @@ if (mode === 'unconfigured') {
     `${tooEarly.code}: ${tooEarly.message}`,
   )
 
-  // The PaymentIntent id is the client secret up to the `_secret` marker, which
-  // is how a real Stripe client secret is shaped too.
-  const intentOf = (message) => message.clientSecret.split('_secret')[0]
   // A webhook has to name the cell that owns the match, the same way a real
   // PaymentIntent's metadata does. It came down on the welcome.
   const cell = pia.inbox.find((m) => m.type === 'welcome').cell
 
-  const first = await deliverWebhook(intentOf(rp), 'payment_intent.succeeded', {
+  const first = await deliverWebhook(rp, 'payment_intent.succeeded', {
     match_id: mp.matchId,
     role: 'orderer',
     cell,
@@ -496,12 +510,22 @@ if (mode === 'unconfigured') {
   check('a signed webhook is accepted', first.status === 200, JSON.stringify(first.body))
   check('one half paid clears nothing', (await pia.saw('payment_cleared')) === false)
 
-  const second = await deliverWebhook(intentOf(rq), 'payment_intent.succeeded', {
+  const second = await deliverWebhook(rq, 'payment_intent.succeeded', {
     match_id: mp.matchId,
     role: 'receiver',
     cell,
   })
   check('the second half is accepted too', second.status === 200, JSON.stringify(second.body))
+  // The cross-check's quiet half, and the one that makes the loud half mean
+  // something: on the ordinary charged path the amount Stripe reports and the
+  // amount the ledger leg holds are the same number, so the pool reports no
+  // disagreement at all. Asserted here rather than in `vitest` because the two
+  // figures only meet in the real Durable Object.
+  check(
+    'a charge Stripe reports at the settled price raises no amount disagreement',
+    first.body.amountMismatch === undefined && second.body.amountMismatch === undefined,
+    `${JSON.stringify(first.body)} / ${JSON.stringify(second.body)}`,
+  )
 
   const [cp, cq] = await Promise.all([
     pia.expect('payment_cleared'),
@@ -519,7 +543,7 @@ if (mode === 'unconfigured') {
     `${cp.pickupCode} vs ${mp.matchId}`,
   )
 
-  const replay = await deliverWebhook(intentOf(rp), 'payment_intent.succeeded', {
+  const replay = await deliverWebhook(rp, 'payment_intent.succeeded', {
     match_id: mp.matchId,
     role: 'orderer',
     cell,
@@ -528,6 +552,31 @@ if (mode === 'unconfigured') {
     'a replayed webhook is absorbed rather than clearing twice',
     replay.status === 200 && replay.body.ok === true,
     JSON.stringify(replay.body),
+  )
+
+  // ...and the loud half: a delivery whose amount is not the one the ledger holds.
+  // Still absorbed — the money moved, so refusing to fold a leg in would strand
+  // it — and the disagreement is named on the response instead, which is the only
+  // place it is visible. Driven as a replay deliberately: nothing about this
+  // match's money changes, so the lane can assert the report without having to
+  // repair anything afterwards.
+  const drifted = await deliverWebhook(
+    rp,
+    'payment_intent.succeeded',
+    { match_id: mp.matchId, role: 'orderer', cell },
+    rp.amountCents + 1,
+  )
+  check(
+    'a webhook whose amount disagrees with the ledger leg is still accepted',
+    drifted.status === 200 && drifted.body.ok === true,
+    JSON.stringify(drifted.body),
+  )
+  check(
+    "and names both figures rather than quietly adopting Stripe's",
+    drifted.body.amountMismatch?.ledgerCents === rp.amountCents &&
+      drifted.body.amountMismatch?.stripeCents === rp.amountCents + 1 &&
+      drifted.body.amountMismatch?.role === 'orderer',
+    JSON.stringify(drifted.body),
   )
 
   // Payment unlocks the handshake; it does not replace it.
@@ -565,7 +614,7 @@ if (mode === 'unconfigured') {
   const rr = await rex.expect('payment_required')
   await tam.expect('payment_required')
 
-  await deliverWebhook(intentOf(rr), 'payment_intent.succeeded', {
+  await deliverWebhook(rr, 'payment_intent.succeeded', {
     match_id: mr.matchId,
     role: mr.role,
     cell,
@@ -620,7 +669,7 @@ if (mode === 'unconfigured') {
     const rv = await vic.expect('payment_required')
 
     // Una's card declines. The match dies with Vic's PaymentIntent still open.
-    await deliverWebhook(intentOf(ru), 'payment_intent.payment_failed', {
+    await deliverWebhook(ru, 'payment_intent.payment_failed', {
       match_id: mu.matchId,
       role: mu.role,
       cell,
@@ -638,7 +687,7 @@ if (mode === 'unconfigured') {
     )
 
     // ...and now Vic's clears, against a match that is already gone.
-    const late = await deliverWebhook(intentOf(rv), 'payment_intent.succeeded', {
+    const late = await deliverWebhook(rv, 'payment_intent.succeeded', {
       match_id: mu.matchId,
       role: mv.role,
       cell,
@@ -702,7 +751,7 @@ if (mode === 'unconfigured') {
     await failRefunds(500)
 
     // Cal's card declines, killing the match with Dot's intent still open.
-    await deliverWebhook(intentOf(rc), 'payment_intent.payment_failed', {
+    await deliverWebhook(rc, 'payment_intent.payment_failed', {
       match_id: mc.matchId,
       role: mc.role,
       cell,
@@ -710,7 +759,7 @@ if (mode === 'unconfigured') {
     await dot.expect('payment_failed')
 
     // ...and Dot's clears afterwards, into a refund Stripe will not make.
-    const held = await deliverWebhook(intentOf(rd), 'payment_intent.succeeded', {
+    const held = await deliverWebhook(rd, 'payment_intent.succeeded', {
       match_id: mc.matchId,
       role: md.role,
       cell,
@@ -754,12 +803,12 @@ if (mode === 'unconfigured') {
     await failRefunds(500)
 
     // Wes pays; Zed declines. Wes is owed a refund that Stripe will refuse.
-    await deliverWebhook(intentOf(rw), 'payment_intent.succeeded', {
+    await deliverWebhook(rw, 'payment_intent.succeeded', {
       match_id: mw.matchId,
       role: mw.role,
       cell,
     })
-    await deliverWebhook(intentOf(rz), 'payment_intent.payment_failed', {
+    await deliverWebhook(rz, 'payment_intent.payment_failed', {
       match_id: mw.matchId,
       role: mz.role,
       cell,
@@ -850,7 +899,7 @@ if (mode === 'unconfigured') {
 
     // Ada pays. Bex closes the tab before either of them confirms anything, so
     // the teardown asks for Ada's money back — and Stripe says no.
-    await deliverWebhook(intentOf(ra), 'payment_intent.succeeded', {
+    await deliverWebhook(ra, 'payment_intent.succeeded', {
       match_id: ma.matchId,
       role: ma.role,
       cell,
@@ -1002,7 +1051,7 @@ if (mode === 'unconfigured') {
 
     // Gia pays; Hal walks away before either confirms. Gia's refund is owed —
     // and refused.
-    await deliverWebhook(intentOf(rg), 'payment_intent.succeeded', {
+    await deliverWebhook(rg, 'payment_intent.succeeded', {
       match_id: mg.matchId,
       role: mg.role,
       cell,
@@ -1068,12 +1117,12 @@ if (mode === 'unconfigured') {
       )
       const ro = await orderer.expect('payment_required')
       const rr = await receiver.expect('payment_required')
-      await deliverWebhook(intentOf(ro), 'payment_intent.succeeded', {
+      await deliverWebhook(ro, 'payment_intent.succeeded', {
         match_id: mo.matchId,
         role: mo.role,
         cell: disputeCell,
       })
-      await deliverWebhook(intentOf(rr), 'payment_intent.succeeded', {
+      await deliverWebhook(rr, 'payment_intent.succeeded', {
         match_id: mo.matchId,
         role: mr.role,
         cell: disputeCell,

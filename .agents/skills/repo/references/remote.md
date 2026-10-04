@@ -99,6 +99,35 @@ shared defaults:
    repo that needs a *different* cloud account/region can also override the
    credentials here.
 
+**Keeping the per-repo file out of the tree (`REPO_REMOTE_ENV_FILE`).** Some
+repos forbid *any* `.env` in the checkout or its worktrees — worktrees are
+copied and rsynced constantly, and a gitignored file is one `git add -f` away
+from leaking. Set `REPO_REMOTE_ENV_FILE=<absolute path>` (e.g.
+`~/.config/<repo>/remote.env`) in the process environment or in the shared
+`remote.env`, and layer 2 becomes that file instead of `<repo>/.env`: it is
+loaded second (overriding the shared file) and it is where `up` writes the
+instance id back. A leading `~/` is expanded; an environment value wins over one
+set in the shared file. Setting it inside the per-repo file itself has no
+effect (that file has already been chosen by then).
+
+**Write-back never creates `<repo>/.env`.** After a successful provision `up`
+writes `REPO_REMOTE_INSTANCE_ID=<id>` into the resolved per-repo file only when
+`REPO_REMOTE_ENV_FILE` is set (that file, and its parent directory, are created
+if missing) or when `<repo>/.env` already exists (`--configure` creates it with
+an empty pin). Otherwise it logs the id with a hint to pin it and writes
+nothing — the instance still carries its `repo-remote=<name>` tag, so the next
+`up` finds it. `REPO_REMOTE_NO_WRITEBACK=1` disables the write-back entirely
+(the id is still logged).
+
+**Linked worktrees warn about an in-tree `.env`.** When the checkout is a
+linked git worktree (`git worktree add`, e.g. `.loom/worktrees/issue-N` —
+`git rev-parse --git-dir` differs from `--git-common-dir`) and
+`REPO_REMOTE_ENV_FILE` is not set, loading a pre-existing `<repo>/.env` or
+writing the instance id back into it prints a loud warning naming the file and
+recommending `REPO_REMOTE_ENV_FILE`. The read/write still happens; the primary
+checkout never warns. When operating by hand from a linked worktree, say the
+same thing to the user rather than silently updating that file.
+
 Variables are namespaced `REPO_REMOTE_*` so they don't collide with the app's
 own vars; the provisioning credentials use their standard cloud names. Either
 file may set any variable — the split below is the recommended home for each,
@@ -147,7 +176,8 @@ ACCOUNT_TOKEN_FILE_1=you-example.token    # relative to ~/.config/repo/tokens/
 # --- instance (hardware) ---
 REPO_REMOTE_INSTANCE_TYPE=m5.2xlarge      # gcp: machineType; a GPU family (g6e.*, g2-*) implies a GPU host
 REPO_REMOTE_INSTANCE_ID=                  # RECOMMENDED: pin the exact instance (ALWAYS per-repo).
-                                           # `up` writes it back here after a successful provision.
+                                           # `up` writes it back here after a successful provision
+                                           # (if this file exists, or REPO_REMOTE_ENV_FILE names it).
                                            # It is the expectation `repo-remote verify` checks the
                                            # live host against, and the only handle that survives a
                                            # stop/start unambiguously — see "Stale SSH aliases and
@@ -183,7 +213,8 @@ Ubuntu LTS, no GPU, 120-minute idle shutdown.
 
 **Pin `REPO_REMOTE_INSTANCE_ID` — treat it as the default, not an option.** Any
 session expected to outlive a stop/start cycle should carry an explicit pin in
-the repo `.env` (a successful `up` writes one back for you). Unpinned, this
+the per-repo config file (a successful `up` writes one back for you when that
+file exists or `REPO_REMOTE_ENV_FILE` names it). Unpinned, this
 tooling re-derives its target from the never-expiring `repo-remote=<name>`
 tag — the same stale handle the fleet-marker guard exists to distrust — and
 `repo-remote verify` has no explicit expectation to check the live host against.
@@ -228,7 +259,9 @@ machine.
 By default it writes **credentials to the shared `~/.config/repo/remote.env`**
 (so you set them up once for every repo) and **machine settings to the repo's
 `.env`**. Offer to put credentials in the repo `.env` instead only if the user
-wants a repo-specific account/region.
+wants a repo-specific account/region. If `REPO_REMOTE_ENV_FILE` is set (see
+above), every "repo `.env`" below means that file instead — write machine
+settings there and never create an in-tree `.env`.
 
 1. **Protect both files first.** Before writing any credential: ensure the
    repo's `.env` is gitignored (add it and say so if not); and create
@@ -291,15 +324,29 @@ region/zone) without printing secret values.
 
 ### 2. Authenticate the provider with the resolved credentials
 
-Load the shared file first, then the repo `.env` on top, into the environment
+Load the shared file first, then the per-repo file (`REPO_REMOTE_ENV_FILE` if
+set, else the repo `.env`) on top, into the environment
 for the provisioning calls only — scoped to this command, never persisted to
-the VM. Repo values override shared ones because the repo file is sourced last:
+the VM. Repo values override shared ones because the repo file is sourced last.
+`REPO_REMOTE_ENV_FILE` itself resolves the other way round — the caller's
+environment value is captured *before* the shared file is sourced, so it wins
+over one the shared file sets — and a leading `~`/`~/` is expanded explicitly
+(the shell does not expand it inside a quoted or environment-supplied value):
 
 ```bash
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/repo/remote.env"
+ENV_FILE_FROM_ENV="${REPO_REMOTE_ENV_FILE:-}"                  # capture BEFORE sourcing
 set -a
 [ -f "$CONFIG_HOME" ] && . "$CONFIG_HOME"                      # shared cloud creds + defaults
-[ -f "$(git rev-parse --show-toplevel)/.env" ] && . "$(git rev-parse --show-toplevel)/.env"  # per-repo (overrides)
+set +a
+# environment value first, then whatever the shared file set, else <git-root>/.env
+REPO_FILE="${ENV_FILE_FROM_ENV:-${REPO_REMOTE_ENV_FILE:-$(git rev-parse --show-toplevel)/.env}}"
+case "$REPO_FILE" in                                           # expand a leading ~ / ~/
+  "~")   REPO_FILE="$HOME" ;;
+  "~/"*) REPO_FILE="$HOME/${REPO_FILE#\~/}" ;;
+esac
+set -a
+[ -f "$REPO_FILE" ] && . "$REPO_FILE"                          # per-repo (overrides)
 set +a
 ```
 
@@ -478,7 +525,7 @@ landed before it ever calls `run-instances`:
    unrecognized error) fails **immediately** instead of burning the window on
    something waiting cannot fix. The retry re-runs only the `ssh` probe — it
    never relaunches or restarts the instance — and the instance id is written
-   back to the repo `.env` *before* the first attempt, so even a readiness
+   back to the per-repo config file *before* the first attempt, so even a readiness
    timeout leaves the created box addressable rather than orphaned. Raise
    `REPO_REMOTE_SSH_READY_TIMEOUT` for an image that is simply slow to boot.
 
@@ -751,7 +798,8 @@ the address.
 - **Pin `REPO_REMOTE_INSTANCE_ID`.** This is the recommended default for any
   session expected to survive a stop/start cycle, not merely one option among
   several — see the configuration walkthrough above. `up` writes it back to the
-  repo `.env` for you after a successful provision. A pinned id makes the
+  per-repo config file for you after a successful provision (see
+  `REPO_REMOTE_ENV_FILE` above for when it does and does not). A pinned id makes the
   expectation *explicit* (and makes `verify` need no cloud call at all, so it is
   cheap enough to run before every session); an unpinned run re-derives the
   expectation from the same never-expiring `repo-remote=<name>` tag the
@@ -792,9 +840,12 @@ Detect that specific error and print the exact remediation instead of the raw
 message: **Service Quotas → EC2 → quota code `L-DB2E81BA`** → request a limit
 ≥ the instance's vCPU count, then retry once approved.
 
-**After a successful create, write the new ID back to the repo's `.env`** (the
-git root, never the shared file — the instance handle is per-repo) so the next
-run reuses it automatically:
+**After a successful create, write the new ID back to the per-repo config
+file** — `REPO_REMOTE_ENV_FILE` if set, else the repo's `.env` at the git root;
+never the shared file, the instance handle is per-repo — so the next run reuses
+it automatically. Never *create* `<repo>/.env` for this: if neither the override
+nor an existing `.env` is present (or `REPO_REMOTE_NO_WRITEBACK=1`), report the
+id and suggest pinning it instead:
 
 ```
 REPO_REMOTE_INSTANCE_ID=<new-id>

@@ -522,6 +522,15 @@ export const SCENARIOS = {
       'back from the sign-in round trip, the buyer takes the seat they were taking with the ' +
       'deal and sauces they chose — placed by the server, since a precise fix is not carried',
   },
+  e2ePoolTeardownRace: {
+    lane: 'e2e',
+    market: 'serverResolved',
+    runner: 'test:e2e',
+    fixtures: [],
+    what:
+      'a refused-upgrade probe that answers after sign-out is not written onto the screen — ' +
+      'the socket is a stand-in that never opens, so nothing reaches a Durable Object (#189)',
+  },
   demoCheckPair: {
     lane: 'payments',
     market: 'serverResolved',

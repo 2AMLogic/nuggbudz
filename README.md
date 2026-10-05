@@ -176,10 +176,12 @@ pnpm lint
 ## Deploy
 
 Live: **https://nuggbudz.com** (also `www.nuggbudz.com`, and the
-`*.workers.dev` name). Both custom domains are attached to the Worker outside
-this repo: `wrangler.jsonc` carries no `routes` block, so `pnpm run deploy`
-publishes the Worker but does not provision the DNS records or the certificate.
-The zone has to be on the same Cloudflare account as the Worker.
+`*.workers.dev` name). Both custom domains are declared in `wrangler.jsonc` as
+Custom Domain `routes`, beside an explicit `workers_dev: true` that keeps the
+fallback name, so `pnpm run deploy` and `pnpm run deploy:demo` attach them and
+Wrangler manages their DNS records and certificate. The `nuggbudz.com` zone must
+belong to the Cloudflare account doing the deploy; on an account that does not
+own it, the deploy fails rather than publishing without the domains.
 
 ```bash
 wrangler secret put GOOGLE_CLIENT_ID              # once per environment

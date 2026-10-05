@@ -14,6 +14,17 @@
     "run_worker_first": ["/api/*"]
   },
   "observability": { "enabled": true },
+  // Declaring `routes` turns the *.workers.dev name off by default, and that
+  // name is the fallback if a custom domain's DNS or certificate is ever broken.
+  "workers_dev": true,
+  // Wrangler creates the DNS records and certificate for these on deploy, and
+  // fails the deploy when the deploying account does not own the zone — which is
+  // the guard: the attachment no longer lives only on the dashboard (#78).
+  // test/deploy-config.test.ts pins both entries and the line above.
+  "routes": [
+    { "pattern": "nuggbudz.com", "custom_domain": true },
+    { "pattern": "www.nuggbudz.com", "custom_domain": true }
+  ],
   // One Durable Object per geohash cell. The cell is the *shard*, not the
   // market: all pairing for a region happens inside a single-threaded object,
   // which is what makes "two buyers claim the same box" impossible by design.

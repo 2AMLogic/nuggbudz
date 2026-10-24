@@ -43,3 +43,9 @@ minimumReleaseAgeExclude:
   - '@cloudflare/vite-plugin'
   - miniflare
   - wrangler
+# Undici (#194). Every miniflare release, including the newest beta, pins an
+# Undici 7.x below 7.30.1, the first release fixing GHSA-xjj6-f33q-929c,
+# GHSA-4qv8-2p9j-2685 and GHSA-f72v-6w45-q472. No parent update can reach it,
+# so this lifts only the affected 7.x range. Drop it once miniflare pins 7.30.1+.
+overrides:
+  'undici@>=7 <7.30.1': '7.30.1'
